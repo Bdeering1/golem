@@ -1,0 +1,25 @@
+[project]
+name = "kairos"
+version = "0.1.0"
+description = "Run and pick up Claude tasks"
+requires-python = ">=3.14"
+dependencies = []
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["kairos"]
+
+[project.scripts]
+kairos = "kairos:main"
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.411",
+    "ruff>=0.16.2",
+]
+
+[tool.pyright]
+typeCheckingMode = "strict"
