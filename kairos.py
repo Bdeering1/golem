@@ -1,6 +1,7 @@
 import argparse
 import json
 import subprocess
+import sys
 import uuid
 from pathlib import Path
 
@@ -22,7 +23,7 @@ def session_id(task_id: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"kairos:{task_id}"))
 
 
-def run(task_id: str, prompt: str) -> int:
+def run(task_id: str, prompt: str, *agent_args: str) -> int:
     tasks = load_tasks()
     if task_id in tasks:
         raise SystemExit(f"kairos: task already exists: {task_id}")
@@ -31,20 +32,29 @@ def run(task_id: str, prompt: str) -> int:
     tasks[task_id] = cwd
     save_tasks(tasks)
     return subprocess.run(
-        ["claude", "--session-id", session_id(task_id), "--print", prompt], cwd=cwd
+        ["claude", "--session-id", session_id(task_id), "--print", prompt, *agent_args],
+        cwd=cwd,
     ).returncode
 
 
-def pickup(task_id: str) -> int:
+def pickup(task_id: str, *agent_args: str) -> int:
     tasks = load_tasks()
     if task_id not in tasks:
         raise SystemExit(f"kairos: task not found: {task_id}")
     return subprocess.run(
-        ["claude", "--resume", session_id(task_id)], cwd=tasks[task_id]
+        ["claude", "--resume", session_id(task_id), *agent_args],
+        cwd=tasks[task_id],
     ).returncode
 
 
 def main() -> int:
+    kairos_args = sys.argv[1:]
+    agent_args: list[str] = []
+    if "--" in kairos_args:
+        separator_index = kairos_args.index("--")
+        agent_args = kairos_args[separator_index + 1 :]
+        kairos_args = kairos_args[:separator_index]
+
     parser = argparse.ArgumentParser(prog="kairos")
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -56,16 +66,16 @@ def main() -> int:
 
     pickup_command = commands.add_parser("pickup")
     pickup_command.add_argument("id")
-    arguments = parser.parse_args()
+    arguments = parser.parse_args(kairos_args)
 
     if arguments.command == "pickup":
-        return pickup(arguments.id)
+        return pickup(arguments.id, *agent_args)
     prompt_text = (
         Path(arguments.file).read_text(encoding="utf-8")
         if arguments.file
         else arguments.prompt
     )
-    return run(arguments.id, prompt_text)
+    return run(arguments.id, prompt_text, *agent_args)
 
 
 if __name__ == "__main__":
