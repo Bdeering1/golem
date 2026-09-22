@@ -2,22 +2,22 @@ import argparse
 import fcntl
 import json
 import os
-import select
 import shlex
 import subprocess
 import sys
 import tempfile
 import uuid
-from collections.abc import Callable
+from collections.abc import Generator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from time import monotonic
 from typing import Any, cast
+
 
 LEDGER = Path(__file__).resolve().parent / "tasks.json"
 LOCK = LEDGER.with_suffix(".lock")
-SCHEDULES = LEDGER.parent / "schedules"
-USAGE_TIMEOUT_SECONDS = 10
+USAGE_ERROR = "kairos: usage lookup unavailable"
+USAGE_TIMEOUT_SECONDS = 30
 
 
 def load_tasks() -> dict[str, Any]:
@@ -42,40 +42,21 @@ def save_tasks(tasks: dict[str, Any]) -> None:
             os.unlink(temporary_name)
 
 
-def update_tasks(change: Callable[[dict[str, Any]], None]) -> None:
+@contextmanager
+def locked_tasks() -> Generator[dict[str, Any]]:
     LOCK.touch(exist_ok=True)
     with LOCK.open("r+", encoding="utf-8") as lock_file:
         fcntl.flock(lock_file, fcntl.LOCK_EX)
-        try:
-            tasks = load_tasks()
-            change(tasks)
-            save_tasks(tasks)
-        finally:
-            fcntl.flock(lock_file, fcntl.LOCK_UN)
-
-
-def schedule_payload(
-    task_id: str,
-    prompt: str,
-    agent_args: tuple[str, ...],
-    cwd: str,
-) -> dict[str, Any]:
-    return {
-        "id": task_id,
-        "prompt": prompt,
-        "agent_args": list(agent_args),
-        "cwd": cwd,
-        "created_at": datetime.now(UTC).isoformat(),
-    }
+        tasks = load_tasks()
+        yield tasks
+        save_tasks(tasks)
 
 
 def reserve_task(task_id: str, record: Any) -> None:
-    def add_task(tasks: dict[str, Any]) -> None:
+    with locked_tasks() as tasks:
         if task_id in tasks:
             raise SystemExit(f"kairos: task already exists: {task_id}")
         tasks[task_id] = record
-
-    update_tasks(add_task)
 
 
 def session_id(task_id: str) -> str:
@@ -124,84 +105,23 @@ def at_time(when: datetime) -> str:
     return local_time.replace(second=0, microsecond=0).strftime("%Y%m%d%H%M.%S")
 
 
-def send_control_request(
-    process: subprocess.Popen[str], request_id: str, request: dict[str, Any]
-) -> None:
-    if process.stdin is None:
-        raise SystemExit("kairos: usage lookup unavailable: Claude input is closed")
-    frame = {"type": "control_request", "request_id": request_id, "request": request}
-    process.stdin.write(json.dumps(frame, separators=(",", ":")) + "\n")
-    process.stdin.flush()
-
-
-def control_response(process: subprocess.Popen[str], request_id: str) -> dict[str, object]:
-    if process.stdout is None:
-        raise SystemExit("kairos: usage lookup unavailable: Claude output is closed")
-    deadline = monotonic() + USAGE_TIMEOUT_SECONDS
-    while True:
-        remaining = deadline - monotonic()
-        if remaining <= 0:
-            raise SystemExit("kairos: usage lookup unavailable: Claude timed out")
-        ready, _, _ = select.select([process.stdout], [], [], remaining)
-        if not ready:
-            raise SystemExit("kairos: usage lookup unavailable: Claude timed out")
-        line = process.stdout.readline()
-        if not line:
-            raise SystemExit("kairos: usage lookup unavailable: Claude closed the stream")
-        try:
-            frame_value: object = json.loads(line)
-        except json.JSONDecodeError as error:
-            raise SystemExit("kairos: usage lookup unavailable: invalid Claude response") from error
-        if not isinstance(frame_value, dict):
-            raise SystemExit("kairos: usage lookup unavailable: invalid Claude response")
-        frame = cast(dict[str, object], frame_value)
-        response_value = frame.get("response")
-        if not isinstance(response_value, dict):
-            continue
-        response = cast(dict[str, object], response_value)
-        if response.get("request_id") != request_id:
-            continue
-        if response.get("subtype") != "success":
-            raise SystemExit("kairos: usage lookup unavailable: Claude rejected the request")
-        payload_value = response.get("response")
-        if not isinstance(payload_value, dict):
-            raise SystemExit("kairos: usage lookup unavailable: missing response payload")
-        return cast(dict[str, object], payload_value)
-
-
-def close_usage_process(process: subprocess.Popen[str]) -> None:
-    if process.stdin is not None:
-        try:
-            process.stdin.close()
-        except OSError:
-            pass
-    if process.poll() is not None:
-        return
-    try:
-        process.wait(timeout=USAGE_TIMEOUT_SECONDS)
-    except subprocess.TimeoutExpired:
-        try:
-            process.terminate()
-        except ProcessLookupError:
-            return
-        try:
-            process.wait(timeout=USAGE_TIMEOUT_SECONDS)
-        except subprocess.TimeoutExpired:
-            try:
-                process.kill()
-            except ProcessLookupError:
-                return
-            try:
-                process.wait(timeout=USAGE_TIMEOUT_SECONDS)
-            except subprocess.TimeoutExpired:
-                pass
-
-
 def next_reset_time() -> datetime:
+    requests = (
+        {
+            "type": "control_request",
+            "request_id": "init",
+            "request": {"subtype": "initialize"},
+        },
+        {
+            "type": "control_request",
+            "request_id": "usage",
+            "request": {"subtype": "get_usage", "skip_behaviors": True},
+        },
+    )
     child_environment = os.environ.copy()
     child_environment.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
     try:
-        process = subprocess.Popen(
+        result = subprocess.run(
             [
                 "claude",
                 "-p",
@@ -214,58 +134,43 @@ def next_reset_time() -> datetime:
                 "--no-session-persistence",
                 "--verbose",
             ],
+            input="".join(json.dumps(request) + "\n" for request in requests),
             env=child_environment,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            capture_output=True,
             text=True,
+            timeout=USAGE_TIMEOUT_SECONDS,
+            check=False,
         )
-    except OSError as error:
-        raise SystemExit(f"kairos: usage lookup unavailable: {error}") from error
-    try:
-        send_control_request(process, "init", {"subtype": "initialize"})
-        control_response(process, "init")
-        send_control_request(
-            process,
-            "usage",
-            {"subtype": "get_usage", "skip_behaviors": True},
+        frames = [json.loads(line) for line in result.stdout.splitlines()]
+        responses = {
+            frame["response"]["request_id"]: frame["response"]
+            for frame in frames
+            if frame["type"] == "control_response"
+        }
+        initialized = responses["init"]["subtype"] == "success"
+        usage = responses["usage"]
+        reset_time = datetime.fromisoformat(
+            usage["response"]["rate_limits"]["five_hour"]["resets_at"]
         )
-        usage = control_response(process, "usage")
-    except OSError as error:
-        raise SystemExit("kairos: usage lookup unavailable: Claude closed the stream") from error
-    finally:
-        close_usage_process(process)
-
-    if usage.get("rate_limits_available") is not True:
-        raise SystemExit("kairos: usage lookup unavailable: rate limits are unavailable")
-    rate_limits = usage.get("rate_limits")
-    if not isinstance(rate_limits, dict):
-        raise SystemExit("kairos: usage lookup unavailable: missing rate limits")
-    rate_limit_values = cast(dict[str, object], rate_limits)
-    five_hour = rate_limit_values.get("five_hour")
-    if not isinstance(five_hour, dict):
-        raise SystemExit("kairos: usage lookup unavailable: missing five-hour reset")
-    five_hour_values = cast(dict[str, object], five_hour)
-    reset_value = five_hour_values.get("resets_at")
-    if not isinstance(reset_value, str):
-        raise SystemExit("kairos: usage lookup unavailable: invalid five-hour reset")
-    try:
-        reset_time = datetime.fromisoformat(reset_value)
-    except ValueError as error:
-        raise SystemExit("kairos: usage lookup unavailable: invalid five-hour reset") from error
-    if reset_time.tzinfo is None or reset_time.utcoffset() is None:
-        raise SystemExit("kairos: usage lookup unavailable: invalid five-hour reset")
-    if reset_time <= datetime.now(UTC):
-        raise SystemExit("kairos: usage lookup unavailable: five-hour reset has passed")
-    return reset_time
-
-
-def write_payload(schedule_id: str, record: dict[str, Any]) -> Path:
-    SCHEDULES.mkdir(mode=0o700, exist_ok=True)
-    payload_path = SCHEDULES / f"{schedule_id}.json"
-    payload_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
-    payload_path.chmod(0o600)
-    return payload_path
+        if (
+            result.returncode
+            or not initialized
+            or usage["subtype"] != "success"
+            or usage["response"]["rate_limits_available"] is not True
+            or reset_time.tzinfo is None
+            or reset_time <= datetime.now(UTC)
+        ):
+            raise ValueError
+        return reset_time
+    except (
+        json.JSONDecodeError,
+        KeyError,
+        OSError,
+        subprocess.TimeoutExpired,
+        TypeError,
+        ValueError,
+    ) as error:
+        raise SystemExit(USAGE_ERROR) from error
 
 
 def schedule_at(
@@ -274,27 +179,23 @@ def schedule_at(
     agent_args: tuple[str, ...],
     when: datetime,
 ) -> int:
-    script_path = Path(__file__).resolve()
-    interpreter_path = Path(sys.executable).resolve()
-    if not script_path.is_file() or not interpreter_path.is_file():
-        raise SystemExit("kairos: cannot locate the internal scheduler command")
-
-    cwd = str(Path.cwd())
-    schedule_id = str(uuid.uuid4())
-    payload = schedule_payload(task_id, prompt, agent_args, cwd)
-    payload_path = write_payload(schedule_id, payload)
-    try:
-        reserve_task(
-            task_id,
-            {"schedule_id": schedule_id, "cwd": cwd, "status": "scheduled"},
-        )
-    except BaseException:
-        payload_path.unlink(missing_ok=True)
-        raise
+    record = {
+        "cwd": str(Path.cwd()),
+        "prompt": prompt,
+        "agent_args": list(agent_args),
+        "due_at": when.isoformat(),
+        "status": "scheduled",
+    }
+    reserve_task(task_id, record)
 
     command = " ".join(
         shlex.quote(part)
-        for part in (str(interpreter_path), str(script_path), "_execute", schedule_id)
+        for part in (
+            str(Path(sys.executable).resolve()),
+            str(Path(__file__).resolve()),
+            "_execute",
+            task_id,
+        )
     )
     try:
         result = subprocess.run(
@@ -304,116 +205,59 @@ def schedule_at(
             text=True,
             check=False,
         )
-    except OSError as error:
-        message = str(error)
-    else:
         if result.returncode == 0:
             return 0
         message = result.stderr.strip() or result.stdout.strip() or "at failed"
+    except OSError as error:
+        message = str(error)
 
-    def remove_task(tasks: dict[str, Any]) -> None:
-        task = tasks.get(task_id)
-        if not isinstance(task, dict):
-            return
-        task_record = cast(dict[str, Any], task)
-        if task_record.get("schedule_id") == schedule_id:
+    with locked_tasks() as tasks:
+        if tasks.get(task_id) == record:
             del tasks[task_id]
-
-    update_tasks(remove_task)
-    payload_path.unlink(missing_ok=True)
     raise SystemExit(f"kairos: could not schedule task: {message}")
 
 
-def execute_schedule(schedule_id: str) -> int:
-    try:
-        canonical_schedule_id = str(uuid.UUID(schedule_id))
-    except ValueError as error:
-        raise SystemExit(f"kairos: invalid schedule id: {schedule_id}") from error
-    if schedule_id != canonical_schedule_id:
-        raise SystemExit(f"kairos: invalid schedule id: {schedule_id}")
-
-    payload_path = SCHEDULES / f"{schedule_id}.json"
-    try:
-        payload = cast(dict[str, object], json.loads(payload_path.read_text(encoding="utf-8")))
-    except FileNotFoundError as error:
-        raise SystemExit(f"kairos: schedule payload not found: {schedule_id}") from error
-
-    task_id = payload.get("id")
-    prompt = payload.get("prompt")
-    agent_args_value = payload.get("agent_args")
-    cwd = payload.get("cwd")
-    if (
-        not isinstance(task_id, str)
-        or not isinstance(prompt, str)
-        or not isinstance(agent_args_value, list)
-        or not all(
-            isinstance(agent_arg, str)
-            for agent_arg in cast(list[object], agent_args_value)
-        )
-        or not isinstance(cwd, str)
-    ):
-        raise SystemExit(f"kairos: invalid schedule payload: {schedule_id}")
-    agent_args = cast(list[str], agent_args_value)
-    claimed = False
-
-    def claim_task(tasks: dict[str, Any]) -> None:
-        nonlocal claimed
+def execute_schedule(task_id: str) -> int:
+    with locked_tasks() as tasks:
         task = tasks.get(task_id)
         if not isinstance(task, dict):
-            return
+            return 0
         task_record = cast(dict[str, Any], task)
-        if (
-            task_record.get("schedule_id") != schedule_id
-            or task_record.get("status") != "scheduled"
-        ):
-            return
+        if task_record.get("status") != "scheduled":
+            return 0
         task_record["status"] = "running"
-        task_record["started_at"] = datetime.now(UTC).isoformat()
-        claimed = True
+        cwd = cast(str, task_record["cwd"])
+        prompt = cast(str, task_record["prompt"])
+        agent_args = cast(list[str], task_record["agent_args"])
 
-    update_tasks(claim_task)
-    if not claimed:
-        return 0
-
-    log_path = SCHEDULES / f"{schedule_id}.log"
     child_environment = os.environ.copy()
     child_environment.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
-    with log_path.open("w", encoding="utf-8") as log_file:
-        try:
-            result = subprocess.run(
-                [
-                    "claude",
-                    "--session-id",
-                    session_id(task_id),
-                    "--print",
-                    prompt,
-                    *agent_args,
-                ],
-                cwd=cwd,
-                env=child_environment,
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
-                check=False,
-            )
-            returncode = result.returncode
-        except OSError as error:
-            print(f"kairos: could not execute scheduled task: {error}", file=log_file)
-            returncode = 127
-    log_path.chmod(0o600)
+    try:
+        returncode = subprocess.run(
+            [
+                "claude",
+                "--session-id",
+                session_id(task_id),
+                "--print",
+                prompt,
+                *agent_args,
+            ],
+            cwd=cwd,
+            env=child_environment,
+            check=False,
+        ).returncode
+    except OSError as error:
+        print(f"kairos: could not execute scheduled task: {error}", file=sys.stderr)
+        returncode = 127
 
-    def record_outcome(tasks: dict[str, Any]) -> None:
+    with locked_tasks() as tasks:
         task = tasks.get(task_id)
         if not isinstance(task, dict):
-            return
+            return returncode
         task_record = cast(dict[str, Any], task)
-        if task_record.get("schedule_id") != schedule_id:
-            return
-        task_record["status"] = "completed" if returncode == 0 else "failed"
-        task_record["completed_at"] = datetime.now(UTC).isoformat()
-        task_record["returncode"] = returncode
-        task_record["log_path"] = str(log_path)
-
-    update_tasks(record_outcome)
+        if task_record.get("status") == "running":
+            task_record["status"] = "completed" if returncode == 0 else "failed"
+            task_record["returncode"] = returncode
     return returncode
 
 
@@ -440,11 +284,11 @@ def main() -> int:
     pickup_command = commands.add_parser("pickup")
     pickup_command.add_argument("id")
     execute_command = commands.add_parser("_execute", help=argparse.SUPPRESS)
-    execute_command.add_argument("schedule_id")
+    execute_command.add_argument("id")
     arguments = parser.parse_args(kairos_args)
 
     if arguments.command == "_execute":
-        return execute_schedule(arguments.schedule_id)
+        return execute_schedule(arguments.id)
     if arguments.command == "pickup":
         return pickup(arguments.id, *agent_args)
     prompt_text = (
