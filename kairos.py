@@ -15,7 +15,8 @@ from typing import Any, cast
 
 
 LEDGER = Path(__file__).resolve().parent / "tasks.json"
-LOCK = LEDGER.with_suffix(".lock")
+LOCK_PATH = LEDGER.with_suffix(".lock")
+STATUS_SCHEDULED = "scheduled"
 USAGE_ERROR = "kairos: usage lookup unavailable"
 USAGE_TIMEOUT_SECONDS = 30
 
@@ -44,8 +45,8 @@ def save_tasks(tasks: dict[str, Any]) -> None:
 
 @contextmanager
 def locked_tasks() -> Generator[dict[str, Any]]:
-    LOCK.touch(exist_ok=True)
-    with LOCK.open("r+", encoding="utf-8") as lock_file:
+    LOCK_PATH.touch(exist_ok=True)
+    with LOCK_PATH.open("r+", encoding="utf-8") as lock_file:
         fcntl.flock(lock_file, fcntl.LOCK_EX)
         tasks = load_tasks()
         yield tasks
@@ -63,9 +64,7 @@ def session_id(task_id: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"kairos:{task_id}"))
 
 
-def run(task_id: str, prompt: str, *agent_args: str) -> int:
-    cwd = str(Path.cwd())
-    reserve_task(task_id, cwd)
+def run_claude(task_id: str, cwd: str, prompt: str, *agent_args: str) -> int:
     return subprocess.run(
         ["claude", "--session-id", session_id(task_id), "--print", prompt, *agent_args],
         cwd=cwd,
@@ -73,11 +72,19 @@ def run(task_id: str, prompt: str, *agent_args: str) -> int:
     ).returncode
 
 
+def run(task_id: str, prompt: str, *agent_args: str) -> int:
+    cwd = str(Path.cwd())
+    reserve_task(task_id, cwd)
+    return run_claude(task_id, cwd, prompt, *agent_args)
+
+
 def pickup(task_id: str, *agent_args: str) -> int:
     tasks = load_tasks()
     if task_id not in tasks:
         raise SystemExit(f"kairos: task not found: {task_id}")
     task = tasks[task_id]
+    if not isinstance(task, str) and task["status"] == STATUS_SCHEDULED:
+        raise SystemExit(f"kairos: task has not started: {task_id}")
     cwd = task if isinstance(task, str) else task["cwd"]
     return subprocess.run(
         ["claude", "--resume", session_id(task_id), *agent_args],
@@ -149,17 +156,18 @@ def next_reset_time() -> datetime:
         }
         initialized = responses["init"]["subtype"] == "success"
         usage = responses["usage"]
-        reset_time = datetime.fromisoformat(
-            usage["response"]["rate_limits"]["five_hour"]["resets_at"]
-        )
         if (
             result.returncode
             or not initialized
             or usage["subtype"] != "success"
             or usage["response"]["rate_limits_available"] is not True
-            or reset_time.tzinfo is None
-            or reset_time <= datetime.now(UTC)
         ):
+            raise ValueError
+        five_hour_limit = usage["response"]["rate_limits"]["five_hour"]
+        if five_hour_limit is None or five_hour_limit["resets_at"] is None:
+            raise SystemExit("kairos: no active usage window")
+        reset_time = datetime.fromisoformat(five_hour_limit["resets_at"])
+        if reset_time.tzinfo is None or reset_time <= datetime.now(UTC):
             raise ValueError
         return reset_time
     except (
@@ -184,14 +192,14 @@ def schedule_at(
         "prompt": prompt,
         "agent_args": list(agent_args),
         "due_at": when.isoformat(),
-        "status": "scheduled",
+        "status": STATUS_SCHEDULED,
     }
     reserve_task(task_id, record)
 
     command = " ".join(
         shlex.quote(part)
         for part in (
-            str(Path(sys.executable).resolve()),
+            str(Path(sys.executable).absolute()),
             str(Path(__file__).resolve()),
             "_execute",
             task_id,
@@ -217,35 +225,21 @@ def schedule_at(
     raise SystemExit(f"kairos: could not schedule task: {message}")
 
 
-def execute_schedule(task_id: str) -> int:
+def execute_scheduled_task(task_id: str) -> int:
     with locked_tasks() as tasks:
         task = tasks.get(task_id)
         if not isinstance(task, dict):
             return 0
         task_record = cast(dict[str, Any], task)
-        if task_record.get("status") != "scheduled":
+        if task_record.get("status") != STATUS_SCHEDULED:
             return 0
         task_record["status"] = "running"
         cwd = cast(str, task_record["cwd"])
         prompt = cast(str, task_record["prompt"])
         agent_args = cast(list[str], task_record["agent_args"])
 
-    child_environment = os.environ.copy()
-    child_environment.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
     try:
-        returncode = subprocess.run(
-            [
-                "claude",
-                "--session-id",
-                session_id(task_id),
-                "--print",
-                prompt,
-                *agent_args,
-            ],
-            cwd=cwd,
-            env=child_environment,
-            check=False,
-        ).returncode
+        returncode = run_claude(task_id, cwd, prompt, *agent_args)
     except OSError as error:
         print(f"kairos: could not execute scheduled task: {error}", file=sys.stderr)
         returncode = 127
@@ -270,7 +264,9 @@ def main() -> int:
         kairos_args = kairos_args[:separator_index]
 
     parser = argparse.ArgumentParser(prog="kairos")
-    commands = parser.add_subparsers(dest="command", required=True)
+    commands = parser.add_subparsers(
+        dest="command", required=True, metavar="{run,pickup}"
+    )
 
     run_command = commands.add_parser("run")
     run_command.add_argument("id")
@@ -283,12 +279,12 @@ def main() -> int:
 
     pickup_command = commands.add_parser("pickup")
     pickup_command.add_argument("id")
-    execute_command = commands.add_parser("_execute", help=argparse.SUPPRESS)
+    execute_command = commands.add_parser("_execute")
     execute_command.add_argument("id")
     arguments = parser.parse_args(kairos_args)
 
     if arguments.command == "_execute":
-        return execute_schedule(arguments.id)
+        return execute_scheduled_task(arguments.id)
     if arguments.command == "pickup":
         return pickup(arguments.id, *agent_args)
     prompt_text = (
