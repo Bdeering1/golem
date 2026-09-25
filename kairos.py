@@ -280,7 +280,7 @@ def main() -> int:
     prompt.add_argument("prompt", nargs="?")
     prompt.add_argument("--file")
     schedule = run_command.add_mutually_exclusive_group()
-    schedule.add_argument("--next-reset", action="store_true")
+    schedule.add_argument("-r", "--next-reset", action="store_true")
     schedule.add_argument(
         "--at",
         metavar="TIME",
