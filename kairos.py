@@ -2,6 +2,7 @@ import argparse
 import fcntl
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -12,7 +13,6 @@ from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
-
 
 LEDGER = Path(__file__).resolve().parent / "tasks.json"
 LOCK_PATH = LEDGER.with_suffix(".lock")
@@ -94,22 +94,23 @@ def pickup(task_id: str, *agent_args: str) -> int:
 
 
 def scheduled_time(value: str) -> datetime:
-    try:
-        when = datetime.fromisoformat(value)
-    except ValueError as error:
-        raise SystemExit(f"kairos: invalid --at time: {value}") from error
-    if when.tzinfo is None or when.utcoffset() is None:
-        raise SystemExit("kairos: --at requires an explicit UTC offset")
-    if when <= datetime.now(UTC):
-        raise SystemExit("kairos: --at time must be in the future")
-    return when
-
-
-def at_time(when: datetime) -> str:
-    local_time = when.astimezone()
-    if local_time.second or local_time.microsecond:
-        local_time += timedelta(minutes=1)
-    return local_time.replace(second=0, microsecond=0).strftime("%Y%m%d%H%M.%S")
+    match = re.fullmatch(
+        r"(1[0-2]|[1-9])(?::([0-5][0-9]))?(am|pm)( tomorrow)?", value.lower()
+    )
+    if match is None:
+        raise SystemExit('kairos: --at expects a time like 9pm or "8:30am tomorrow"')
+    hour, minute, period, tomorrow = match.groups()
+    now = datetime.now(UTC)
+    local_time = now.astimezone().replace(tzinfo=None)
+    when = local_time.replace(
+        hour=int(hour) % 12 + (12 if period == "pm" else 0),
+        minute=int(minute or 0),
+        second=0,
+        microsecond=0,
+    )
+    if tomorrow or when.astimezone() <= now:
+        when += timedelta(days=1)
+    return when.astimezone()
 
 
 def next_reset_time() -> datetime:
@@ -187,6 +188,10 @@ def schedule_at(
     agent_args: tuple[str, ...],
     when: datetime,
 ) -> int:
+    when = when.astimezone(UTC)
+    if when.second or when.microsecond:
+        when += timedelta(minutes=1)
+    when = when.replace(second=0, microsecond=0).astimezone()
     record = {
         "cwd": str(Path.cwd()),
         "prompt": prompt,
@@ -207,13 +212,14 @@ def schedule_at(
     )
     try:
         result = subprocess.run(
-            ["at", "-t", at_time(when)],
+            ["at", "-t", when.strftime("%Y%m%d%H%M.%S")],
             input=f"{command}\n",
             capture_output=True,
             text=True,
             check=False,
         )
         if result.returncode == 0:
+            print(f"kairos: scheduled {task_id} for {when:%Y-%m-%d %H:%M %Z %z}")
             return 0
         message = result.stderr.strip() or result.stdout.strip() or "at failed"
     except OSError as error:
@@ -275,7 +281,11 @@ def main() -> int:
     prompt.add_argument("--file")
     schedule = run_command.add_mutually_exclusive_group()
     schedule.add_argument("--next-reset", action="store_true")
-    schedule.add_argument("--at")
+    schedule.add_argument(
+        "--at",
+        metavar="TIME",
+        help='local time, e.g. 9pm or "8:30am tomorrow"; rolls forward if passed',
+    )
 
     pickup_command = commands.add_parser("pickup")
     pickup_command.add_argument("id")
