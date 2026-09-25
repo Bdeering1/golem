@@ -34,3 +34,4 @@ coverage.xml
 
 # task ledger
 tasks.json
+tasks.lock
