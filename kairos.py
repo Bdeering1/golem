@@ -8,11 +8,13 @@ import subprocess
 import sys
 import tempfile
 import uuid
-from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
 
 LEDGER = Path(__file__).resolve().parent / "tasks.json"
 LOCK_PATH = LEDGER.with_suffix(".lock")
@@ -33,14 +35,15 @@ def save_tasks(tasks: dict[str, Any]) -> None:
         prefix=f".{LEDGER.name}.",
         text=True,
     )
+    temporary_path = Path(temporary_name)
     try:
         with os.fdopen(file_descriptor, "w", encoding="utf-8") as temporary_file:
             temporary_file.write(json.dumps(tasks, indent=2) + "\n")
-        os.chmod(temporary_name, 0o600)
-        os.replace(temporary_name, LEDGER)
+        temporary_path.chmod(0o600)
+        temporary_path.replace(LEDGER)
     finally:
-        if os.path.exists(temporary_name):
-            os.unlink(temporary_name)
+        if temporary_path.exists():
+            temporary_path.unlink()
 
 
 @contextmanager
@@ -53,7 +56,7 @@ def locked_tasks() -> Generator[dict[str, Any]]:
         save_tasks(tasks)
 
 
-def reserve_task(task_id: str, record: Any) -> None:
+def reserve_task(task_id: str, record: str | dict[str, Any]) -> None:
     with locked_tasks() as tasks:
         if task_id in tasks:
             raise SystemExit(f"kairos: task already exists: {task_id}")
@@ -94,9 +97,7 @@ def pickup(task_id: str, *agent_args: str) -> int:
 
 
 def scheduled_time(value: str) -> datetime:
-    match = re.fullmatch(
-        r"(1[0-2]|[1-9])(?::([0-5][0-9]))?(am|pm)( tomorrow)?", value.lower()
-    )
+    match = re.fullmatch(r"(1[0-2]|[1-9])(?::([0-5][0-9]))?(am|pm)( tomorrow)?", value.lower())
     if match is None:
         raise SystemExit('kairos: --at expects a time like 9pm or "8:30am tomorrow"')
     hour, minute, period, tomorrow = match.groups()
@@ -163,14 +164,13 @@ def next_reset_time() -> datetime:
             or usage["subtype"] != "success"
             or usage["response"]["rate_limits_available"] is not True
         ):
-            raise ValueError
+            raise SystemExit(USAGE_ERROR)
         five_hour_limit = usage["response"]["rate_limits"]["five_hour"]
         if five_hour_limit is None or five_hour_limit["resets_at"] is None:
             raise SystemExit("kairos: no active usage window")
         reset_time = datetime.fromisoformat(five_hour_limit["resets_at"])
         if reset_time.tzinfo is None or reset_time <= datetime.now(UTC):
-            raise ValueError
-        return reset_time
+            raise SystemExit(USAGE_ERROR)
     except (
         json.JSONDecodeError,
         KeyError,
@@ -180,6 +180,7 @@ def next_reset_time() -> datetime:
         ValueError,
     ) as error:
         raise SystemExit(USAGE_ERROR) from error
+    return reset_time
 
 
 def schedule_at(
@@ -236,13 +237,13 @@ def execute_scheduled_task(task_id: str) -> int:
         task = tasks.get(task_id)
         if not isinstance(task, dict):
             return 0
-        task_record = cast(dict[str, Any], task)
+        task_record = cast("dict[str, Any]", task)
         if task_record.get("status") != STATUS_SCHEDULED:
             return 0
         task_record["status"] = "running"
-        cwd = cast(str, task_record["cwd"])
-        prompt = cast(str, task_record["prompt"])
-        agent_args = cast(list[str], task_record["agent_args"])
+        cwd = cast("str", task_record["cwd"])
+        prompt = cast("str", task_record["prompt"])
+        agent_args = cast("list[str]", task_record["agent_args"])
 
     try:
         returncode = run_claude(task_id, cwd, prompt, *agent_args)
@@ -254,7 +255,7 @@ def execute_scheduled_task(task_id: str) -> int:
         task = tasks.get(task_id)
         if not isinstance(task, dict):
             return returncode
-        task_record = cast(dict[str, Any], task)
+        task_record = cast("dict[str, Any]", task)
         if task_record.get("status") == "running":
             task_record["status"] = "completed" if returncode == 0 else "failed"
             task_record["returncode"] = returncode
@@ -270,9 +271,7 @@ def main() -> int:
         kairos_args = kairos_args[:separator_index]
 
     parser = argparse.ArgumentParser(prog="kairos")
-    commands = parser.add_subparsers(
-        dest="command", required=True, metavar="{run,pickup}"
-    )
+    commands = parser.add_subparsers(dest="command", required=True, metavar="{run,pickup}")
 
     run_command = commands.add_parser("run")
     run_command.add_argument("id")
@@ -298,9 +297,7 @@ def main() -> int:
     if arguments.command == "pickup":
         return pickup(arguments.id, *agent_args)
     prompt_text = (
-        Path(arguments.file).read_text(encoding="utf-8")
-        if arguments.file
-        else arguments.prompt
+        Path(arguments.file).read_text(encoding="utf-8") if arguments.file else arguments.prompt
     )
     if arguments.at is not None:
         return schedule_at(
