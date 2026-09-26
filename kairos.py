@@ -63,13 +63,13 @@ def reserve_task(task_id: str, record: str | dict[str, Any]) -> None:
         tasks[task_id] = record
 
 
-def session_id(task_id: str) -> str:
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"kairos:{task_id}"))
+def session_id() -> str:
+    return str(uuid.uuid4())
 
 
-def run_claude(task_id: str, cwd: str, prompt: str, *agent_args: str) -> int:
+def run_claude(session: str, cwd: str, prompt: str, *agent_args: str) -> int:
     return subprocess.run(
-        ["claude", "--session-id", session_id(task_id), "--print", prompt, *agent_args],
+        ["claude", "--session-id", session, "--print", prompt, *agent_args],
         cwd=cwd,
         check=False,
     ).returncode
@@ -77,20 +77,22 @@ def run_claude(task_id: str, cwd: str, prompt: str, *agent_args: str) -> int:
 
 def run(task_id: str, prompt: str, *agent_args: str) -> int:
     cwd = str(Path.cwd())
-    reserve_task(task_id, cwd)
-    return run_claude(task_id, cwd, prompt, *agent_args)
+    session = session_id()
+    reserve_task(task_id, {"cwd": cwd, "session_id": session})
+    return run_claude(session, cwd, prompt, *agent_args)
 
 
 def pickup(task_id: str, *agent_args: str) -> int:
     tasks = load_tasks()
     if task_id not in tasks:
         raise SystemExit(f"kairos: task not found: {task_id}")
-    task = tasks[task_id]
-    if not isinstance(task, str) and task["status"] == STATUS_SCHEDULED:
+    task = cast("dict[str, Any]", tasks[task_id])
+    if task.get("status") == STATUS_SCHEDULED:
         raise SystemExit(f"kairos: task has not started: {task_id}")
-    cwd = task if isinstance(task, str) else task["cwd"]
+    cwd = cast("str", task["cwd"])
+    session = cast("str", task["session_id"])
     return subprocess.run(
-        ["claude", "--resume", session_id(task_id), *agent_args],
+        ["claude", "--resume", session, *agent_args],
         cwd=cwd,
         check=False,
     ).returncode
@@ -199,6 +201,7 @@ def schedule_at(
         "agent_args": list(agent_args),
         "due_at": when.isoformat(),
         "status": STATUS_SCHEDULED,
+        "session_id": session_id(),
     }
     reserve_task(task_id, record)
 
@@ -246,7 +249,7 @@ def execute_scheduled_task(task_id: str) -> int:
         agent_args = cast("list[str]", task_record["agent_args"])
 
     try:
-        returncode = run_claude(task_id, cwd, prompt, *agent_args)
+        returncode = run_claude(cast("str", task_record["session_id"]), cwd, prompt, *agent_args)
     except OSError as error:
         print(f"kairos: could not execute scheduled task: {error}", file=sys.stderr)
         returncode = 127
