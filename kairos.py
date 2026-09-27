@@ -116,7 +116,7 @@ def scheduled_time(value: str) -> datetime:
     return when.astimezone()
 
 
-def next_reset_time() -> datetime:
+def next_reset_time() -> datetime | None:
     requests = (
         {
             "type": "control_request",
@@ -169,7 +169,7 @@ def next_reset_time() -> datetime:
             raise SystemExit(USAGE_ERROR)
         five_hour_limit = usage["response"]["rate_limits"]["five_hour"]
         if five_hour_limit is None or five_hour_limit["resets_at"] is None:
-            raise SystemExit("kairos: no active usage window")
+            return None
         reset_time = datetime.fromisoformat(five_hour_limit["resets_at"])
         if reset_time.tzinfo is None or reset_time <= datetime.now(UTC):
             raise SystemExit(USAGE_ERROR)
@@ -276,13 +276,16 @@ def main() -> int:
     parser = argparse.ArgumentParser(prog="kairos")
     commands = parser.add_subparsers(dest="command", required=True, metavar="{run,pickup}")
 
-    run_command = commands.add_parser("run")
+    run_command = commands.add_parser(
+        "run",
+        description="Run at the next usage reset, or immediately if no usage window is active.",
+    )
     run_command.add_argument("id")
     prompt = run_command.add_mutually_exclusive_group(required=True)
     prompt.add_argument("prompt", nargs="?")
     prompt.add_argument("--file")
     schedule = run_command.add_mutually_exclusive_group()
-    schedule.add_argument("-r", "--next-reset", action="store_true")
+    schedule.add_argument("--now", action="store_true", help="run immediately")
     schedule.add_argument(
         "--at",
         metavar="TIME",
@@ -309,14 +312,12 @@ def main() -> int:
             tuple(agent_args),
             scheduled_time(arguments.at),
         )
-    if arguments.next_reset:
-        return schedule_at(
-            arguments.id,
-            prompt_text,
-            tuple(agent_args),
-            next_reset_time(),
-        )
-    return run(arguments.id, prompt_text, *agent_args)
+    if arguments.now:
+        return run(arguments.id, prompt_text, *agent_args)
+    reset_time = next_reset_time()
+    if reset_time is None:
+        return run(arguments.id, prompt_text, *agent_args)
+    return schedule_at(arguments.id, prompt_text, tuple(agent_args), reset_time)
 
 
 if __name__ == "__main__":
