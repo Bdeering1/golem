@@ -64,7 +64,7 @@ ignore = [
 ]
 
 [lint.per-file-ignores]
-"kairos.py" = [
+"golem.py" = [
     "T201", # CLI output
     "S603", # CLI forwards user arguments to subprocesses without a shell
     "S607", # CLI uses the user's executables on PATH
