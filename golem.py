@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, cast
 if TYPE_CHECKING:
     from collections.abc import Generator
 
-LEDGER = Path(__file__).resolve().parent / "golem-tasks.json"
+LEDGER = Path(__file__).resolve().parent / "tasks.json"
 LOCK_PATH = LEDGER.with_suffix(".lock")
 STATUS_SCHEDULED = "scheduled"
 STATUS_RUNNING = "running"

@@ -35,5 +35,3 @@ coverage.xml
 # task ledger
 tasks.json
 tasks.lock
-golem-tasks.json
-golem-tasks.lock
