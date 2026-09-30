@@ -19,7 +19,11 @@ if TYPE_CHECKING:
 LEDGER = Path(__file__).resolve().parent / "tasks.json"
 LOCK_PATH = LEDGER.with_suffix(".lock")
 STATUS_SCHEDULED = "scheduled"
-USAGE_ERROR = "kairos: usage lookup unavailable"
+STATUS_RUNNING = "running"
+STATUS_NEEDS_REVIEW = "needs_review"
+STATUS_FAILED = "failed"
+STATUS_DONE = "done"
+USAGE_ERROR = "golem: usage lookup unavailable"
 USAGE_TIMEOUT_SECONDS = 30
 
 
@@ -59,7 +63,7 @@ def locked_tasks() -> Generator[dict[str, Any]]:
 def reserve_task(task_id: str, record: str | dict[str, Any]) -> None:
     with locked_tasks() as tasks:
         if task_id in tasks:
-            raise SystemExit(f"kairos: task already exists: {task_id}")
+            raise SystemExit(f"golem: task already exists: {task_id}")
         tasks[task_id] = record
 
 
@@ -78,19 +82,21 @@ def run_claude(session: str, cwd: str, prompt: str, *agent_args: str) -> int:
 def run(task_id: str, prompt: str, *agent_args: str) -> int:
     cwd = str(Path.cwd())
     session = session_id()
-    reserve_task(task_id, {"cwd": cwd, "session_id": session})
-    return run_claude(session, cwd, prompt, *agent_args)
+    reserve_task(task_id, {"cwd": cwd, "session_id": session, "status": STATUS_RUNNING})
+    return execute_task(task_id, session, cwd, prompt, *agent_args)
 
 
 def pickup(task_id: str, *agent_args: str) -> int:
-    tasks = load_tasks()
-    if task_id not in tasks:
-        raise SystemExit(f"kairos: task not found: {task_id}")
-    task = cast("dict[str, Any]", tasks[task_id])
-    if task.get("status") == STATUS_SCHEDULED:
-        raise SystemExit(f"kairos: task has not started: {task_id}")
-    cwd = cast("str", task["cwd"])
-    session = cast("str", task["session_id"])
+    with locked_tasks() as tasks:
+        if task_id not in tasks:
+            raise SystemExit(f"golem: task not found: {task_id}")
+        task = cast("dict[str, Any]", tasks[task_id])
+        if task.get("status") == STATUS_SCHEDULED:
+            raise SystemExit(f"golem: task has not started: {task_id}")
+        if task.get("status") == STATUS_NEEDS_REVIEW:
+            task["status"] = STATUS_DONE
+        cwd = cast("str", task["cwd"])
+        session = cast("str", task["session_id"])
     return subprocess.run(
         ["claude", "--resume", session, *agent_args],
         cwd=cwd,
@@ -98,10 +104,44 @@ def pickup(task_id: str, *agent_args: str) -> int:
     ).returncode
 
 
+def close(task_id: str) -> int:
+    with locked_tasks() as tasks:
+        if task_id not in tasks:
+            raise SystemExit(f"golem: task not found: {task_id}")
+        task = cast("dict[str, Any]", tasks[task_id])
+        if task.get("status") != STATUS_NEEDS_REVIEW:
+            raise SystemExit(f"golem: task does not need review: {task_id}")
+        task["status"] = STATUS_DONE
+    return 0
+
+
+def list_tasks() -> int:
+    tasks = load_tasks()
+    if not tasks:
+        print("golem: no tasks")
+        return 0
+    rows = [
+        (task_id, task["status"], task["cwd"], task.get("due_at", ""))
+        for task_id, task in tasks.items()
+    ]
+    rows.sort(key=lambda row: (row[1] != STATUS_NEEDS_REVIEW, row[0]))
+    headers = ("ID", "STATUS", "DIRECTORY", "DUE AT")
+    widths = [
+        max(len(str(value)) for value in column) for column in zip(headers, *rows, strict=True)
+    ]
+    for row in (headers, *rows):
+        print(
+            "  ".join(
+                str(value).ljust(width) for value, width in zip(row, widths, strict=True)
+            ).rstrip()
+        )
+    return 0
+
+
 def scheduled_time(value: str) -> datetime:
     match = re.fullmatch(r"(1[0-2]|[1-9])(?::([0-5][0-9]))?(am|pm)( tomorrow)?", value.lower())
     if match is None:
-        raise SystemExit('kairos: --at expects a time like 9pm or "8:30am tomorrow"')
+        raise SystemExit('golem: --at expects a time like 9pm or "8:30am tomorrow"')
     hour, minute, period, tomorrow = match.groups()
     now = datetime.now(UTC)
     local_time = now.astimezone().replace(tzinfo=None)
@@ -223,7 +263,7 @@ def schedule_at(
             check=False,
         )
         if result.returncode == 0:
-            print(f"kairos: scheduled {task_id} for {when:%Y-%m-%d %H:%M %Z %z}")
+            print(f"golem: scheduled {task_id} for {when:%Y-%m-%d %H:%M %Z %z}")
             return 0
         message = result.stderr.strip() or result.stdout.strip() or "at failed"
     except OSError as error:
@@ -232,7 +272,24 @@ def schedule_at(
     with locked_tasks() as tasks:
         if tasks.get(task_id) == record:
             del tasks[task_id]
-    raise SystemExit(f"kairos: could not schedule task: {message}")
+    raise SystemExit(f"golem: could not schedule task: {message}")
+
+
+def execute_task(task_id: str, session: str, cwd: str, prompt: str, *agent_args: str) -> int:
+    try:
+        returncode = run_claude(session, cwd, prompt, *agent_args)
+    except OSError as error:
+        print(f"golem: could not execute task: {error}", file=sys.stderr)
+        returncode = 127
+    with locked_tasks() as tasks:
+        task = tasks.get(task_id)
+        if not isinstance(task, dict):
+            return returncode
+        task_record = cast("dict[str, Any]", task)
+        if task_record.get("status") == STATUS_RUNNING:
+            task_record["status"] = STATUS_NEEDS_REVIEW if returncode == 0 else STATUS_FAILED
+            task_record["returncode"] = returncode
+    return returncode
 
 
 def execute_scheduled_task(task_id: str) -> int:
@@ -243,38 +300,30 @@ def execute_scheduled_task(task_id: str) -> int:
         task_record = cast("dict[str, Any]", task)
         if task_record.get("status") != STATUS_SCHEDULED:
             return 0
-        task_record["status"] = "running"
+        task_record["status"] = STATUS_RUNNING
         cwd = cast("str", task_record["cwd"])
         prompt = cast("str", task_record["prompt"])
         agent_args = cast("list[str]", task_record["agent_args"])
 
-    try:
-        returncode = run_claude(cast("str", task_record["session_id"]), cwd, prompt, *agent_args)
-    except OSError as error:
-        print(f"kairos: could not execute scheduled task: {error}", file=sys.stderr)
-        returncode = 127
-
-    with locked_tasks() as tasks:
-        task = tasks.get(task_id)
-        if not isinstance(task, dict):
-            return returncode
-        task_record = cast("dict[str, Any]", task)
-        if task_record.get("status") == "running":
-            task_record["status"] = "completed" if returncode == 0 else "failed"
-            task_record["returncode"] = returncode
-    return returncode
+    return execute_task(
+        task_id,
+        cast("str", task_record["session_id"]),
+        cwd,
+        prompt,
+        *agent_args,
+    )
 
 
 def main() -> int:
-    kairos_args = sys.argv[1:]
+    golem_args = sys.argv[1:]
     agent_args: list[str] = []
-    if "--" in kairos_args:
-        separator_index = kairos_args.index("--")
-        agent_args = kairos_args[separator_index + 1 :]
-        kairos_args = kairos_args[:separator_index]
+    if "--" in golem_args:
+        separator_index = golem_args.index("--")
+        agent_args = golem_args[separator_index + 1 :]
+        golem_args = golem_args[:separator_index]
 
-    parser = argparse.ArgumentParser(prog="kairos")
-    commands = parser.add_subparsers(dest="command", required=True, metavar="{run,pickup}")
+    parser = argparse.ArgumentParser(prog="golem")
+    commands = parser.add_subparsers(dest="command", required=True)
 
     run_command = commands.add_parser(
         "run",
@@ -294,14 +343,21 @@ def main() -> int:
 
     pickup_command = commands.add_parser("pickup")
     pickup_command.add_argument("id")
+    close_command = commands.add_parser("close")
+    close_command.add_argument("id")
+    commands.add_parser("list")
     execute_command = commands.add_parser("_execute")
     execute_command.add_argument("id")
-    arguments = parser.parse_args(kairos_args)
+    arguments = parser.parse_args(golem_args)
 
     if arguments.command == "_execute":
         return execute_scheduled_task(arguments.id)
     if arguments.command == "pickup":
         return pickup(arguments.id, *agent_args)
+    if arguments.command == "close":
+        return close(arguments.id)
+    if arguments.command == "list":
+        return list_tasks()
     prompt_text = (
         Path(arguments.file).read_text(encoding="utf-8") if arguments.file else arguments.prompt
     )

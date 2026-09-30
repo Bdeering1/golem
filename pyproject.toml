@@ -1,7 +1,7 @@
 [project]
-name = "kairos"
+name = "golem"
 version = "0.1.0"
-description = "Run and pick up Claude tasks"
+description = "Run and review Claude tasks"
 requires-python = ">=3.14"
 dependencies = []
 
@@ -10,10 +10,10 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-py-modules = ["kairos"]
+py-modules = ["golem"]
 
 [project.scripts]
-kairos = "kairos:main"
+golem = "golem:main"
 
 [dependency-groups]
 dev = [
