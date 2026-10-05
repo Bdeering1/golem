@@ -338,9 +338,12 @@ def submit_at_job(
                 with locked_tasks() as tasks:
                     task = tasks.get(task_id)
                     is_cancelled = task == {**record, "status": STATUS_CANCELLED}
+                    is_superseded = isinstance(task, dict) and (
+                        cast("dict[str, Any]", task).get("session_id") != record["session_id"]
+                    )
                     if task == record:
                         cast("dict[str, Any]", task)["at_job"] = at_job
-                if is_cancelled:
+                if is_cancelled or is_superseded:
                     remove_at_job(at_job)
                     raise SystemExit(f"golem: task was cancelled while scheduling: {task_id}")
                 print(f"golem: scheduled {task_id} for {when:%Y-%m-%d %H:%M %Z %z}")

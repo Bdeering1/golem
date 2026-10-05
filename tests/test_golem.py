@@ -33,7 +33,7 @@ if [ -n "${GOLEM_AT_NO_JOB:-}" ]; then
     exit 0
 fi
 printf '%s\\n' warning >&2
-printf '%s\\n' 'job 42 at tomorrow' >&2
+printf '%s\\n' "job ${GOLEM_AT_JOB:-42} at tomorrow" >&2
 """,
         "atrm": """#!/bin/sh
 printf '%s' "$*" > "$GOLEM_ATRM_ARGS"
@@ -282,20 +282,37 @@ def test_leftover_at_job_does_not_run_task(
     assert logged_claude_args(fake_commands) == []
 
 
-def test_cancel_during_scheduling_removes_new_at_job(fake_commands, monkeypatch, ledger_path):
+@pytest.mark.parametrize(
+    ("retry_args", "expected_status"),
+    [
+        pytest.param(None, golem.STATUS_CANCELLED, id="cancel-only"),
+        pytest.param(["--now"], golem.STATUS_NEEDS_REVIEW, id="retry-now"),
+        pytest.param(["--at", AT_TEXT], golem.STATUS_SCHEDULED, id="retry-at"),
+    ],
+)
+def test_cancel_during_scheduling_removes_original_at_job(
+    fake_commands, monkeypatch, ledger_path, retry_args, expected_status
+):
     parse_at_job_number = golem.at_job_number
 
     def cancel_then_parse_at_job_number(at_output) -> str | None:
         golem.main(["cancel", TASK_ID])
+        if retry_args is not None:
+            monkeypatch.setattr(golem, "at_job_number", parse_at_job_number)
+            monkeypatch.setenv("GOLEM_AT_JOB", "43")
+            golem.main(["retry", TASK_ID, *retry_args])
         return parse_at_job_number(at_output)
 
     monkeypatch.setattr(golem, "at_job_number", cancel_then_parse_at_job_number)
 
-    with pytest.raises(SystemExit):
+    with pytest.raises(SystemExit, match=TASK_ID):
         golem.main(["run", TASK_ID, PROMPT, "--at", AT_TEXT])
 
-    assert read_task(ledger_path)["status"] == golem.STATUS_CANCELLED
+    task = read_task(ledger_path)
+    assert task["status"] == expected_status
     assert fake_commands["atrm_args_path"].read_text(encoding="utf-8") == "42"
+    if expected_status == golem.STATUS_SCHEDULED:
+        assert task["at_job"] == "43"
 
 
 def test_retry_restores_previous_record_when_scheduling_fails(
