@@ -28,9 +28,11 @@ SCHEDULE_DESCRIPTION = "Run at the next usage reset, or immediately if no usage 
 
 
 def ledger_path() -> Path:
-    state_home = os.environ.get("XDG_STATE_HOME")
+    state_home = Path(os.environ.get("XDG_STATE_HOME", ""))
     state_directory = (
-        Path(state_home) / "golem" if state_home else Path.home() / ".local" / "state" / "golem"
+        state_home / "golem"
+        if state_home.is_absolute()
+        else Path.home() / ".local" / "state" / "golem"
     )
     state_directory.mkdir(parents=True, exist_ok=True)
     return state_directory / "tasks.json"
@@ -165,7 +167,11 @@ def cancel_task(task_id: str) -> int:
         task["status"] = STATUS_CANCELLED
     if not isinstance(at_job, str):
         return 0
+    remove_at_job(at_job)
+    return 0
 
+
+def remove_at_job(at_job: str) -> None:
     message: str | None = None
     try:
         result = subprocess.run(
@@ -181,7 +187,6 @@ def cancel_task(task_id: str) -> int:
             message = result.stderr.strip() or result.stdout.strip() or "atrm failed"
     if message is not None:
         print(f"golem: could not cancel at job {at_job}: {message}", file=sys.stderr)
-    return 0
 
 
 def list_tasks() -> int:
@@ -328,12 +333,16 @@ def schedule_task(
         if result.returncode == 0:
             at_job = at_job_number(result.stderr)
             if at_job is None:
-                message = "could not determine at job number"
+                message = "at queued a job but its number is unknown; remove it with atq and atrm"
             else:
                 with locked_tasks() as tasks:
                     task = tasks.get(task_id)
+                    is_cancelled = task == {**record, "status": STATUS_CANCELLED}
                     if task == record:
                         cast("dict[str, Any]", task)["at_job"] = at_job
+                if is_cancelled:
+                    remove_at_job(at_job)
+                    raise SystemExit(f"golem: task was cancelled while scheduling: {task_id}")
                 print(f"golem: scheduled {task_id} for {when:%Y-%m-%d %H:%M %Z %z}")
                 return 0
         else:
