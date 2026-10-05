@@ -85,9 +85,9 @@ def new_session_id() -> str:
     return str(uuid.uuid4())
 
 
-def run_claude(session: str, cwd: str, prompt: str, *agent_args: str) -> int:
+def run_claude(session_id: str, cwd: str, prompt: str, *agent_args: str) -> int:
     return subprocess.run(
-        ["claude", "--session-id", session, "--print", prompt, *agent_args],
+        ["claude", "--session-id", session_id, "--print", prompt, *agent_args],
         cwd=cwd,
         check=False,
     ).returncode
@@ -137,9 +137,9 @@ def pickup(task_id: str, *agent_args: str) -> int:
         if task.get("status") == STATUS_NEEDS_REVIEW:
             task["status"] = STATUS_DONE
         cwd = cast("str", task["cwd"])
-        session = cast("str", task["session_id"])
+        session_id = cast("str", task["session_id"])
     return subprocess.run(
-        ["claude", "--resume", session, *agent_args],
+        ["claude", "--resume", session_id, *agent_args],
         cwd=cwd,
         check=False,
     ).returncode
@@ -370,9 +370,9 @@ def schedule_new_task(
     return submit_at_job(task_id, record, when)
 
 
-def execute_task(task_id: str, session: str, cwd: str, prompt: str, *agent_args: str) -> int:
+def execute_task(task_id: str, session_id: str, cwd: str, prompt: str, *agent_args: str) -> int:
     try:
-        returncode = run_claude(session, cwd, prompt, *agent_args)
+        returncode = run_claude(session_id, cwd, prompt, *agent_args)
     except OSError as error:
         print(f"golem: could not execute task: {error}", file=sys.stderr)
         returncode = 127
@@ -444,9 +444,9 @@ def planned_execution_time(*, is_now: bool, at_text: str | None) -> datetime | N
 
 
 def add_scheduling_arguments(command_parser: argparse.ArgumentParser) -> None:
-    schedule = command_parser.add_mutually_exclusive_group()
-    schedule.add_argument("--now", action="store_true", help="run immediately")
-    schedule.add_argument(
+    schedule_group = command_parser.add_mutually_exclusive_group()
+    schedule_group.add_argument("--now", action="store_true", help="run immediately")
+    schedule_group.add_argument(
         "--at",
         metavar="TIME",
         help='local time, e.g. 9pm or "8:30am tomorrow"; rolls forward if passed',
@@ -469,9 +469,9 @@ def main(argv: list[str] | None = None) -> int:
         description=SCHEDULE_DESCRIPTION,
     )
     run_command.add_argument("id")
-    prompt = run_command.add_mutually_exclusive_group(required=True)
-    prompt.add_argument("prompt", nargs="?")
-    prompt.add_argument("--file")
+    prompt_group = run_command.add_mutually_exclusive_group(required=True)
+    prompt_group.add_argument("prompt", nargs="?")
+    prompt_group.add_argument("--file")
     add_scheduling_arguments(run_command)
 
     pickup_command = commands.add_parser("pickup")
