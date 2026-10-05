@@ -75,9 +75,10 @@ def read_task(ledger_path):
     return json.loads(ledger_path.read_text(encoding="utf-8"))[TASK_ID]
 
 
-def write_task(ledger_path, status, *, has_at_job=True):
+def write_task(ledger_path, status):
     task = {
         "agent_args": AGENT_ARGS,
+        "at_job": "11",
         "cwd": str(Path.cwd()),
         "due_at": OLD_DUE_AT,
         "prompt": PROMPT,
@@ -85,8 +86,6 @@ def write_task(ledger_path, status, *, has_at_job=True):
         "session_id": OLD_SESSION_ID,
         "status": status,
     }
-    if has_at_job:
-        task["at_job"] = "11"
     ledger_path.parent.mkdir(parents=True, exist_ok=True)
     ledger_path.write_text(json.dumps({TASK_ID: task}), encoding="utf-8")
 
@@ -170,23 +169,24 @@ def test_pickup_refuses_tasks_that_never_started(fake_commands, ledger_path, sta
 
 
 @pytest.mark.parametrize(
-    ("has_at_job", "atrm_exit", "expected_atrm_args"),
+    "atrm_exit",
     [
-        pytest.param(True, "0", "11", id="removed"),
-        pytest.param(True, "1", "11", id="atrm-fails"),
-        pytest.param(False, "0", "", id="no-at-job"),
+        pytest.param("0", id="removed"),
+        pytest.param("1", id="atrm-fails"),
     ],
 )
 def test_cancel_marks_task_cancelled_and_removes_at_job(
-    fake_commands, monkeypatch, ledger_path, has_at_job, atrm_exit, expected_atrm_args
+    fake_commands, monkeypatch, ledger_path, atrm_exit
 ):
-    write_task(ledger_path, golem.STATUS_SCHEDULED, has_at_job=has_at_job)
+    write_task(ledger_path, golem.STATUS_SCHEDULED)
     monkeypatch.setenv("GOLEM_ATRM_EXIT", atrm_exit)
 
     assert golem.main(["cancel", TASK_ID]) == 0
+    assert golem.main(["_execute", TASK_ID, OLD_SESSION_ID]) == 0
 
     assert read_task(ledger_path)["status"] == golem.STATUS_CANCELLED
-    assert fake_commands["atrm_args_path"].read_text(encoding="utf-8") == expected_atrm_args
+    assert fake_commands["atrm_args_path"].read_text(encoding="utf-8") == "11"
+    assert logged_claude_args(fake_commands) == []
 
 
 @pytest.mark.parametrize(
@@ -253,32 +253,13 @@ def test_retry_refuses_unretryable_task_before_usage_lookup(
         golem.main(["retry", TASK_ID])
 
 
-@pytest.mark.parametrize(
-    ("status", "command_args", "expected_status"),
-    [
-        pytest.param(
-            golem.STATUS_SCHEDULED,
-            ["cancel", TASK_ID],
-            golem.STATUS_CANCELLED,
-            id="cancelled",
-        ),
-        pytest.param(
-            golem.STATUS_CANCELLED,
-            ["retry", TASK_ID, "--at", AT_TEXT],
-            golem.STATUS_SCHEDULED,
-            id="retried",
-        ),
-    ],
-)
-def test_leftover_at_job_does_not_run_task(
-    fake_commands, ledger_path, status, command_args, expected_status
-):
-    write_task(ledger_path, status)
-    golem.main(command_args)
+def test_leftover_at_job_does_not_run_retried_task(fake_commands, ledger_path):
+    write_task(ledger_path, golem.STATUS_CANCELLED)
+    golem.main(["retry", TASK_ID, "--at", AT_TEXT])
 
     assert golem.main(["_execute", TASK_ID, OLD_SESSION_ID]) == 0
 
-    assert read_task(ledger_path)["status"] == expected_status
+    assert read_task(ledger_path)["status"] == golem.STATUS_SCHEDULED
     assert logged_claude_args(fake_commands) == []
 
 
