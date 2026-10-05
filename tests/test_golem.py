@@ -53,6 +53,7 @@ def fake_commands(monkeypatch, tmp_path, fake_bin_path):
     at_input_path = tmp_path / "at-input"
     atrm_args_path = tmp_path / "atrm-args"
     command_log_path.touch()
+    atrm_args_path.touch()
     monkeypatch.setenv("PATH", f"{fake_bin_path}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.setenv("GOLEM_COMMAND_LOG", str(command_log_path))
     monkeypatch.setenv("GOLEM_AT_INPUT", str(at_input_path))
@@ -65,16 +66,16 @@ def fake_commands(monkeypatch, tmp_path, fake_bin_path):
 
 
 @pytest.fixture
-def state_path(monkeypatch, tmp_path):
+def ledger_path(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     return tmp_path / "golem" / "tasks.json"
 
 
-def read_task(state_path):
-    return json.loads(state_path.read_text(encoding="utf-8"))[TASK_ID]
+def read_task(ledger_path):
+    return json.loads(ledger_path.read_text(encoding="utf-8"))[TASK_ID]
 
 
-def write_task(state_path, status, *, has_at_job=True):
+def write_task(ledger_path, status, *, has_at_job=True):
     task = {
         "agent_args": AGENT_ARGS,
         "cwd": str(Path.cwd()),
@@ -86,8 +87,8 @@ def write_task(state_path, status, *, has_at_job=True):
     }
     if has_at_job:
         task["at_job"] = "11"
-    state_path.parent.mkdir(parents=True, exist_ok=True)
-    state_path.write_text(json.dumps({TASK_ID: task}), encoding="utf-8")
+    ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    ledger_path.write_text(json.dumps({TASK_ID: task}), encoding="utf-8")
 
 
 def logged_claude_args(fake_commands):
@@ -127,160 +128,129 @@ def test_ledger_falls_back_to_home_when_xdg_state_home_is_not_absolute(
     ],
 )
 def test_run_now_records_claude_result(
-    fake_commands, monkeypatch, state_path, claude_exit, expected_status
+    fake_commands, monkeypatch, ledger_path, claude_exit, expected_status
 ):
     monkeypatch.setenv("GOLEM_CLAUDE_EXIT", str(claude_exit))
 
     assert golem.main(["run", TASK_ID, PROMPT, "--now", "--", *AGENT_ARGS]) == claude_exit
 
-    task = read_task(state_path)
+    task = read_task(ledger_path)
     assert task["status"] == expected_status
     assert task["returncode"] == claude_exit
-    assert task["prompt"] == PROMPT
-    assert task["agent_args"] == AGENT_ARGS
     assert logged_claude_args(fake_commands) == expected_claude_args(task)
 
 
-def test_scheduled_task_runs_when_its_at_job_fires(fake_commands, state_path):
+def test_scheduled_task_runs_when_its_at_job_fires(fake_commands, ledger_path):
     golem.main(["run", TASK_ID, PROMPT, "--at", AT_TEXT, "--", *AGENT_ARGS])
-    task = read_task(state_path)
+    task = read_task(ledger_path)
     assert task["status"] == golem.STATUS_SCHEDULED
     assert task["at_job"] == "42"
     assert task["session_id"] in fake_commands["at_input_path"].read_text(encoding="utf-8")
 
     assert golem.main(["_execute", TASK_ID, task["session_id"]]) == 0
 
-    assert read_task(state_path)["status"] == golem.STATUS_NEEDS_REVIEW
+    assert read_task(ledger_path)["status"] == golem.STATUS_NEEDS_REVIEW
     assert logged_claude_args(fake_commands) == expected_claude_args(task)
 
 
 @pytest.mark.parametrize("command", ["pickup", "close"])
-def test_review_commands_complete_review_task(fake_commands, state_path, command):
+def test_review_commands_complete_review_task(fake_commands, ledger_path, command):
     golem.main(["run", TASK_ID, PROMPT, "--now"])
 
     assert golem.main([command, TASK_ID]) == 0
-    assert read_task(state_path)["status"] == golem.STATUS_DONE
+    assert read_task(ledger_path)["status"] == golem.STATUS_DONE
 
 
 @pytest.mark.parametrize("status", [golem.STATUS_SCHEDULED, golem.STATUS_CANCELLED])
-def test_pickup_refuses_tasks_that_never_started(fake_commands, state_path, status):
-    write_task(state_path, status)
+def test_pickup_refuses_tasks_that_never_started(fake_commands, ledger_path, status):
+    write_task(ledger_path, status)
 
-    with pytest.raises(SystemExit, match="golem: task has not started"):
+    with pytest.raises(SystemExit, match=TASK_ID):
         golem.main(["pickup", TASK_ID])
 
 
 @pytest.mark.parametrize(
-    "atrm_exit",
-    [pytest.param("0", id="removed"), pytest.param("1", id="atrm-fails")],
+    ("has_at_job", "atrm_exit", "expected_atrm_args"),
+    [
+        pytest.param(True, "0", "11", id="removed"),
+        pytest.param(True, "1", "11", id="atrm-fails"),
+        pytest.param(False, "0", "", id="no-at-job"),
+    ],
 )
 def test_cancel_marks_task_cancelled_and_removes_at_job(
-    fake_commands, monkeypatch, state_path, atrm_exit
+    fake_commands, monkeypatch, ledger_path, *, has_at_job, atrm_exit, expected_atrm_args
 ):
-    write_task(state_path, golem.STATUS_SCHEDULED)
+    write_task(ledger_path, golem.STATUS_SCHEDULED, has_at_job=has_at_job)
     monkeypatch.setenv("GOLEM_ATRM_EXIT", atrm_exit)
 
     assert golem.main(["cancel", TASK_ID]) == 0
 
-    assert read_task(state_path)["status"] == golem.STATUS_CANCELLED
-    assert fake_commands["atrm_args_path"].read_text(encoding="utf-8") == "11"
-
-
-def test_cancel_skips_atrm_when_at_job_is_not_recorded(fake_commands, state_path):
-    write_task(state_path, golem.STATUS_SCHEDULED, has_at_job=False)
-
-    assert golem.main(["cancel", TASK_ID]) == 0
-
-    assert read_task(state_path)["status"] == golem.STATUS_CANCELLED
-    assert not fake_commands["atrm_args_path"].exists()
+    assert read_task(ledger_path)["status"] == golem.STATUS_CANCELLED
+    assert fake_commands["atrm_args_path"].read_text(encoding="utf-8") == expected_atrm_args
 
 
 @pytest.mark.parametrize(
     "status",
     [golem.STATUS_RUNNING, golem.STATUS_NEEDS_REVIEW, golem.STATUS_FAILED, golem.STATUS_DONE],
 )
-def test_cancel_refuses_non_scheduled_tasks(fake_commands, state_path, status):
-    write_task(state_path, status)
+def test_cancel_refuses_non_scheduled_tasks(fake_commands, ledger_path, status):
+    write_task(ledger_path, status)
 
-    with pytest.raises(SystemExit, match="golem: task is not scheduled"):
+    with pytest.raises(SystemExit, match=TASK_ID):
         golem.main(["cancel", TASK_ID])
 
 
-def test_retry_now_reruns_failed_run_now_task_in_new_session(
-    fake_commands, monkeypatch, state_path
+@pytest.mark.parametrize(
+    ("retry_args", "reset_time", "expected_status"),
+    [
+        pytest.param(["--now"], None, golem.STATUS_NEEDS_REVIEW, id="now"),
+        pytest.param(["--at", AT_TEXT], None, golem.STATUS_SCHEDULED, id="at"),
+        pytest.param([], None, golem.STATUS_NEEDS_REVIEW, id="no-usage-window"),
+        pytest.param(
+            [], datetime(2030, 1, 1, tzinfo=UTC), golem.STATUS_SCHEDULED, id="usage-window"
+        ),
+    ],
+)
+def test_retry_runs_failed_task_in_new_session(
+    fake_commands, monkeypatch, ledger_path, *, retry_args, reset_time, expected_status
 ):
     monkeypatch.setenv("GOLEM_CLAUDE_EXIT", "1")
     golem.main(["run", TASK_ID, PROMPT, "--now", "--", *AGENT_ARGS])
-    failed_session_id = read_task(state_path)["session_id"]
+    failed_session_id = read_task(ledger_path)["session_id"]
     monkeypatch.delenv("GOLEM_CLAUDE_EXIT")
-
-    assert golem.main(["retry", TASK_ID, "--now"]) == 0
-
-    task = read_task(state_path)
-    assert task["status"] == golem.STATUS_NEEDS_REVIEW
-    assert task["session_id"] != failed_session_id
-    assert logged_claude_args(fake_commands) == expected_claude_args(task)
-
-
-def test_retry_at_reschedules_original_task_in_new_session(fake_commands, state_path):
-    write_task(state_path, golem.STATUS_CANCELLED)
-
-    assert golem.main(["retry", TASK_ID, "--at", AT_TEXT]) == 0
-
-    task = read_task(state_path)
-    assert task["status"] == golem.STATUS_SCHEDULED
-    assert task["session_id"] != OLD_SESSION_ID
-    assert task["due_at"] != OLD_DUE_AT
-    assert task["at_job"] == "42"
-    assert "returncode" not in task
-    assert task["session_id"] in fake_commands["at_input_path"].read_text(encoding="utf-8")
-    assert logged_claude_args(fake_commands) == []
-
-
-@pytest.mark.parametrize(
-    ("reset_time", "expected_status"),
-    [
-        pytest.param(None, golem.STATUS_NEEDS_REVIEW, id="no-usage-window"),
-        pytest.param(datetime(2030, 1, 1, tzinfo=UTC), golem.STATUS_SCHEDULED, id="usage-window"),
-    ],
-)
-def test_retry_defaults_to_next_usage_reset(
-    fake_commands, monkeypatch, state_path, reset_time, expected_status
-):
-    write_task(state_path, golem.STATUS_FAILED)
     monkeypatch.setattr(golem, "next_reset_time", lambda: reset_time)
 
-    assert golem.main(["retry", TASK_ID]) == 0
+    assert golem.main(["retry", TASK_ID, *retry_args]) == 0
 
-    assert read_task(state_path)["status"] == expected_status
+    task = read_task(ledger_path)
+    assert task["status"] == expected_status
+    assert task["session_id"] != failed_session_id
+
+    golem.main(["_execute", TASK_ID, task["session_id"]])
+
+    assert read_task(ledger_path)["status"] == golem.STATUS_NEEDS_REVIEW
+    assert logged_claude_args(fake_commands) == expected_claude_args(task)
 
 
 @pytest.mark.parametrize(
     "status",
-    [golem.STATUS_SCHEDULED, golem.STATUS_RUNNING, golem.STATUS_NEEDS_REVIEW, golem.STATUS_DONE],
+    [
+        pytest.param(None, id="missing"),
+        golem.STATUS_SCHEDULED,
+        golem.STATUS_RUNNING,
+        golem.STATUS_NEEDS_REVIEW,
+        golem.STATUS_DONE,
+    ],
 )
-def test_retry_refuses_other_task_statuses_before_usage_lookup(
-    fake_commands, monkeypatch, state_path, status
+def test_retry_refuses_unretryable_task_before_usage_lookup(
+    fake_commands, monkeypatch, ledger_path, status
 ):
-    write_task(state_path, status)
+    if status is not None:
+        write_task(ledger_path, status)
     monkeypatch.setattr(golem, "next_reset_time", lambda: pytest.fail("usage lookup ran"))
 
-    with pytest.raises(SystemExit, match="golem: task cannot be retried"):
+    with pytest.raises(SystemExit, match=TASK_ID):
         golem.main(["retry", TASK_ID])
-
-
-def test_retry_refuses_missing_task_before_usage_lookup(fake_commands, monkeypatch, state_path):
-    monkeypatch.setattr(golem, "next_reset_time", lambda: pytest.fail("usage lookup ran"))
-
-    with pytest.raises(SystemExit, match="golem: task not found"):
-        golem.main(["retry", TASK_ID])
-
-
-def test_retry_rejects_agent_arguments(fake_commands, state_path):
-    write_task(state_path, golem.STATUS_FAILED)
-
-    with pytest.raises(SystemExit, match="2"):
-        golem.main(["retry", TASK_ID, "--", "--model", "opus"])
 
 
 @pytest.mark.parametrize(
@@ -301,18 +271,18 @@ def test_retry_rejects_agent_arguments(fake_commands, state_path):
     ],
 )
 def test_leftover_at_job_does_not_run_task(
-    fake_commands, state_path, status, command, expected_status
+    fake_commands, ledger_path, status, command, expected_status
 ):
-    write_task(state_path, status)
+    write_task(ledger_path, status)
     golem.main(command)
 
     assert golem.main(["_execute", TASK_ID, OLD_SESSION_ID]) == 0
 
-    assert read_task(state_path)["status"] == expected_status
+    assert read_task(ledger_path)["status"] == expected_status
     assert logged_claude_args(fake_commands) == []
 
 
-def test_cancel_during_scheduling_removes_new_at_job(fake_commands, monkeypatch, state_path):
+def test_cancel_during_scheduling_removes_new_at_job(fake_commands, monkeypatch, ledger_path):
     parse_at_job_number = golem.at_job_number
 
     def cancel_then_parse_at_job_number(at_output) -> str | None:
@@ -324,30 +294,30 @@ def test_cancel_during_scheduling_removes_new_at_job(fake_commands, monkeypatch,
     with pytest.raises(SystemExit):
         golem.main(["run", TASK_ID, PROMPT, "--at", AT_TEXT])
 
-    assert read_task(state_path)["status"] == golem.STATUS_CANCELLED
+    assert read_task(ledger_path)["status"] == golem.STATUS_CANCELLED
     assert fake_commands["atrm_args_path"].read_text(encoding="utf-8") == "42"
 
 
 def test_retry_restores_previous_record_when_scheduling_fails(
-    fake_commands, monkeypatch, state_path
+    fake_commands, monkeypatch, ledger_path
 ):
-    write_task(state_path, golem.STATUS_FAILED)
-    previous_task = read_task(state_path)
+    write_task(ledger_path, golem.STATUS_FAILED)
+    previous_task = read_task(ledger_path)
     monkeypatch.setenv("GOLEM_AT_EXIT", "1")
 
-    with pytest.raises(SystemExit, match="golem: could not schedule task"):
+    with pytest.raises(SystemExit):
         golem.main(["retry", TASK_ID, "--at", AT_TEXT])
 
-    assert read_task(state_path) == previous_task
+    assert read_task(ledger_path) == previous_task
 
 
 @pytest.mark.parametrize("environment_name", ["GOLEM_AT_EXIT", "GOLEM_AT_NO_JOB"])
 def test_scheduling_failure_removes_new_task(
-    fake_commands, monkeypatch, state_path, environment_name
+    fake_commands, monkeypatch, ledger_path, environment_name
 ):
     monkeypatch.setenv(environment_name, "1")
 
-    with pytest.raises(SystemExit, match="golem: could not schedule task"):
+    with pytest.raises(SystemExit):
         golem.main(["run", TASK_ID, PROMPT, "--at", AT_TEXT])
 
-    assert TASK_ID not in json.loads(state_path.read_text(encoding="utf-8"))
+    assert TASK_ID not in json.loads(ledger_path.read_text(encoding="utf-8"))

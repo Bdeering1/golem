@@ -81,7 +81,7 @@ def reserve_task(task_id: str, record: str | dict[str, Any]) -> None:
         tasks[task_id] = record
 
 
-def session_id() -> str:
+def new_session_id() -> str:
     return str(uuid.uuid4())
 
 
@@ -104,7 +104,7 @@ def new_task_record(
         "prompt": prompt,
         "agent_args": list(agent_args),
         "status": STATUS_SCHEDULED if when else STATUS_RUNNING,
-        "session_id": session_id(),
+        "session_id": new_session_id(),
     }
     if when:
         record["due_at"] = when.isoformat()
@@ -306,7 +306,7 @@ def at_job_number(at_output: str) -> str | None:
     return match.group(1)
 
 
-def schedule_task(
+def submit_at_job(
     task_id: str,
     record: dict[str, Any],
     when: datetime,
@@ -359,7 +359,7 @@ def schedule_task(
     raise SystemExit(f"golem: could not schedule task: {message}")
 
 
-def schedule_at(
+def schedule_new_task(
     task_id: str,
     prompt: str,
     agent_args: tuple[str, ...],
@@ -367,7 +367,7 @@ def schedule_at(
 ) -> int:
     record = new_task_record(str(Path.cwd()), prompt, agent_args, when)
     reserve_task(task_id, record)
-    return schedule_task(task_id, record, when)
+    return submit_at_job(task_id, record, when)
 
 
 def execute_task(task_id: str, session: str, cwd: str, prompt: str, *agent_args: str) -> int:
@@ -387,7 +387,7 @@ def execute_task(task_id: str, session: str, cwd: str, prompt: str, *agent_args:
     return returncode
 
 
-def execute_scheduled_task(task_id: str, session: str) -> int:
+def execute_scheduled_task(task_id: str, session_id: str) -> int:
     with locked_tasks() as tasks:
         task = tasks.get(task_id)
         if not isinstance(task, dict):
@@ -395,7 +395,7 @@ def execute_scheduled_task(task_id: str, session: str) -> int:
         task_record = cast("dict[str, Any]", task)
         if (
             task_record.get("status") != STATUS_SCHEDULED
-            or task_record.get("session_id") != session
+            or task_record.get("session_id") != session_id
         ):
             return 0
         task_record["status"] = STATUS_RUNNING
@@ -428,7 +428,7 @@ def retry_task(task_id: str, *, is_now: bool, at_text: str | None) -> int:
         tasks[task_id] = record
     if when is None:
         return execute_record(task_id, record)
-    return schedule_task(task_id, record, when, previous_record)
+    return submit_at_job(task_id, record, when, previous_record)
 
 
 def planned_execution_time(*, is_now: bool, at_text: str | None) -> datetime | None:
@@ -443,8 +443,8 @@ def planned_execution_time(*, is_now: bool, at_text: str | None) -> datetime | N
     return when.replace(second=0, microsecond=0).astimezone()
 
 
-def add_scheduling_arguments(command: argparse.ArgumentParser) -> None:
-    schedule = command.add_mutually_exclusive_group()
+def add_scheduling_arguments(command_parser: argparse.ArgumentParser) -> None:
+    schedule = command_parser.add_mutually_exclusive_group()
     schedule.add_argument("--now", action="store_true", help="run immediately")
     schedule.add_argument(
         "--at",
@@ -489,11 +489,11 @@ def main(argv: list[str] | None = None) -> int:
     commands.add_parser("list")
     execute_command = commands.add_parser("_execute")
     execute_command.add_argument("id")
-    execute_command.add_argument("session")
+    execute_command.add_argument("session_id")
     arguments = parser.parse_args(golem_args)
 
     if arguments.command == "_execute":
-        return execute_scheduled_task(arguments.id, arguments.session)
+        return execute_scheduled_task(arguments.id, arguments.session_id)
     if arguments.command == "pickup":
         return pickup(arguments.id, *agent_args)
     if arguments.command == "close":
@@ -512,7 +512,7 @@ def main(argv: list[str] | None = None) -> int:
     when = planned_execution_time(is_now=arguments.now, at_text=arguments.at)
     if when is None:
         return run(arguments.id, prompt_text, *agent_args)
-    return schedule_at(arguments.id, prompt_text, tuple(agent_args), when)
+    return schedule_new_task(arguments.id, prompt_text, tuple(agent_args), when)
 
 
 if __name__ == "__main__":
