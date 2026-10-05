@@ -78,6 +78,7 @@ ignore = [
     "ANN001",  # test functions do not require argument annotations
     "ANN201",  # test functions do not require `-> None`
     "ANN204",  # fakes do not require `__init__` annotations
+    "PLR0917", # pytest passes fixtures and parameters positionally
 ]
 
 [lint.mccabe]

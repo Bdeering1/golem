@@ -16,27 +16,40 @@ from typing import TYPE_CHECKING, Any, cast
 if TYPE_CHECKING:
     from collections.abc import Generator
 
-LEDGER = Path(__file__).resolve().parent / "tasks.json"
-LOCK_PATH = LEDGER.with_suffix(".lock")
 STATUS_SCHEDULED = "scheduled"
 STATUS_RUNNING = "running"
 STATUS_NEEDS_REVIEW = "needs_review"
 STATUS_FAILED = "failed"
 STATUS_DONE = "done"
+STATUS_CANCELLED = "cancelled"
 USAGE_ERROR = "golem: usage lookup unavailable"
 USAGE_TIMEOUT_SECONDS = 30
+SCHEDULE_DESCRIPTION = "Run at the next usage reset, or immediately if no usage window is active."
+
+
+def ledger_path() -> Path:
+    state_home = Path(os.environ.get("XDG_STATE_HOME", ""))
+    state_directory = (
+        state_home / "golem"
+        if state_home.is_absolute()
+        else Path.home() / ".local" / "state" / "golem"
+    )
+    state_directory.mkdir(parents=True, exist_ok=True)
+    return state_directory / "tasks.json"
 
 
 def load_tasks() -> dict[str, Any]:
-    if not LEDGER.exists():
+    task_ledger_path = ledger_path()
+    if not task_ledger_path.exists():
         return {}
-    return json.loads(LEDGER.read_text(encoding="utf-8"))
+    return json.loads(task_ledger_path.read_text(encoding="utf-8"))
 
 
 def save_tasks(tasks: dict[str, Any]) -> None:
+    task_ledger_path = ledger_path()
     file_descriptor, temporary_name = tempfile.mkstemp(
-        dir=LEDGER.parent,
-        prefix=f".{LEDGER.name}.",
+        dir=task_ledger_path.parent,
+        prefix=f".{task_ledger_path.name}.",
         text=True,
     )
     temporary_path = Path(temporary_name)
@@ -44,7 +57,7 @@ def save_tasks(tasks: dict[str, Any]) -> None:
         with os.fdopen(file_descriptor, "w", encoding="utf-8") as temporary_file:
             temporary_file.write(json.dumps(tasks, indent=2) + "\n")
         temporary_path.chmod(0o600)
-        temporary_path.replace(LEDGER)
+        temporary_path.replace(task_ledger_path)
     finally:
         if temporary_path.exists():
             temporary_path.unlink()
@@ -52,8 +65,9 @@ def save_tasks(tasks: dict[str, Any]) -> None:
 
 @contextmanager
 def locked_tasks() -> Generator[dict[str, Any]]:
-    LOCK_PATH.touch(exist_ok=True)
-    with LOCK_PATH.open("r+", encoding="utf-8") as lock_file:
+    lock_path = ledger_path().with_suffix(".lock")
+    lock_path.touch(exist_ok=True)
+    with lock_path.open("r+", encoding="utf-8") as lock_file:
         fcntl.flock(lock_file, fcntl.LOCK_EX)
         tasks = load_tasks()
         yield tasks
@@ -67,23 +81,50 @@ def reserve_task(task_id: str, record: str | dict[str, Any]) -> None:
         tasks[task_id] = record
 
 
-def session_id() -> str:
+def new_session_id() -> str:
     return str(uuid.uuid4())
 
 
-def run_claude(session: str, cwd: str, prompt: str, *agent_args: str) -> int:
+def run_claude(session_id: str, cwd: str, prompt: str, *agent_args: str) -> int:
     return subprocess.run(
-        ["claude", "--session-id", session, "--print", prompt, *agent_args],
+        ["claude", "--session-id", session_id, "--print", prompt, *agent_args],
         cwd=cwd,
         check=False,
     ).returncode
 
 
+def new_task_record(
+    cwd: str,
+    prompt: str,
+    agent_args: tuple[str, ...],
+    when: datetime | None,
+) -> dict[str, Any]:
+    record: dict[str, Any] = {
+        "cwd": cwd,
+        "prompt": prompt,
+        "agent_args": list(agent_args),
+        "status": STATUS_SCHEDULED if when else STATUS_RUNNING,
+        "session_id": new_session_id(),
+    }
+    if when:
+        record["due_at"] = when.isoformat()
+    return record
+
+
+def execute_record(task_id: str, record: dict[str, Any]) -> int:
+    return execute_task(
+        task_id,
+        cast("str", record["session_id"]),
+        cast("str", record["cwd"]),
+        cast("str", record["prompt"]),
+        *cast("list[str]", record["agent_args"]),
+    )
+
+
 def run(task_id: str, prompt: str, *agent_args: str) -> int:
-    cwd = str(Path.cwd())
-    session = session_id()
-    reserve_task(task_id, {"cwd": cwd, "session_id": session, "status": STATUS_RUNNING})
-    return execute_task(task_id, session, cwd, prompt, *agent_args)
+    record = new_task_record(str(Path.cwd()), prompt, agent_args, None)
+    reserve_task(task_id, record)
+    return execute_record(task_id, record)
 
 
 def pickup(task_id: str, *agent_args: str) -> int:
@@ -91,14 +132,14 @@ def pickup(task_id: str, *agent_args: str) -> int:
         if task_id not in tasks:
             raise SystemExit(f"golem: task not found: {task_id}")
         task = cast("dict[str, Any]", tasks[task_id])
-        if task.get("status") == STATUS_SCHEDULED:
+        if task.get("status") in {STATUS_SCHEDULED, STATUS_CANCELLED}:
             raise SystemExit(f"golem: task has not started: {task_id}")
         if task.get("status") == STATUS_NEEDS_REVIEW:
             task["status"] = STATUS_DONE
         cwd = cast("str", task["cwd"])
-        session = cast("str", task["session_id"])
+        session_id = cast("str", task["session_id"])
     return subprocess.run(
-        ["claude", "--resume", session, *agent_args],
+        ["claude", "--resume", session_id, *agent_args],
         cwd=cwd,
         check=False,
     ).returncode
@@ -113,6 +154,39 @@ def close(task_id: str) -> int:
             raise SystemExit(f"golem: task does not need review: {task_id}")
         task["status"] = STATUS_DONE
     return 0
+
+
+def cancel_task(task_id: str) -> int:
+    with locked_tasks() as tasks:
+        if task_id not in tasks:
+            raise SystemExit(f"golem: task not found: {task_id}")
+        task = cast("dict[str, Any]", tasks[task_id])
+        if task.get("status") != STATUS_SCHEDULED:
+            raise SystemExit(f"golem: task is not scheduled: {task_id}")
+        at_job = task.get("at_job")
+        task["status"] = STATUS_CANCELLED
+    if not isinstance(at_job, str):
+        return 0
+    remove_at_job(at_job)
+    return 0
+
+
+def remove_at_job(at_job: str) -> None:
+    message: str | None = None
+    try:
+        result = subprocess.run(
+            ["atrm", at_job],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as error:
+        message = str(error)
+    else:
+        if result.returncode:
+            message = result.stderr.strip() or result.stdout.strip() or "atrm failed"
+    if message is not None:
+        print(f"golem: could not cancel at job {at_job}: {message}", file=sys.stderr)
 
 
 def list_tasks() -> int:
@@ -225,26 +299,19 @@ def next_reset_time() -> datetime | None:
     return reset_time
 
 
-def schedule_at(
-    task_id: str,
-    prompt: str,
-    agent_args: tuple[str, ...],
-    when: datetime,
-) -> int:
-    when = when.astimezone(UTC)
-    if when.second or when.microsecond:
-        when += timedelta(minutes=1)
-    when = when.replace(second=0, microsecond=0).astimezone()
-    record = {
-        "cwd": str(Path.cwd()),
-        "prompt": prompt,
-        "agent_args": list(agent_args),
-        "due_at": when.isoformat(),
-        "status": STATUS_SCHEDULED,
-        "session_id": session_id(),
-    }
-    reserve_task(task_id, record)
+def at_job_number(at_output: str) -> str | None:
+    match = re.search(r"\bjob\s+(\d+)\s+at\b", at_output)
+    if match is None:
+        return None
+    return match.group(1)
 
+
+def submit_at_job(
+    task_id: str,
+    record: dict[str, Any],
+    when: datetime,
+    previous_record: dict[str, Any] | None = None,
+) -> int:
     command = " ".join(
         shlex.quote(part)
         for part in (
@@ -252,6 +319,7 @@ def schedule_at(
             str(Path(__file__).resolve()),
             "_execute",
             task_id,
+            cast("str", record["session_id"]),
         )
     )
     try:
@@ -263,21 +331,51 @@ def schedule_at(
             check=False,
         )
         if result.returncode == 0:
-            print(f"golem: scheduled {task_id} for {when:%Y-%m-%d %H:%M %Z %z}")
-            return 0
-        message = result.stderr.strip() or result.stdout.strip() or "at failed"
+            at_job = at_job_number(result.stderr)
+            if at_job is None:
+                message = "at queued a job but its number is unknown; remove it with atq and atrm"
+            else:
+                with locked_tasks() as tasks:
+                    task = tasks.get(task_id)
+                    is_cancelled = task == {**record, "status": STATUS_CANCELLED}
+                    is_superseded = isinstance(task, dict) and (
+                        cast("dict[str, Any]", task).get("session_id") != record["session_id"]
+                    )
+                    if task == record:
+                        cast("dict[str, Any]", task)["at_job"] = at_job
+                if is_cancelled or is_superseded:
+                    remove_at_job(at_job)
+                    raise SystemExit(f"golem: task was cancelled while scheduling: {task_id}")
+                print(f"golem: scheduled {task_id} for {when:%Y-%m-%d %H:%M %Z %z}")
+                return 0
+        else:
+            message = result.stderr.strip() or result.stdout.strip() or "at failed"
     except OSError as error:
         message = str(error)
 
     with locked_tasks() as tasks:
         if tasks.get(task_id) == record:
-            del tasks[task_id]
+            if previous_record is None:
+                del tasks[task_id]
+            else:
+                tasks[task_id] = previous_record
     raise SystemExit(f"golem: could not schedule task: {message}")
 
 
-def execute_task(task_id: str, session: str, cwd: str, prompt: str, *agent_args: str) -> int:
+def schedule_new_task(
+    task_id: str,
+    prompt: str,
+    agent_args: tuple[str, ...],
+    when: datetime,
+) -> int:
+    record = new_task_record(str(Path.cwd()), prompt, agent_args, when)
+    reserve_task(task_id, record)
+    return submit_at_job(task_id, record, when)
+
+
+def execute_task(task_id: str, session_id: str, cwd: str, prompt: str, *agent_args: str) -> int:
     try:
-        returncode = run_claude(session, cwd, prompt, *agent_args)
+        returncode = run_claude(session_id, cwd, prompt, *agent_args)
     except OSError as error:
         print(f"golem: could not execute task: {error}", file=sys.stderr)
         returncode = 127
@@ -292,30 +390,74 @@ def execute_task(task_id: str, session: str, cwd: str, prompt: str, *agent_args:
     return returncode
 
 
-def execute_scheduled_task(task_id: str) -> int:
+def execute_scheduled_task(task_id: str, session_id: str) -> int:
     with locked_tasks() as tasks:
         task = tasks.get(task_id)
         if not isinstance(task, dict):
             return 0
         task_record = cast("dict[str, Any]", task)
-        if task_record.get("status") != STATUS_SCHEDULED:
+        if (
+            task_record.get("status") != STATUS_SCHEDULED
+            or task_record.get("session_id") != session_id
+        ):
             return 0
         task_record["status"] = STATUS_RUNNING
-        cwd = cast("str", task_record["cwd"])
-        prompt = cast("str", task_record["prompt"])
-        agent_args = cast("list[str]", task_record["agent_args"])
 
-    return execute_task(
-        task_id,
-        cast("str", task_record["session_id"]),
-        cwd,
-        prompt,
-        *agent_args,
+    return execute_record(task_id, task_record)
+
+
+def retryable_task(tasks: dict[str, Any], task_id: str) -> dict[str, Any]:
+    if task_id not in tasks:
+        raise SystemExit(f"golem: task not found: {task_id}")
+    task = cast("dict[str, Any]", tasks[task_id])
+    if task.get("status") not in {STATUS_FAILED, STATUS_CANCELLED}:
+        raise SystemExit(f"golem: task cannot be retried: {task_id}")
+    return task
+
+
+def retry_task(task_id: str, *, is_now: bool, at_text: str | None) -> int:
+    retryable_task(load_tasks(), task_id)
+    when = planned_execution_time(is_now=is_now, at_text=at_text)
+
+    with locked_tasks() as tasks:
+        task = retryable_task(tasks, task_id)
+        previous_record = task.copy()
+        record = new_task_record(
+            cast("str", task["cwd"]),
+            cast("str", task["prompt"]),
+            tuple(cast("list[str]", task["agent_args"])),
+            when,
+        )
+        tasks[task_id] = record
+    if when is None:
+        return execute_record(task_id, record)
+    return submit_at_job(task_id, record, when, previous_record)
+
+
+def planned_execution_time(*, is_now: bool, at_text: str | None) -> datetime | None:
+    if is_now:
+        return None
+    when = next_reset_time() if at_text is None else scheduled_time(at_text)
+    if when is None:
+        return None
+    when = when.astimezone(UTC)
+    if when.second or when.microsecond:
+        when += timedelta(minutes=1)
+    return when.replace(second=0, microsecond=0).astimezone()
+
+
+def add_scheduling_arguments(command_parser: argparse.ArgumentParser) -> None:
+    schedule_group = command_parser.add_mutually_exclusive_group()
+    schedule_group.add_argument("--now", action="store_true", help="run immediately")
+    schedule_group.add_argument(
+        "--at",
+        metavar="TIME",
+        help='local time, e.g. 9pm or "8:30am tomorrow"; rolls forward if passed',
     )
 
 
-def main() -> int:
-    golem_args = sys.argv[1:]
+def main(argv: list[str] | None = None) -> int:
+    golem_args = sys.argv[1:] if argv is None else argv
     agent_args: list[str] = []
     if "--" in golem_args:
         separator_index = golem_args.index("--")
@@ -327,53 +469,53 @@ def main() -> int:
 
     run_command = commands.add_parser(
         "run",
-        description="Run at the next usage reset, or immediately if no usage window is active.",
+        description=SCHEDULE_DESCRIPTION,
     )
     run_command.add_argument("id")
-    prompt = run_command.add_mutually_exclusive_group(required=True)
-    prompt.add_argument("prompt", nargs="?")
-    prompt.add_argument("--file")
-    schedule = run_command.add_mutually_exclusive_group()
-    schedule.add_argument("--now", action="store_true", help="run immediately")
-    schedule.add_argument(
-        "--at",
-        metavar="TIME",
-        help='local time, e.g. 9pm or "8:30am tomorrow"; rolls forward if passed',
-    )
+    prompt_group = run_command.add_mutually_exclusive_group(required=True)
+    prompt_group.add_argument("prompt", nargs="?")
+    prompt_group.add_argument("--file")
+    add_scheduling_arguments(run_command)
 
     pickup_command = commands.add_parser("pickup")
     pickup_command.add_argument("id")
     close_command = commands.add_parser("close")
     close_command.add_argument("id")
+    cancel_command = commands.add_parser("cancel")
+    cancel_command.add_argument("id")
+    retry_command = commands.add_parser(
+        "retry",
+        description=SCHEDULE_DESCRIPTION,
+    )
+    retry_command.add_argument("id")
+    add_scheduling_arguments(retry_command)
     commands.add_parser("list")
     execute_command = commands.add_parser("_execute")
     execute_command.add_argument("id")
+    execute_command.add_argument("session_id")
     arguments = parser.parse_args(golem_args)
 
     if arguments.command == "_execute":
-        return execute_scheduled_task(arguments.id)
+        return execute_scheduled_task(arguments.id, arguments.session_id)
     if arguments.command == "pickup":
         return pickup(arguments.id, *agent_args)
     if arguments.command == "close":
         return close(arguments.id)
+    if arguments.command == "cancel":
+        return cancel_task(arguments.id)
     if arguments.command == "list":
         return list_tasks()
+    if arguments.command == "retry":
+        if agent_args:
+            parser.error("retry does not accept agent arguments")
+        return retry_task(arguments.id, is_now=arguments.now, at_text=arguments.at)
     prompt_text = (
         Path(arguments.file).read_text(encoding="utf-8") if arguments.file else arguments.prompt
     )
-    if arguments.at is not None:
-        return schedule_at(
-            arguments.id,
-            prompt_text,
-            tuple(agent_args),
-            scheduled_time(arguments.at),
-        )
-    if arguments.now:
+    when = planned_execution_time(is_now=arguments.now, at_text=arguments.at)
+    if when is None:
         return run(arguments.id, prompt_text, *agent_args)
-    reset_time = next_reset_time()
-    if reset_time is None:
-        return run(arguments.id, prompt_text, *agent_args)
-    return schedule_at(arguments.id, prompt_text, tuple(agent_args), reset_time)
+    return schedule_new_task(arguments.id, prompt_text, tuple(agent_args), when)
 
 
 if __name__ == "__main__":
