@@ -294,13 +294,6 @@ def next_reset_time() -> datetime | None:
     return reset_time
 
 
-def normalized_schedule_time(when: datetime) -> datetime:
-    when = when.astimezone(UTC)
-    if when.second or when.microsecond:
-        when += timedelta(minutes=1)
-    return when.replace(second=0, microsecond=0).astimezone()
-
-
 def at_job_number(at_output: str) -> str | None:
     match = re.search(r"\bjob\s+(\d+)\s+at\b", at_output)
     if match is None:
@@ -363,7 +356,6 @@ def schedule_at(
     agent_args: tuple[str, ...],
     when: datetime,
 ) -> int:
-    when = normalized_schedule_time(when)
     record = new_task_record(str(Path.cwd()), prompt, agent_args, when)
     reserve_task(task_id, record)
     return schedule_task(task_id, record, when)
@@ -379,10 +371,10 @@ def execute_task(task_id: str, session: str, cwd: str, prompt: str, *agent_args:
         task = tasks.get(task_id)
         if not isinstance(task, dict):
             return returncode
-        record = cast("dict[str, Any]", task)
-        if record.get("status") == STATUS_RUNNING:
-            record["status"] = STATUS_NEEDS_REVIEW if returncode == 0 else STATUS_FAILED
-            record["returncode"] = returncode
+        task_record = cast("dict[str, Any]", task)
+        if task_record.get("status") == STATUS_RUNNING:
+            task_record["status"] = STATUS_NEEDS_REVIEW if returncode == 0 else STATUS_FAILED
+            task_record["returncode"] = returncode
     return returncode
 
 
@@ -391,32 +383,32 @@ def execute_scheduled_task(task_id: str, session: str) -> int:
         task = tasks.get(task_id)
         if not isinstance(task, dict):
             return 0
-        record = cast("dict[str, Any]", task)
-        if record.get("status") != STATUS_SCHEDULED or record.get("session_id") != session:
+        task_record = cast("dict[str, Any]", task)
+        if (
+            task_record.get("status") != STATUS_SCHEDULED
+            or task_record.get("session_id") != session
+        ):
             return 0
-        record["status"] = STATUS_RUNNING
+        task_record["status"] = STATUS_RUNNING
 
-    return execute_record(task_id, record)
+    return execute_record(task_id, task_record)
 
 
-def retry_task(task_id: str, *, is_now: bool, at_value: str | None) -> int:
+def retryable_task(tasks: dict[str, Any], task_id: str) -> dict[str, Any]:
+    if task_id not in tasks:
+        raise SystemExit(f"golem: task not found: {task_id}")
+    task = cast("dict[str, Any]", tasks[task_id])
+    if task.get("status") not in {STATUS_FAILED, STATUS_CANCELLED}:
+        raise SystemExit(f"golem: task cannot be retried: {task_id}")
+    return task
+
+
+def retry_task(task_id: str, *, is_now: bool, at_text: str | None) -> int:
+    retryable_task(load_tasks(), task_id)
+    when = planned_execution_time(is_now=is_now, at_text=at_text)
+
     with locked_tasks() as tasks:
-        if task_id not in tasks:
-            raise SystemExit(f"golem: task not found: {task_id}")
-        task = cast("dict[str, Any]", tasks[task_id])
-        if task.get("status") not in {STATUS_FAILED, STATUS_CANCELLED}:
-            raise SystemExit(f"golem: task cannot be retried: {task_id}")
-
-    when = planned_execution_time(is_now=is_now, at_value=at_value)
-    if when is not None:
-        when = normalized_schedule_time(when)
-
-    with locked_tasks() as tasks:
-        if task_id not in tasks:
-            raise SystemExit(f"golem: task not found: {task_id}")
-        task = cast("dict[str, Any]", tasks[task_id])
-        if task.get("status") not in {STATUS_FAILED, STATUS_CANCELLED}:
-            raise SystemExit(f"golem: task cannot be retried: {task_id}")
+        task = retryable_task(tasks, task_id)
         previous_record = task.copy()
         record = new_task_record(
             cast("str", task["cwd"]),
@@ -430,26 +422,16 @@ def retry_task(task_id: str, *, is_now: bool, at_value: str | None) -> int:
     return schedule_task(task_id, record, when, previous_record)
 
 
-def planned_execution_time(*, is_now: bool, at_value: str | None) -> datetime | None:
-    if at_value is not None:
-        return scheduled_time(at_value)
+def planned_execution_time(*, is_now: bool, at_text: str | None) -> datetime | None:
     if is_now:
         return None
-    return next_reset_time()
-
-
-def start_run(
-    task_id: str,
-    prompt_text: str,
-    agent_args: tuple[str, ...],
-    *,
-    is_now: bool,
-    at_value: str | None,
-) -> int:
-    when = planned_execution_time(is_now=is_now, at_value=at_value)
+    when = next_reset_time() if at_text is None else scheduled_time(at_text)
     if when is None:
-        return run(task_id, prompt_text, *agent_args)
-    return schedule_at(task_id, prompt_text, agent_args, when)
+        return None
+    when = when.astimezone(UTC)
+    if when.second or when.microsecond:
+        when += timedelta(minutes=1)
+    return when.replace(second=0, microsecond=0).astimezone()
 
 
 def add_scheduling_arguments(command: argparse.ArgumentParser) -> None:
@@ -511,20 +493,17 @@ def main(argv: list[str] | None = None) -> int:
         return cancel_task(arguments.id)
     if arguments.command == "list":
         return list_tasks()
-    if arguments.command == "retry" and agent_args:
-        parser.error("retry does not accept agent arguments")
-    if arguments.command == "run":
-        prompt_text = (
-            Path(arguments.file).read_text(encoding="utf-8") if arguments.file else arguments.prompt
-        )
-        return start_run(
-            arguments.id,
-            prompt_text,
-            tuple(agent_args),
-            is_now=arguments.now,
-            at_value=arguments.at,
-        )
-    return retry_task(arguments.id, is_now=arguments.now, at_value=arguments.at)
+    if arguments.command == "retry":
+        if agent_args:
+            parser.error("retry does not accept agent arguments")
+        return retry_task(arguments.id, is_now=arguments.now, at_text=arguments.at)
+    prompt_text = (
+        Path(arguments.file).read_text(encoding="utf-8") if arguments.file else arguments.prompt
+    )
+    when = planned_execution_time(is_now=arguments.now, at_text=arguments.at)
+    if when is None:
+        return run(arguments.id, prompt_text, *agent_args)
+    return schedule_at(arguments.id, prompt_text, tuple(agent_args), when)
 
 
 if __name__ == "__main__":
