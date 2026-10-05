@@ -13,6 +13,11 @@ AGENT_ARGS = ["--model", "haiku"]
 AT_TEXT = "9pm"
 OLD_SESSION_ID = "old-session"
 OLD_DUE_AT = "2030-01-01T09:00:00+00:00"
+CLAUDE_RESULT = "completed the task"
+USAGE_LIMIT_RESULT = "You've hit your limit · resets 3pm"
+RESET_TIME = datetime(2030, 1, 1, 10, 0, tzinfo=UTC)
+EARLIER_RESET_TIME = datetime(2030, 1, 1, 11, 0, tzinfo=UTC)
+LATER_RESET_TIME = datetime(2030, 1, 2, 11, 0, tzinfo=UTC)
 
 
 @pytest.fixture(scope="session")
@@ -21,6 +26,9 @@ def fake_bin_path(tmp_path_factory):
     scripts = {
         "claude": """#!/bin/sh
 printf '%s\\n' "$@" > "$GOLEM_CLAUDE_ARGS"
+if [ -f "$GOLEM_CLAUDE_STDOUT" ]; then
+    cat "$GOLEM_CLAUDE_STDOUT"
+fi
 exit "${GOLEM_CLAUDE_EXIT:-0}"
 """,
         "at": """#!/bin/sh
@@ -50,18 +58,21 @@ exit "${GOLEM_ATRM_EXIT:-0}"
 @pytest.fixture
 def fake_commands(monkeypatch, tmp_path, fake_bin_path):
     claude_args_path = tmp_path / "claude-args"
+    claude_stdout_path = tmp_path / "claude-stdout"
     at_input_path = tmp_path / "at-input"
     atrm_args_path = tmp_path / "atrm-args"
     claude_args_path.touch()
     atrm_args_path.touch()
     monkeypatch.setenv("PATH", f"{fake_bin_path}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.setenv("GOLEM_CLAUDE_ARGS", str(claude_args_path))
+    monkeypatch.setenv("GOLEM_CLAUDE_STDOUT", str(claude_stdout_path))
     monkeypatch.setenv("GOLEM_AT_INPUT", str(at_input_path))
     monkeypatch.setenv("GOLEM_ATRM_ARGS", str(atrm_args_path))
     return {
         "at_input_path": at_input_path,
         "atrm_args_path": atrm_args_path,
         "claude_args_path": claude_args_path,
+        "claude_stdout_path": claude_stdout_path,
     }
 
 
@@ -75,7 +86,7 @@ def read_task(ledger_path):
     return json.loads(ledger_path.read_text(encoding="utf-8"))[TASK_ID]
 
 
-def write_task(ledger_path, status):
+def write_task(ledger_path, status, **fields: object):
     task = {
         "agent_args": AGENT_ARGS,
         "at_job": "11",
@@ -86,6 +97,7 @@ def write_task(ledger_path, status):
         "session_id": OLD_SESSION_ID,
         "status": status,
     }
+    task.update(fields)
     ledger_path.parent.mkdir(parents=True, exist_ok=True)
     ledger_path.write_text(json.dumps({TASK_ID: task}), encoding="utf-8")
 
@@ -95,7 +107,66 @@ def logged_claude_args(fake_commands):
 
 
 def expected_claude_args(task):
-    return ["--session-id", task["session_id"], "--print", PROMPT, *AGENT_ARGS]
+    return [
+        "--session-id",
+        task["session_id"],
+        "--print",
+        PROMPT,
+        "--output-format",
+        "json",
+        *AGENT_ARGS,
+    ]
+
+
+def write_claude_output(fake_commands, result, *, api_error_status=None):
+    output = {
+        "api_error_status": api_error_status,
+        "is_error": api_error_status is not None,
+        "result": result,
+        "type": "result",
+    }
+    fake_commands["claude_stdout_path"].write_text(json.dumps(output), encoding="utf-8")
+
+
+def write_usage_limit_output(fake_commands):
+    write_claude_output(
+        fake_commands,
+        USAGE_LIMIT_RESULT,
+        api_error_status=golem.USAGE_LIMIT_STATUS,
+    )
+
+
+def no_reset_time():
+    return None
+
+
+def raise_usage_lookup_error():
+    raise SystemExit
+
+
+def planned_execution_time_for_reset(find_reset_time):
+    return lambda *, is_now, at_text: None if is_now else find_reset_time()
+
+
+def usage_response(five_hour, seven_day):
+    frames = (
+        {
+            "type": "control_response",
+            "response": {"request_id": "init", "subtype": "success"},
+        },
+        {
+            "type": "control_response",
+            "response": {
+                "request_id": "usage",
+                "subtype": "success",
+                "response": {
+                    "rate_limits": {"five_hour": five_hour, "seven_day": seven_day},
+                    "rate_limits_available": True,
+                },
+            },
+        },
+    )
+    return "\n".join(json.dumps(frame) for frame in frames)
 
 
 @pytest.mark.parametrize(
@@ -120,16 +191,44 @@ def test_ledger_falls_back_to_home_when_xdg_state_home_is_not_absolute(
 
 
 @pytest.mark.parametrize(
-    ("claude_exit", "expected_status"),
+    ("claude_exit", "claude_output", "expected_result", "expected_status"),
     [
-        pytest.param(0, golem.STATUS_NEEDS_REVIEW, id="success"),
-        pytest.param(1, golem.STATUS_FAILED, id="failure"),
+        pytest.param(
+            0,
+            json.dumps({"result": CLAUDE_RESULT}),
+            CLAUDE_RESULT,
+            golem.STATUS_NEEDS_REVIEW,
+            id="json-success",
+        ),
+        pytest.param(
+            1,
+            json.dumps({"result": CLAUDE_RESULT}),
+            CLAUDE_RESULT,
+            golem.STATUS_FAILED,
+            id="json-failure",
+        ),
+        pytest.param(
+            0,
+            "plain output",
+            "plain output",
+            golem.STATUS_NEEDS_REVIEW,
+            id="plain-output",
+        ),
+        pytest.param(0, "", None, golem.STATUS_NEEDS_REVIEW, id="empty-output"),
     ],
 )
 def test_run_now_records_claude_result(
-    fake_commands, monkeypatch, ledger_path, claude_exit, expected_status
+    capsys,
+    fake_commands,
+    monkeypatch,
+    ledger_path,
+    claude_exit,
+    claude_output,
+    expected_result,
+    expected_status,
 ):
     monkeypatch.setenv("GOLEM_CLAUDE_EXIT", str(claude_exit))
+    fake_commands["claude_stdout_path"].write_text(claude_output, encoding="utf-8")
 
     assert golem.main(["run", TASK_ID, PROMPT, "--now", "--", *AGENT_ARGS]) == claude_exit
 
@@ -137,6 +236,142 @@ def test_run_now_records_claude_result(
     assert task["status"] == expected_status
     assert task["returncode"] == claude_exit
     assert logged_claude_args(fake_commands) == expected_claude_args(task)
+    if expected_result is None:
+        assert "result" not in task
+        assert capsys.readouterr().out == ""
+        with pytest.raises(SystemExit):
+            golem.main(["show", TASK_ID])
+        return
+    assert task["result"] == expected_result
+    assert capsys.readouterr().out == f"{expected_result}\n"
+
+    assert golem.main(["show", TASK_ID]) == 0
+
+    assert capsys.readouterr().out == f"{expected_result}\n"
+
+
+def test_usage_limited_task_resumes_at_reset_in_same_session(
+    fake_commands, monkeypatch, ledger_path
+):
+    write_usage_limit_output(fake_commands)
+    monkeypatch.setattr(
+        golem,
+        "planned_execution_time",
+        planned_execution_time_for_reset(lambda: RESET_TIME),
+    )
+
+    assert golem.main(["run", TASK_ID, PROMPT, "--now", "--", *AGENT_ARGS]) == 0
+
+    task = read_task(ledger_path)
+    assert task["status"] == golem.STATUS_SCHEDULED
+    assert task["due_at"] == RESET_TIME.isoformat()
+    session_id = task["session_id"]
+
+    write_claude_output(fake_commands, CLAUDE_RESULT)
+
+    assert golem.main(["_execute", TASK_ID, session_id]) == 0
+
+    task = read_task(ledger_path)
+    assert task["status"] == golem.STATUS_NEEDS_REVIEW
+    assert task["session_id"] == session_id
+    assert logged_claude_args(fake_commands) == [
+        "--resume",
+        session_id,
+        "--print",
+        golem.USAGE_LIMIT_RESUME_PROMPT,
+        "--output-format",
+        "json",
+        *AGENT_ARGS,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("usage_limit_resumes", "find_reset_time"),
+    [
+        pytest.param(golem.MAX_USAGE_LIMIT_RESUMES, lambda: RESET_TIME, id="resume-cap"),
+        pytest.param(0, no_reset_time, id="no-reset"),
+        pytest.param(0, raise_usage_lookup_error, id="lookup-error"),
+    ],
+)
+def test_usage_limited_task_fails_when_it_cannot_be_rescheduled(
+    fake_commands,
+    monkeypatch,
+    ledger_path,
+    usage_limit_resumes,
+    find_reset_time,
+):
+    write_usage_limit_output(fake_commands)
+    monkeypatch.setattr(
+        golem,
+        "planned_execution_time",
+        planned_execution_time_for_reset(find_reset_time),
+    )
+    write_task(
+        ledger_path,
+        golem.STATUS_RUNNING,
+        usage_limit_resumes=usage_limit_resumes,
+    )
+
+    assert golem.execute_task(TASK_ID, read_task(ledger_path)) == 0
+
+    task = read_task(ledger_path)
+    assert task["status"] == golem.STATUS_FAILED
+    assert task["returncode"] == 0
+    assert task["result"] == USAGE_LIMIT_RESULT
+
+
+def test_usage_limited_task_fails_when_at_cannot_reschedule(
+    fake_commands, monkeypatch, ledger_path
+):
+    write_usage_limit_output(fake_commands)
+    monkeypatch.setenv("GOLEM_AT_EXIT", "1")
+    monkeypatch.setattr(
+        golem,
+        "planned_execution_time",
+        planned_execution_time_for_reset(lambda: RESET_TIME),
+    )
+    write_task(ledger_path, golem.STATUS_RUNNING)
+
+    with pytest.raises(SystemExit):
+        golem.execute_task(TASK_ID, read_task(ledger_path))
+
+    task = read_task(ledger_path)
+    assert task["status"] == golem.STATUS_FAILED
+    assert task["returncode"] == 0
+    assert task["result"] == USAGE_LIMIT_RESULT
+
+
+@pytest.mark.parametrize(
+    ("five_hour", "seven_day", "expected_reset_time"),
+    [
+        pytest.param(
+            {"utilization": 74, "resets_at": EARLIER_RESET_TIME.isoformat()},
+            {"utilization": 74, "resets_at": LATER_RESET_TIME.isoformat()},
+            EARLIER_RESET_TIME,
+            id="five-hour-available",
+        ),
+        pytest.param(
+            {"utilization": 100, "resets_at": LATER_RESET_TIME.isoformat()},
+            {"utilization": 100, "resets_at": EARLIER_RESET_TIME.isoformat()},
+            LATER_RESET_TIME,
+            id="latest-exhausted-window",
+        ),
+        pytest.param(
+            {"utilization": 74, "resets_at": EARLIER_RESET_TIME.isoformat()},
+            {"utilization": 100, "resets_at": LATER_RESET_TIME.isoformat()},
+            LATER_RESET_TIME,
+            id="weekly-exhausted",
+        ),
+    ],
+)
+def test_next_reset_time_picks_latest_exhausted_window(
+    fake_commands, five_hour, seven_day, expected_reset_time
+):
+    fake_commands["claude_stdout_path"].write_text(
+        usage_response(five_hour, seven_day), encoding="utf-8"
+    )
+
+    assert golem.next_reset_time() == expected_reset_time
 
 
 def test_scheduled_task_runs_when_its_at_job_fires(fake_commands, ledger_path):

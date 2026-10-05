@@ -24,6 +24,10 @@ STATUS_DONE = "done"
 STATUS_CANCELLED = "cancelled"
 USAGE_ERROR = "golem: usage lookup unavailable"
 USAGE_TIMEOUT_SECONDS = 30
+USAGE_LIMIT_STATUS = 429
+FULL_UTILIZATION = 100
+MAX_USAGE_LIMIT_RESUMES = 2
+USAGE_LIMIT_RESUME_PROMPT = "The usage limit has reset. Continue the task."
 SCHEDULE_DESCRIPTION = "Run at the next usage reset, or immediately if no usage window is active."
 
 
@@ -85,12 +89,27 @@ def new_session_id() -> str:
     return str(uuid.uuid4())
 
 
-def run_claude(session_id: str, cwd: str, prompt: str, *agent_args: str) -> int:
-    return subprocess.run(
-        ["claude", "--session-id", session_id, "--print", prompt, *agent_args],
-        cwd=cwd,
+def run_claude(task: dict[str, Any]) -> tuple[int, str]:
+    session_id = cast("str", task["session_id"])
+    is_resuming = cast("int", task.get("usage_limit_resumes", 0)) > 0
+    command = (
+        ["claude", "--resume", session_id, "--print", USAGE_LIMIT_RESUME_PROMPT]
+        if is_resuming
+        else ["claude", "--session-id", session_id, "--print", cast("str", task["prompt"])]
+    )
+    claude_process = subprocess.run(
+        [
+            *command,
+            "--output-format",
+            "json",
+            *cast("list[str]", task["agent_args"]),
+        ],
+        cwd=cast("str", task["cwd"]),
+        stdout=subprocess.PIPE,
+        encoding="utf-8",
         check=False,
-    ).returncode
+    )
+    return claude_process.returncode, claude_process.stdout
 
 
 def new_task_record(
@@ -111,20 +130,10 @@ def new_task_record(
     return record
 
 
-def execute_record(task_id: str, record: dict[str, Any]) -> int:
-    return execute_task(
-        task_id,
-        cast("str", record["session_id"]),
-        cast("str", record["cwd"]),
-        cast("str", record["prompt"]),
-        *cast("list[str]", record["agent_args"]),
-    )
-
-
 def run(task_id: str, prompt: str, *agent_args: str) -> int:
     record = new_task_record(str(Path.cwd()), prompt, agent_args, None)
     reserve_task(task_id, record)
-    return execute_record(task_id, record)
+    return execute_task(task_id, record)
 
 
 def pickup(task_id: str, *agent_args: str) -> int:
@@ -153,6 +162,18 @@ def close(task_id: str) -> int:
         if task.get("status") != STATUS_NEEDS_REVIEW:
             raise SystemExit(f"golem: task does not need review: {task_id}")
         task["status"] = STATUS_DONE
+    return 0
+
+
+def show_task_result(task_id: str) -> int:
+    tasks = load_tasks()
+    if task_id not in tasks:
+        raise SystemExit(f"golem: task not found: {task_id}")
+    task = cast("dict[str, Any]", tasks[task_id])
+    result = task.get("result")
+    if not isinstance(result, str):
+        raise SystemExit(f"golem: task has no result: {task_id}")
+    print_task_result(result)
     return 0
 
 
@@ -281,12 +302,19 @@ def next_reset_time() -> datetime | None:
             or usage["response"]["rate_limits_available"] is not True
         ):
             raise SystemExit(USAGE_ERROR)
-        five_hour_limit = usage["response"]["rate_limits"]["five_hour"]
+        rate_limits = usage["response"]["rate_limits"]
+        five_hour_limit = rate_limits["five_hour"]
+        seven_day_limit = rate_limits.get("seven_day")
+        exhausted_limits = [
+            limit
+            for limit in (five_hour_limit, seven_day_limit)
+            if limit is not None and limit["utilization"] >= FULL_UTILIZATION
+        ]
+        if exhausted_limits:
+            return max(reset_time_from_limit(limit) for limit in exhausted_limits)
         if five_hour_limit is None or five_hour_limit["resets_at"] is None:
             return None
-        reset_time = datetime.fromisoformat(five_hour_limit["resets_at"])
-        if reset_time.tzinfo is None or reset_time <= datetime.now(UTC):
-            raise SystemExit(USAGE_ERROR)
+        return reset_time_from_limit(five_hour_limit)
     except (
         json.JSONDecodeError,
         KeyError,
@@ -296,6 +324,12 @@ def next_reset_time() -> datetime | None:
         ValueError,
     ) as error:
         raise SystemExit(USAGE_ERROR) from error
+
+
+def reset_time_from_limit(limit: dict[str, Any]) -> datetime:
+    reset_time = datetime.fromisoformat(limit["resets_at"])
+    if reset_time.tzinfo is None or reset_time <= datetime.now(UTC):
+        raise SystemExit(USAGE_ERROR)
     return reset_time
 
 
@@ -373,20 +407,99 @@ def schedule_new_task(
     return submit_at_job(task_id, record, when)
 
 
-def execute_task(task_id: str, session_id: str, cwd: str, prompt: str, *agent_args: str) -> int:
+def claude_result_and_usage_limit(output: str) -> tuple[str, bool]:
     try:
-        returncode = run_claude(session_id, cwd, prompt, *agent_args)
-    except OSError as error:
-        print(f"golem: could not execute task: {error}", file=sys.stderr)
-        returncode = 127
+        parsed_response = cast("object", json.loads(output))
+    except json.JSONDecodeError:
+        return output, False
+    if not isinstance(parsed_response, dict):
+        return output, False
+    response = cast("dict[str, object]", parsed_response)
+    result = response.get("result")
+    if not isinstance(result, str):
+        return output, False
+    return result, response.get("api_error_status") == USAGE_LIMIT_STATUS
+
+
+def reschedule_task(
+    task_id: str,
+    result: str,
+) -> tuple[dict[str, Any], datetime] | None:
+    try:
+        when = planned_execution_time(is_now=False, at_text=None)
+    except SystemExit:
+        return None
+    if when is None:
+        return None
     with locked_tasks() as tasks:
         task = tasks.get(task_id)
         if not isinstance(task, dict):
-            return returncode
+            return None
         task_record = cast("dict[str, Any]", task)
-        if task_record.get("status") == STATUS_RUNNING:
-            task_record["status"] = STATUS_NEEDS_REVIEW if returncode == 0 else STATUS_FAILED
-            task_record["returncode"] = returncode
+        if task_record.get("status") != STATUS_RUNNING:
+            return None
+        task_record["result"] = result
+        task_record.pop("at_job", None)
+        task_record["status"] = STATUS_SCHEDULED
+        task_record["due_at"] = when.isoformat()
+        task_record["usage_limit_resumes"] = task_record.get("usage_limit_resumes", 0) + 1
+        return task_record.copy(), when
+
+
+def finish_task(
+    task_id: str,
+    result: str | None,
+    returncode: int,
+    *,
+    is_usage_limit: bool,
+) -> None:
+    with locked_tasks() as tasks:
+        stored_task = tasks.get(task_id)
+        if not isinstance(stored_task, dict):
+            return
+        task_record = cast("dict[str, Any]", stored_task)
+        if task_record.get("status") != STATUS_RUNNING:
+            return
+        if result is not None:
+            task_record["result"] = result
+        task_record["status"] = (
+            STATUS_NEEDS_REVIEW if returncode == 0 and not is_usage_limit else STATUS_FAILED
+        )
+        task_record["returncode"] = returncode
+
+
+def print_task_result(result: str) -> None:
+    print(result, end="" if result.endswith("\n") else "\n")
+
+
+def execute_task(task_id: str, task: dict[str, Any]) -> int:
+    try:
+        returncode, output = run_claude(task)
+    except OSError as error:
+        print(f"golem: could not execute task: {error}", file=sys.stderr)
+        returncode = 127
+        output = ""
+    result, is_usage_limit = claude_result_and_usage_limit(output)
+    usage_limit_resumes = cast("int", task.get("usage_limit_resumes", 0))
+    if is_usage_limit and usage_limit_resumes < MAX_USAGE_LIMIT_RESUMES:
+        rescheduled_task = reschedule_task(task_id, result)
+        if rescheduled_task is not None:
+            rescheduled_record, when = rescheduled_task
+            previous_record = {
+                **rescheduled_record,
+                "status": STATUS_FAILED,
+                "returncode": returncode,
+            }
+            print_task_result(result)
+            return submit_at_job(task_id, rescheduled_record, when, previous_record)
+    finish_task(
+        task_id,
+        result if output else None,
+        returncode,
+        is_usage_limit=is_usage_limit,
+    )
+    if output:
+        print_task_result(result)
     return returncode
 
 
@@ -403,7 +516,7 @@ def execute_scheduled_task(task_id: str, session_id: str) -> int:
             return 0
         task_record["status"] = STATUS_RUNNING
 
-    return execute_record(task_id, task_record)
+    return execute_task(task_id, task_record)
 
 
 def retryable_task(tasks: dict[str, Any], task_id: str) -> dict[str, Any]:
@@ -430,7 +543,7 @@ def retry_task(task_id: str, *, is_now: bool, at_text: str | None) -> int:
         )
         tasks[task_id] = record
     if when is None:
-        return execute_record(task_id, record)
+        return execute_task(task_id, record)
     return submit_at_job(task_id, record, when, previous_record)
 
 
@@ -481,6 +594,8 @@ def main(argv: list[str] | None = None) -> int:
     pickup_command.add_argument("id")
     close_command = commands.add_parser("close")
     close_command.add_argument("id")
+    show_command = commands.add_parser("show")
+    show_command.add_argument("id")
     cancel_command = commands.add_parser("cancel")
     cancel_command.add_argument("id")
     retry_command = commands.add_parser(
@@ -501,6 +616,8 @@ def main(argv: list[str] | None = None) -> int:
         return pickup(arguments.id, *agent_args)
     if arguments.command == "close":
         return close(arguments.id)
+    if arguments.command == "show":
+        return show_task_result(arguments.id)
     if arguments.command == "cancel":
         return cancel_task(arguments.id)
     if arguments.command == "list":
