@@ -285,19 +285,34 @@ def test_usage_limited_task_resumes_at_reset_in_same_session(
     ]
 
 
+def test_usage_limited_task_fails_once_resumes_run_out(fake_commands, monkeypatch, ledger_path):
+    write_usage_limit_output(fake_commands)
+    monkeypatch.setattr(
+        golem,
+        "planned_execution_time",
+        planned_execution_time_for_reset(lambda: RESET_TIME),
+    )
+    golem.main(["run", TASK_ID, PROMPT, "--now"])
+
+    for _ in range(golem.MAX_USAGE_LIMIT_RESUMES):
+        task = read_task(ledger_path)
+        assert task["status"] == golem.STATUS_SCHEDULED
+        golem.main(["_execute", TASK_ID, task["session_id"]])
+
+    assert read_task(ledger_path)["status"] == golem.STATUS_FAILED
+
+
 @pytest.mark.parametrize(
-    ("usage_limit_resumes", "find_reset_time"),
+    "find_reset_time",
     [
-        pytest.param(golem.MAX_USAGE_LIMIT_RESUMES, lambda: RESET_TIME, id="resume-cap"),
-        pytest.param(0, no_reset_time, id="no-reset"),
-        pytest.param(0, raise_usage_lookup_error, id="lookup-error"),
+        pytest.param(no_reset_time, id="no-reset"),
+        pytest.param(raise_usage_lookup_error, id="lookup-error"),
     ],
 )
 def test_usage_limited_task_fails_when_it_cannot_be_rescheduled(
     fake_commands,
     monkeypatch,
     ledger_path,
-    usage_limit_resumes,
     find_reset_time,
 ):
     write_usage_limit_output(fake_commands)
@@ -306,11 +321,7 @@ def test_usage_limited_task_fails_when_it_cannot_be_rescheduled(
         "planned_execution_time",
         planned_execution_time_for_reset(find_reset_time),
     )
-    write_task(
-        ledger_path,
-        golem.STATUS_RUNNING,
-        usage_limit_resumes=usage_limit_resumes,
-    )
+    write_task(ledger_path, golem.STATUS_RUNNING)
 
     assert golem.execute_task(TASK_ID, read_task(ledger_path)) == 0
 
@@ -331,14 +342,17 @@ def test_usage_limited_task_fails_when_at_cannot_reschedule(
         planned_execution_time_for_reset(lambda: RESET_TIME),
     )
     write_task(ledger_path, golem.STATUS_RUNNING)
+    running_task = read_task(ledger_path)
 
     with pytest.raises(SystemExit):
-        golem.execute_task(TASK_ID, read_task(ledger_path))
+        golem.execute_task(TASK_ID, running_task)
 
-    task = read_task(ledger_path)
-    assert task["status"] == golem.STATUS_FAILED
-    assert task["returncode"] == 0
-    assert task["result"] == USAGE_LIMIT_RESULT
+    assert read_task(ledger_path) == {
+        **running_task,
+        "result": USAGE_LIMIT_RESULT,
+        "returncode": 0,
+        "status": golem.STATUS_FAILED,
+    }
 
 
 @pytest.mark.parametrize(

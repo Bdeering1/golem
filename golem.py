@@ -486,7 +486,8 @@ def execute_task(task_id: str, task: dict[str, Any]) -> int:
         if rescheduled_task is not None:
             rescheduled_record, when = rescheduled_task
             previous_record = {
-                **rescheduled_record,
+                **task,
+                "result": result,
                 "status": STATUS_FAILED,
                 "returncode": returncode,
             }
