@@ -413,6 +413,16 @@ def claude_result_and_usage_limit(output: str) -> tuple[str, bool]:
         parsed_response = cast("object", json.loads(output))
     except json.JSONDecodeError:
         return output, False
+    if isinstance(parsed_response, list):
+        parsed_response = next(
+            (
+                cast("dict[str, object]", message)
+                for message in reversed(cast("list[object]", parsed_response))
+                if isinstance(message, dict)
+                and cast("dict[str, object]", message).get("type") == "result"
+            ),
+            None,
+        )
     if not isinstance(parsed_response, dict):
         return output, False
     response = cast("dict[str, object]", parsed_response)

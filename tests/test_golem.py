@@ -118,14 +118,15 @@ def expected_claude_args(task):
     ]
 
 
-def write_claude_output(fake_commands, result, *, api_error_status=None):
+def write_claude_output(fake_commands, result, *, api_error_status=None, is_verbose=False):
     output = {
         "api_error_status": api_error_status,
         "is_error": api_error_status is not None,
         "result": result,
         "type": "result",
     }
-    fake_commands["claude_stdout_path"].write_text(json.dumps(output), encoding="utf-8")
+    response = [{"type": "system", "subtype": "init"}, output] if is_verbose else output
+    fake_commands["claude_stdout_path"].write_text(json.dumps(response), encoding="utf-8")
 
 
 @pytest.fixture
@@ -203,6 +204,18 @@ def test_ledger_falls_back_to_home_when_xdg_state_home_is_not_absolute(
         ),
         pytest.param(
             0,
+            json.dumps(
+                [
+                    {"type": "system", "subtype": "init"},
+                    {"type": "result", "result": CLAUDE_RESULT},
+                ]
+            ),
+            CLAUDE_RESULT,
+            golem.STATUS_NEEDS_REVIEW,
+            id="verbose-json-success",
+        ),
+        pytest.param(
+            0,
             "plain output",
             "plain output",
             golem.STATUS_NEEDS_REVIEW,
@@ -237,22 +250,35 @@ def test_run_now_records_claude_result(
     assert capsys.readouterr().out == f"{expected_result}\n"
 
 
+@pytest.mark.parametrize("is_verbose", [False, True])
 def test_usage_limited_task_resumes_at_reset_in_same_session(
-    usage_limited_claude, fake_commands, ledger_path
+    usage_limited_claude, fake_commands, monkeypatch, ledger_path, is_verbose
 ):
-    assert golem.main(["run", TASK_ID, PROMPT, "--now", "--", *AGENT_ARGS]) == 0
+    monkeypatch.setenv("GOLEM_CLAUDE_EXIT", "1")
+    agent_args = [*AGENT_ARGS, "--verbose"] if is_verbose else AGENT_ARGS
+    write_claude_output(
+        fake_commands,
+        USAGE_LIMIT_RESULT,
+        api_error_status=golem.USAGE_LIMIT_HTTP_STATUS,
+        is_verbose=is_verbose,
+    )
+
+    assert golem.main(["run", TASK_ID, PROMPT, "--now", "--", *agent_args]) == 0
 
     task = read_task(ledger_path)
     assert task["status"] == golem.STATUS_SCHEDULED
+    assert task["result"] == USAGE_LIMIT_RESULT
     assert datetime.fromisoformat(task["due_at"]) == RESET_TIME
     session_id = task["session_id"]
 
-    write_claude_output(fake_commands, CLAUDE_RESULT)
+    write_claude_output(fake_commands, CLAUDE_RESULT, is_verbose=is_verbose)
+    monkeypatch.delenv("GOLEM_CLAUDE_EXIT")
 
     assert golem.main(["_execute", TASK_ID, session_id]) == 0
 
     task = read_task(ledger_path)
     assert task["status"] == golem.STATUS_NEEDS_REVIEW
+    assert task["result"] == CLAUDE_RESULT
     assert task["session_id"] == session_id
     assert logged_claude_args(fake_commands) == [
         "--resume",
@@ -261,7 +287,7 @@ def test_usage_limited_task_resumes_at_reset_in_same_session(
         golem.USAGE_LIMIT_RESUME_PROMPT,
         "--output-format",
         "json",
-        *AGENT_ARGS,
+        *agent_args,
     ]
 
 
