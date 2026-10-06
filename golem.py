@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
+    import io
     from collections.abc import Generator
 
 STATUS_SCHEDULED = "scheduled"
@@ -24,7 +25,7 @@ STATUS_DONE = "done"
 STATUS_CANCELLED = "cancelled"
 USAGE_ERROR = "golem: usage lookup unavailable"
 USAGE_TIMEOUT_SECONDS = 30
-USAGE_LIMIT_STATUS = 429
+USAGE_LIMIT_HTTP_STATUS = 429
 FULL_UTILIZATION = 100
 MAX_USAGE_LIMIT_RESUMES = 2
 USAGE_LIMIT_RESUME_PROMPT = "The usage limit has reset. Continue the task."
@@ -91,7 +92,7 @@ def new_session_id() -> str:
 
 def run_claude(task: dict[str, Any]) -> tuple[int, str]:
     session_id = cast("str", task["session_id"])
-    is_resuming = cast("int", task.get("usage_limit_resumes", 0)) > 0
+    is_resuming = cast("int", task.get("usage_limit_resume_count", 0)) > 0
     command = (
         ["claude", "--resume", session_id, "--print", USAGE_LIMIT_RESUME_PROMPT]
         if is_resuming
@@ -283,7 +284,7 @@ def next_reset_time() -> datetime | None:
             input="".join(json.dumps(request) + "\n" for request in requests),
             env=child_environment,
             capture_output=True,
-            text=True,
+            encoding="utf-8",
             timeout=USAGE_TIMEOUT_SECONDS,
             check=False,
         )
@@ -418,10 +419,10 @@ def claude_result_and_usage_limit(output: str) -> tuple[str, bool]:
     result = response.get("result")
     if not isinstance(result, str):
         return output, False
-    return result, response.get("api_error_status") == USAGE_LIMIT_STATUS
+    return result, response.get("api_error_status") == USAGE_LIMIT_HTTP_STATUS
 
 
-def reschedule_task(
+def mark_task_waiting_for_reset(
     task_id: str,
     result: str,
 ) -> tuple[dict[str, Any], datetime] | None:
@@ -442,7 +443,7 @@ def reschedule_task(
         task_record.pop("at_job", None)
         task_record["status"] = STATUS_SCHEDULED
         task_record["due_at"] = when.isoformat()
-        task_record["usage_limit_resumes"] = task_record.get("usage_limit_resumes", 0) + 1
+        task_record["usage_limit_resume_count"] = task_record.get("usage_limit_resume_count", 0) + 1
         return task_record.copy(), when
 
 
@@ -480,9 +481,9 @@ def execute_task(task_id: str, task: dict[str, Any]) -> int:
         returncode = 127
         output = ""
     result, is_usage_limit = claude_result_and_usage_limit(output)
-    usage_limit_resumes = cast("int", task.get("usage_limit_resumes", 0))
-    if is_usage_limit and usage_limit_resumes < MAX_USAGE_LIMIT_RESUMES:
-        rescheduled_task = reschedule_task(task_id, result)
+    usage_limit_resume_count = cast("int", task.get("usage_limit_resume_count", 0))
+    if is_usage_limit and usage_limit_resume_count < MAX_USAGE_LIMIT_RESUMES:
+        rescheduled_task = mark_task_waiting_for_reset(task_id, result)
         if rescheduled_task is not None:
             rescheduled_record, when = rescheduled_task
             previous_record = {
@@ -491,8 +492,9 @@ def execute_task(task_id: str, task: dict[str, Any]) -> int:
                 "status": STATUS_FAILED,
                 "returncode": returncode,
             }
+            submit_at_job(task_id, rescheduled_record, when, previous_record)
             print_task_result(result)
-            return submit_at_job(task_id, rescheduled_record, when, previous_record)
+            return 0
     finish_task(
         task_id,
         result if output else None,
@@ -571,6 +573,7 @@ def add_scheduling_arguments(command_parser: argparse.ArgumentParser) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    cast("io.TextIOWrapper", sys.stdout).reconfigure(encoding="utf-8")
     golem_args = sys.argv[1:] if argv is None else argv
     agent_args: list[str] = []
     if "--" in golem_args:

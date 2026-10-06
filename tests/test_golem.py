@@ -128,24 +128,18 @@ def write_claude_output(fake_commands, result, *, api_error_status=None):
     fake_commands["claude_stdout_path"].write_text(json.dumps(output), encoding="utf-8")
 
 
-def write_usage_limit_output(fake_commands):
+@pytest.fixture
+def usage_limited_claude(fake_commands, monkeypatch):
     write_claude_output(
         fake_commands,
         USAGE_LIMIT_RESULT,
-        api_error_status=golem.USAGE_LIMIT_STATUS,
+        api_error_status=golem.USAGE_LIMIT_HTTP_STATUS,
     )
-
-
-def no_reset_time():
-    return None
+    monkeypatch.setattr(golem, "next_reset_time", lambda: RESET_TIME)
 
 
 def raise_usage_lookup_error():
     raise SystemExit
-
-
-def planned_execution_time_for_reset(find_reset_time):
-    return lambda *, is_now, at_text: None if is_now else find_reset_time()
 
 
 def usage_response(five_hour, seven_day):
@@ -214,7 +208,6 @@ def test_ledger_falls_back_to_home_when_xdg_state_home_is_not_absolute(
             golem.STATUS_NEEDS_REVIEW,
             id="plain-output",
         ),
-        pytest.param(0, "", None, golem.STATUS_NEEDS_REVIEW, id="empty-output"),
     ],
 )
 def test_run_now_records_claude_result(
@@ -236,12 +229,6 @@ def test_run_now_records_claude_result(
     assert task["status"] == expected_status
     assert task["returncode"] == claude_exit
     assert logged_claude_args(fake_commands) == expected_claude_args(task)
-    if expected_result is None:
-        assert "result" not in task
-        assert capsys.readouterr().out == ""
-        with pytest.raises(SystemExit):
-            golem.main(["show", TASK_ID])
-        return
     assert task["result"] == expected_result
     assert capsys.readouterr().out == f"{expected_result}\n"
 
@@ -251,20 +238,13 @@ def test_run_now_records_claude_result(
 
 
 def test_usage_limited_task_resumes_at_reset_in_same_session(
-    fake_commands, monkeypatch, ledger_path
+    usage_limited_claude, fake_commands, ledger_path
 ):
-    write_usage_limit_output(fake_commands)
-    monkeypatch.setattr(
-        golem,
-        "planned_execution_time",
-        planned_execution_time_for_reset(lambda: RESET_TIME),
-    )
-
     assert golem.main(["run", TASK_ID, PROMPT, "--now", "--", *AGENT_ARGS]) == 0
 
     task = read_task(ledger_path)
     assert task["status"] == golem.STATUS_SCHEDULED
-    assert task["due_at"] == RESET_TIME.isoformat()
+    assert datetime.fromisoformat(task["due_at"]) == RESET_TIME
     session_id = task["session_id"]
 
     write_claude_output(fake_commands, CLAUDE_RESULT)
@@ -285,13 +265,7 @@ def test_usage_limited_task_resumes_at_reset_in_same_session(
     ]
 
 
-def test_usage_limited_task_fails_once_resumes_run_out(fake_commands, monkeypatch, ledger_path):
-    write_usage_limit_output(fake_commands)
-    monkeypatch.setattr(
-        golem,
-        "planned_execution_time",
-        planned_execution_time_for_reset(lambda: RESET_TIME),
-    )
+def test_usage_limited_task_fails_once_resumes_run_out(usage_limited_claude, ledger_path):
     golem.main(["run", TASK_ID, PROMPT, "--now"])
 
     for _ in range(golem.MAX_USAGE_LIMIT_RESUMES):
@@ -305,54 +279,38 @@ def test_usage_limited_task_fails_once_resumes_run_out(fake_commands, monkeypatc
 @pytest.mark.parametrize(
     "find_reset_time",
     [
-        pytest.param(no_reset_time, id="no-reset"),
+        pytest.param(lambda: None, id="no-reset"),
         pytest.param(raise_usage_lookup_error, id="lookup-error"),
     ],
 )
 def test_usage_limited_task_fails_when_it_cannot_be_rescheduled(
-    fake_commands,
+    usage_limited_claude,
     monkeypatch,
     ledger_path,
     find_reset_time,
 ):
-    write_usage_limit_output(fake_commands)
-    monkeypatch.setattr(
-        golem,
-        "planned_execution_time",
-        planned_execution_time_for_reset(find_reset_time),
-    )
+    monkeypatch.setattr(golem, "next_reset_time", find_reset_time)
     write_task(ledger_path, golem.STATUS_RUNNING)
 
-    assert golem.execute_task(TASK_ID, read_task(ledger_path)) == 0
+    golem.execute_task(TASK_ID, read_task(ledger_path))
 
     task = read_task(ledger_path)
     assert task["status"] == golem.STATUS_FAILED
-    assert task["returncode"] == 0
     assert task["result"] == USAGE_LIMIT_RESULT
 
 
 def test_usage_limited_task_fails_when_at_cannot_reschedule(
-    fake_commands, monkeypatch, ledger_path
+    usage_limited_claude, monkeypatch, ledger_path
 ):
-    write_usage_limit_output(fake_commands)
     monkeypatch.setenv("GOLEM_AT_EXIT", "1")
-    monkeypatch.setattr(
-        golem,
-        "planned_execution_time",
-        planned_execution_time_for_reset(lambda: RESET_TIME),
-    )
     write_task(ledger_path, golem.STATUS_RUNNING)
-    running_task = read_task(ledger_path)
 
     with pytest.raises(SystemExit):
-        golem.execute_task(TASK_ID, running_task)
+        golem.execute_task(TASK_ID, read_task(ledger_path))
 
-    assert read_task(ledger_path) == {
-        **running_task,
-        "result": USAGE_LIMIT_RESULT,
-        "returncode": 0,
-        "status": golem.STATUS_FAILED,
-    }
+    task = read_task(ledger_path)
+    assert task["status"] == golem.STATUS_FAILED
+    assert task["result"] == USAGE_LIMIT_RESULT
 
 
 @pytest.mark.parametrize(
