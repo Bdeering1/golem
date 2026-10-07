@@ -15,14 +15,16 @@ from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     import io
-    from collections.abc import Generator
+    from collections.abc import Callable, Generator
 
 STATUS_SCHEDULED = "scheduled"
 STATUS_RUNNING = "running"
+STATUS_WAITING = "waiting"
 STATUS_NEEDS_REVIEW = "needs_review"
 STATUS_FAILED = "failed"
 STATUS_DONE = "done"
 STATUS_CANCELLED = "cancelled"
+SUCCEEDED_STATUSES = {STATUS_NEEDS_REVIEW, STATUS_DONE}
 USAGE_ERROR = "golem: usage lookup unavailable"
 USAGE_TIMEOUT_SECONDS = 30
 USAGE_LIMIT_HTTP_STATUS = 429
@@ -86,6 +88,33 @@ def reserve_task(task_id: str, record: str | dict[str, Any]) -> None:
         tasks[task_id] = record
 
 
+def waiting_dependent_ids(tasks: dict[str, Any], parent_id: str) -> list[str]:
+    return [
+        dependent_id
+        for dependent_id, dependent in tasks.items()
+        if dependent["status"] == STATUS_WAITING and dependent.get("after") == parent_id
+    ]
+
+
+def reserve_dependent_task(
+    task_id: str,
+    record: dict[str, Any],
+    parent_id: str,
+) -> bool:
+    with locked_tasks() as tasks:
+        if task_id in tasks:
+            raise SystemExit(f"golem: task already exists: {task_id}")
+        if parent_id not in tasks:
+            raise SystemExit(f"golem: task not found: {parent_id}")
+        parent_status = tasks[parent_id]["status"]
+        if parent_status == STATUS_CANCELLED:
+            raise SystemExit(f"golem: parent task is cancelled: {parent_id}")
+        if parent_status in SUCCEEDED_STATUSES:
+            return False
+        tasks[task_id] = record
+        return True
+
+
 def new_session_id() -> str:
     return str(uuid.uuid4())
 
@@ -118,15 +147,20 @@ def new_task_record(
     prompt: str,
     agent_args: tuple[str, ...],
     when: datetime | None,
+    after: str | None = None,
 ) -> dict[str, Any]:
     record: dict[str, Any] = {
         "cwd": cwd,
         "prompt": prompt,
         "agent_args": list(agent_args),
-        "status": STATUS_SCHEDULED if when else STATUS_RUNNING,
+        "status": STATUS_RUNNING,
         "session_id": new_session_id(),
     }
-    if when:
+    if after is not None:
+        record["status"] = STATUS_WAITING
+        record["after"] = after
+    if when is not None:
+        record["status"] = STATUS_SCHEDULED
         record["due_at"] = when.isoformat()
     return record
 
@@ -142,7 +176,7 @@ def pickup(task_id: str, *agent_args: str) -> int:
         if task_id not in tasks:
             raise SystemExit(f"golem: task not found: {task_id}")
         task = cast("dict[str, Any]", tasks[task_id])
-        if task.get("status") in {STATUS_SCHEDULED, STATUS_CANCELLED}:
+        if task.get("status") in {STATUS_SCHEDULED, STATUS_WAITING, STATUS_CANCELLED}:
             raise SystemExit(f"golem: task has not started: {task_id}")
         if task.get("status") == STATUS_NEEDS_REVIEW:
             task["status"] = STATUS_DONE
@@ -183,10 +217,17 @@ def cancel_task(task_id: str) -> int:
         if task_id not in tasks:
             raise SystemExit(f"golem: task not found: {task_id}")
         task = cast("dict[str, Any]", tasks[task_id])
-        if task.get("status") != STATUS_SCHEDULED:
+        if task.get("status") not in {STATUS_SCHEDULED, STATUS_WAITING}:
             raise SystemExit(f"golem: task is not scheduled: {task_id}")
         at_job = task.get("at_job")
         task["status"] = STATUS_CANCELLED
+        pending_task_ids = [task_id]
+        while pending_task_ids:
+            parent_id = pending_task_ids.pop()
+            for waiting_task_id in waiting_dependent_ids(tasks, parent_id):
+                waiting_task = cast("dict[str, Any]", tasks[waiting_task_id])
+                waiting_task["status"] = STATUS_CANCELLED
+                pending_task_ids.append(waiting_task_id)
     if not isinstance(at_job, str):
         return 0
     remove_at_job(at_job)
@@ -217,11 +258,19 @@ def list_tasks() -> int:
         print("golem: no tasks")
         return 0
     rows = [
-        (task_id, task["status"], task["cwd"], task.get("due_at", ""))
+        (
+            task_id,
+            task["status"],
+            task["cwd"],
+            task.get("due_at", ""),
+            f"{task['after']} ({tasks[task['after']]['status']})"
+            if task["status"] == STATUS_WAITING
+            else "",
+        )
         for task_id, task in tasks.items()
     ]
     rows.sort(key=lambda row: (row[1] != STATUS_NEEDS_REVIEW, row[0]))
-    headers = ("ID", "STATUS", "DIRECTORY", "DUE AT")
+    headers = ("ID", "STATUS", "DIRECTORY", "DUE AT", "AFTER")
     widths = [
         max(len(str(value)) for value in column) for column in zip(headers, *rows, strict=True)
     ]
@@ -391,7 +440,10 @@ def submit_at_job(
     with locked_tasks() as tasks:
         if tasks.get(task_id) == record:
             if previous_record is None:
-                del tasks[task_id]
+                if waiting_dependent_ids(tasks, task_id):
+                    cast("dict[str, Any]", tasks[task_id])["status"] = STATUS_FAILED
+                else:
+                    del tasks[task_id]
             else:
                 tasks[task_id] = previous_record
     raise SystemExit(f"golem: could not schedule task: {message}")
@@ -479,8 +531,31 @@ def finish_task(
         task_record["returncode"] = returncode
 
 
+def claim_next_dependent(task_id: str) -> tuple[str, dict[str, Any]] | None:
+    with locked_tasks() as tasks:
+        parent_record = cast("dict[str, Any]", tasks[task_id])
+        if parent_record.get("status") not in SUCCEEDED_STATUSES:
+            return None
+        dependent_ids = waiting_dependent_ids(tasks, task_id)
+        if dependent_ids:
+            dependent_id = dependent_ids[0]
+            dependent_record = cast("dict[str, Any]", tasks[dependent_id])
+            dependent_record["status"] = STATUS_RUNNING
+            return dependent_id, dependent_record.copy()
+    return None
+
+
 def print_task_result(result: str) -> None:
     print(result, end="" if result.endswith("\n") else "\n")
+
+
+def drain_dependents(task_id: str) -> None:
+    while next_dependent := claim_next_dependent(task_id):
+        dependent_id, dependent_record = next_dependent
+        try:
+            execute_task(dependent_id, dependent_record)
+        except SystemExit as error:
+            print(error, file=sys.stderr)
 
 
 def execute_task(task_id: str, task: dict[str, Any]) -> int:
@@ -513,6 +588,7 @@ def execute_task(task_id: str, task: dict[str, Any]) -> int:
     )
     if output:
         print_task_result(result)
+    drain_dependents(task_id)
     return returncode
 
 
@@ -572,14 +648,31 @@ def planned_execution_time(*, is_now: bool, at_text: str | None) -> datetime | N
     return when.replace(second=0, microsecond=0).astimezone()
 
 
-def add_scheduling_arguments(command_parser: argparse.ArgumentParser) -> None:
-    schedule_group = command_parser.add_mutually_exclusive_group()
-    schedule_group.add_argument("--now", action="store_true", help="run immediately")
-    schedule_group.add_argument(
+def add_scheduling_arguments(add_argument: Callable[..., argparse.Action]) -> None:
+    add_argument("--now", action="store_true", help="run immediately")
+    add_argument(
         "--at",
         metavar="TIME",
         help='local time, e.g. 9pm or "8:30am tomorrow"; rolls forward if passed',
     )
+
+
+def run_task_from_arguments(arguments: argparse.Namespace, agent_args: list[str]) -> int:
+    prompt_text = (
+        Path(arguments.file).read_text(encoding="utf-8") if arguments.file else arguments.prompt
+    )
+    task_args = tuple(agent_args)
+    if arguments.after is not None:
+        dependent_record = new_task_record(
+            str(Path.cwd()), prompt_text, task_args, None, arguments.after
+        )
+        if reserve_dependent_task(arguments.id, dependent_record, arguments.after):
+            print(f"golem: {arguments.id} will run after {arguments.after}")
+            return 0
+    when = planned_execution_time(is_now=arguments.now, at_text=arguments.at)
+    if when is None:
+        return run(arguments.id, prompt_text, *agent_args)
+    return schedule_new_task(arguments.id, prompt_text, task_args, when)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -602,7 +695,9 @@ def main(argv: list[str] | None = None) -> int:
     prompt_group = run_command.add_mutually_exclusive_group(required=True)
     prompt_group.add_argument("prompt", nargs="?")
     prompt_group.add_argument("--file")
-    add_scheduling_arguments(run_command)
+    run_schedule_group = run_command.add_mutually_exclusive_group()
+    add_scheduling_arguments(run_schedule_group.add_argument)
+    run_schedule_group.add_argument("--after", metavar="PARENT", help="run after PARENT succeeds")
 
     pickup_command = commands.add_parser("pickup")
     pickup_command.add_argument("id")
@@ -617,7 +712,8 @@ def main(argv: list[str] | None = None) -> int:
         description=SCHEDULE_DESCRIPTION,
     )
     retry_command.add_argument("id")
-    add_scheduling_arguments(retry_command)
+    retry_schedule_group = retry_command.add_mutually_exclusive_group()
+    add_scheduling_arguments(retry_schedule_group.add_argument)
     commands.add_parser("list")
     execute_command = commands.add_parser("_execute")
     execute_command.add_argument("id")
@@ -640,13 +736,7 @@ def main(argv: list[str] | None = None) -> int:
         if agent_args:
             parser.error("retry does not accept agent arguments")
         return retry_task(arguments.id, is_now=arguments.now, at_text=arguments.at)
-    prompt_text = (
-        Path(arguments.file).read_text(encoding="utf-8") if arguments.file else arguments.prompt
-    )
-    when = planned_execution_time(is_now=arguments.now, at_text=arguments.at)
-    if when is None:
-        return run(arguments.id, prompt_text, *agent_args)
-    return schedule_new_task(arguments.id, prompt_text, tuple(agent_args), when)
+    return run_task_from_arguments(arguments, agent_args)
 
 
 if __name__ == "__main__":

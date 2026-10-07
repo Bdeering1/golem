@@ -1,14 +1,24 @@
 import json
 import os
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any, TypedDict, Unpack
 
 import pytest
 
 import golem
 
 TASK_ID = "fix-thing"
+PARENT_ID = "parent"
+CHILD_ID = "child"
+GRANDCHILD_ID = "grandchild"
+SIBLING_ID = "sibling"
 PROMPT = "fix the thing"
+PARENT_PROMPT = "run the parent"
+CHILD_PROMPT = "run the child"
+GRANDCHILD_PROMPT = "run the grandchild"
+SIBLING_PROMPT = "run the sibling"
 AGENT_ARGS = ["--model", "haiku"]
 AT_TEXT = "9pm"
 OLD_SESSION_ID = "old-session"
@@ -20,12 +30,20 @@ EARLIER_RESET_TIME = datetime(2030, 1, 1, 11, 0, tzinfo=UTC)
 LATER_RESET_TIME = datetime(2030, 1, 2, 11, 0, tzinfo=UTC)
 
 
+class AtRunKwargs(TypedDict):
+    input: str
+    capture_output: bool
+    text: bool
+    check: bool
+
+
 @pytest.fixture(scope="session")
 def fake_bin_path(tmp_path_factory):
     bin_path = tmp_path_factory.mktemp("bin")
     scripts = {
         "claude": """#!/bin/sh
-printf '%s\\n' "$@" > "$GOLEM_CLAUDE_ARGS"
+printf '\036\\n' >> "$GOLEM_CLAUDE_ARGS"
+printf '%s\\n' "$@" >> "$GOLEM_CLAUDE_ARGS"
 if [ -f "$GOLEM_CLAUDE_STDOUT" ]; then
     cat "$GOLEM_CLAUDE_STDOUT"
 fi
@@ -83,10 +101,14 @@ def ledger_path(monkeypatch, tmp_path):
 
 
 def read_task(ledger_path):
-    return json.loads(ledger_path.read_text(encoding="utf-8"))[TASK_ID]
+    return read_tasks(ledger_path)[TASK_ID]
 
 
-def write_task(ledger_path, status, **fields: object):
+def read_tasks(ledger_path):
+    return json.loads(ledger_path.read_text(encoding="utf-8"))
+
+
+def write_task(ledger_path, status, *, task_id=TASK_ID, **fields: object):
     task = {
         "agent_args": AGENT_ARGS,
         "at_job": "11",
@@ -99,19 +121,29 @@ def write_task(ledger_path, status, **fields: object):
     }
     task.update(fields)
     ledger_path.parent.mkdir(parents=True, exist_ok=True)
-    ledger_path.write_text(json.dumps({TASK_ID: task}), encoding="utf-8")
+    ledger_path.write_text(json.dumps({task_id: task}), encoding="utf-8")
 
 
 def logged_claude_args(fake_commands):
-    return fake_commands["claude_args_path"].read_text(encoding="utf-8").splitlines()
+    calls = logged_claude_calls(fake_commands)
+    return calls[-1] if calls else []
 
 
-def expected_claude_args(task):
+def logged_claude_calls(fake_commands):
+    calls: list[list[str]] = []
+    for call in fake_commands["claude_args_path"].read_text(encoding="utf-8").split("\x1e\n"):
+        arguments = call.splitlines()
+        if arguments:
+            calls.append(arguments)
+    return calls
+
+
+def expected_claude_args(task, prompt=PROMPT):
     return [
         "--session-id",
         task["session_id"],
         "--print",
-        PROMPT,
+        prompt,
         "--output-format",
         "json",
         *AGENT_ARGS,
@@ -393,12 +425,168 @@ def test_review_commands_complete_review_task(fake_commands, ledger_path, comman
     assert read_task(ledger_path)["status"] == golem.STATUS_DONE
 
 
-@pytest.mark.parametrize("status", [golem.STATUS_SCHEDULED, golem.STATUS_CANCELLED])
+@pytest.mark.parametrize(
+    "status", [golem.STATUS_SCHEDULED, golem.STATUS_WAITING, golem.STATUS_CANCELLED]
+)
 def test_pickup_refuses_tasks_that_never_started(fake_commands, ledger_path, status):
     write_task(ledger_path, status)
 
     with pytest.raises(SystemExit, match=TASK_ID):
         golem.main(["pickup", TASK_ID])
+
+
+def create_waiting_chain():
+    golem.main(["run", PARENT_ID, PARENT_PROMPT, "--at", AT_TEXT, "--", *AGENT_ARGS])
+    golem.main(["run", CHILD_ID, CHILD_PROMPT, "--after", PARENT_ID, "--", *AGENT_ARGS])
+    golem.main(["run", GRANDCHILD_ID, GRANDCHILD_PROMPT, "--after", CHILD_ID, "--", *AGENT_ARGS])
+    golem.main(["run", SIBLING_ID, SIBLING_PROMPT, "--after", PARENT_ID, "--", *AGENT_ARGS])
+
+
+def test_scheduled_task_runs_waiting_chain(fake_commands, ledger_path):
+    create_waiting_chain()
+
+    tasks = read_tasks(ledger_path)
+    assert tasks[CHILD_ID]["status"] == golem.STATUS_WAITING
+    assert tasks[GRANDCHILD_ID]["status"] == golem.STATUS_WAITING
+    assert tasks[SIBLING_ID]["status"] == golem.STATUS_WAITING
+    assert logged_claude_args(fake_commands) == []
+
+    assert golem.main(["_execute", PARENT_ID, tasks[PARENT_ID]["session_id"]]) == 0
+
+    tasks = read_tasks(ledger_path)
+    assert {task["status"] for task in tasks.values()} == {golem.STATUS_NEEDS_REVIEW}
+    assert len({task["session_id"] for task in tasks.values()}) == 4
+    assert logged_claude_calls(fake_commands) == [
+        expected_claude_args(tasks[PARENT_ID], PARENT_PROMPT),
+        expected_claude_args(tasks[CHILD_ID], CHILD_PROMPT),
+        expected_claude_args(tasks[GRANDCHILD_ID], GRANDCHILD_PROMPT),
+        expected_claude_args(tasks[SIBLING_ID], SIBLING_PROMPT),
+    ]
+
+
+def test_retrying_failed_parent_runs_waiting_dependent(fake_commands, ledger_path, monkeypatch):
+    golem.main(["run", PARENT_ID, PARENT_PROMPT, "--at", AT_TEXT])
+    golem.main(["run", CHILD_ID, CHILD_PROMPT, "--after", PARENT_ID])
+    parent_session_id = read_tasks(ledger_path)[PARENT_ID]["session_id"]
+    monkeypatch.setenv("GOLEM_CLAUDE_EXIT", "1")
+
+    assert golem.main(["_execute", PARENT_ID, parent_session_id]) == 1
+
+    tasks = read_tasks(ledger_path)
+    assert tasks[PARENT_ID]["status"] == golem.STATUS_FAILED
+    assert tasks[CHILD_ID]["status"] == golem.STATUS_WAITING
+    monkeypatch.delenv("GOLEM_CLAUDE_EXIT")
+
+    assert golem.main(["retry", PARENT_ID, "--now"]) == 0
+
+    tasks = read_tasks(ledger_path)
+    assert tasks[PARENT_ID]["status"] == golem.STATUS_NEEDS_REVIEW
+    assert tasks[CHILD_ID]["status"] == golem.STATUS_NEEDS_REVIEW
+
+
+@pytest.mark.parametrize(
+    ("cancel_id", "expected_statuses", "expected_atrm_args"),
+    [
+        pytest.param(
+            PARENT_ID,
+            {
+                PARENT_ID: golem.STATUS_CANCELLED,
+                CHILD_ID: golem.STATUS_CANCELLED,
+                GRANDCHILD_ID: golem.STATUS_CANCELLED,
+                SIBLING_ID: golem.STATUS_CANCELLED,
+            },
+            "42",
+            id="scheduled-parent",
+        ),
+        pytest.param(
+            CHILD_ID,
+            {
+                PARENT_ID: golem.STATUS_SCHEDULED,
+                CHILD_ID: golem.STATUS_CANCELLED,
+                GRANDCHILD_ID: golem.STATUS_CANCELLED,
+                SIBLING_ID: golem.STATUS_WAITING,
+            },
+            "",
+            id="waiting-child",
+        ),
+    ],
+)
+def test_cancelling_task_cancels_waiting_dependents(
+    fake_commands, ledger_path, cancel_id, expected_statuses, expected_atrm_args
+):
+    create_waiting_chain()
+
+    assert golem.main(["cancel", cancel_id]) == 0
+
+    tasks = read_tasks(ledger_path)
+    assert {task_id: task["status"] for task_id, task in tasks.items()} == expected_statuses
+    assert fake_commands["atrm_args_path"].read_text(encoding="utf-8") == expected_atrm_args
+
+
+def test_after_successful_parent_schedules_task_normally(fake_commands, ledger_path, monkeypatch):
+    monkeypatch.setattr(golem, "next_reset_time", lambda: RESET_TIME)
+
+    assert golem.main(["run", PARENT_ID, PARENT_PROMPT, "--now"]) == 0
+    assert golem.main(["run", CHILD_ID, CHILD_PROMPT, "--after", PARENT_ID]) == 0
+
+    child = read_tasks(ledger_path)[CHILD_ID]
+    assert child["status"] == golem.STATUS_SCHEDULED
+    assert datetime.fromisoformat(child["due_at"]) == RESET_TIME
+
+
+@pytest.mark.parametrize(
+    ("parent_status", "message"),
+    [
+        pytest.param(None, "task not found", id="missing"),
+        pytest.param(golem.STATUS_CANCELLED, "parent task is cancelled", id="cancelled"),
+    ],
+)
+def test_after_refuses_missing_or_cancelled_parent(
+    fake_commands, ledger_path, parent_status, message
+):
+    if parent_status is not None:
+        write_task(ledger_path, parent_status, task_id=PARENT_ID)
+
+    with pytest.raises(SystemExit, match=f"{message}: {PARENT_ID}"):
+        golem.main(["run", CHILD_ID, CHILD_PROMPT, "--after", PARENT_ID])
+
+    assert not ledger_path.exists() or CHILD_ID not in read_tasks(ledger_path)
+
+
+def test_dependent_scheduling_failure_does_not_block_later_sibling(
+    capsys, fake_commands, ledger_path, monkeypatch
+):
+    prompts: list[str] = []
+
+    golem.main(["run", PARENT_ID, PARENT_PROMPT, "--at", AT_TEXT])
+    golem.main(["run", CHILD_ID, CHILD_PROMPT, "--after", PARENT_ID])
+    golem.main(["run", SIBLING_ID, SIBLING_PROMPT, "--after", PARENT_ID])
+
+    def run_claude(task: dict[str, Any]) -> tuple[int, str]:
+        prompt = task["prompt"]
+        prompts.append(prompt)
+        if prompt == CHILD_PROMPT:
+            return 1, json.dumps(
+                {
+                    "api_error_status": golem.USAGE_LIMIT_HTTP_STATUS,
+                    "result": USAGE_LIMIT_RESULT,
+                }
+            )
+        return 0, json.dumps({"result": CLAUDE_RESULT})
+
+    monkeypatch.setattr(golem, "next_reset_time", lambda: RESET_TIME)
+    monkeypatch.setattr(golem, "run_claude", run_claude)
+    monkeypatch.setenv("GOLEM_AT_EXIT", "1")
+    parent = read_tasks(ledger_path)[PARENT_ID]
+
+    assert golem.main(["_execute", PARENT_ID, parent["session_id"]]) == 0
+
+    tasks = read_tasks(ledger_path)
+    assert prompts == [PARENT_PROMPT, CHILD_PROMPT, SIBLING_PROMPT]
+    assert tasks[PARENT_ID]["status"] == golem.STATUS_NEEDS_REVIEW
+    assert tasks[CHILD_ID]["status"] == golem.STATUS_FAILED
+    assert tasks[SIBLING_ID]["status"] == golem.STATUS_NEEDS_REVIEW
+    assert "could not schedule task" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
@@ -551,4 +739,29 @@ def test_scheduling_failure_removes_new_task(
     with pytest.raises(SystemExit):
         golem.main(["run", TASK_ID, PROMPT, "--at", AT_TEXT])
 
-    assert TASK_ID not in json.loads(ledger_path.read_text(encoding="utf-8"))
+    assert TASK_ID not in read_tasks(ledger_path)
+
+
+def test_scheduling_failure_keeps_parent_with_waiting_dependent(
+    fake_commands, ledger_path, monkeypatch
+):
+    run_subprocess = subprocess.run
+
+    def register_dependent(
+        command: list[str],
+        **run_kwargs: Unpack[AtRunKwargs],
+    ) -> subprocess.CompletedProcess[str]:
+        result = run_subprocess(command, **run_kwargs)
+        if command[0] == "at":
+            assert golem.main(["run", CHILD_ID, CHILD_PROMPT, "--after", TASK_ID]) == 0
+        return result
+
+    monkeypatch.setattr(golem.subprocess, "run", register_dependent)
+    monkeypatch.setenv("GOLEM_AT_EXIT", "1")
+
+    with pytest.raises(SystemExit, match="could not schedule task"):
+        golem.main(["run", TASK_ID, PROMPT, "--at", AT_TEXT])
+
+    tasks = read_tasks(ledger_path)
+    assert tasks[TASK_ID]["status"] == golem.STATUS_FAILED
+    assert tasks[CHILD_ID]["status"] == golem.STATUS_WAITING
