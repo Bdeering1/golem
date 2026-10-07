@@ -537,12 +537,12 @@ def claim_next_dependent(task_id: str) -> tuple[str, dict[str, Any]] | None:
         if parent_record.get("status") not in SUCCEEDED_STATUSES:
             return None
         dependent_ids = waiting_dependent_ids(tasks, task_id)
-        if dependent_ids:
-            dependent_id = dependent_ids[0]
-            dependent_record = cast("dict[str, Any]", tasks[dependent_id])
-            dependent_record["status"] = STATUS_RUNNING
-            return dependent_id, dependent_record.copy()
-    return None
+        if not dependent_ids:
+            return None
+        dependent_id = dependent_ids[0]
+        dependent_record = cast("dict[str, Any]", tasks[dependent_id])
+        dependent_record["status"] = STATUS_RUNNING
+        return dependent_id, dependent_record.copy()
 
 
 def print_task_result(result: str) -> None:

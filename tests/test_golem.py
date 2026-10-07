@@ -550,7 +550,7 @@ def test_after_refuses_missing_or_cancelled_parent(
     with pytest.raises(SystemExit, match=f"{message}: {PARENT_ID}"):
         golem.main(["run", CHILD_ID, CHILD_PROMPT, "--after", PARENT_ID])
 
-    assert not ledger_path.exists() or CHILD_ID not in read_tasks(ledger_path)
+    assert CHILD_ID not in golem.load_tasks()
 
 
 def test_dependent_scheduling_failure_does_not_block_later_sibling(
