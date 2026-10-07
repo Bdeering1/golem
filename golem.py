@@ -1,12 +1,16 @@
+from __future__ import annotations
+
 import argparse
+import contextlib
 import fcntl
 import json
 import os
+import plistlib
 import re
-import shlex
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
@@ -26,6 +30,10 @@ STATUS_DONE = "done"
 STATUS_CANCELLED = "cancelled"
 SUCCEEDED_STATUSES = {STATUS_NEEDS_REVIEW, STATUS_DONE}
 USAGE_ERROR = "golem: usage lookup unavailable"
+AGENT_ERROR = "golem: the agent is not installed or is out of date; run golem agent install"
+AGENT_LABEL = "com.github.bdeering1.golem"
+AGENT_INTERVAL_SECONDS = 60
+AGENT_POLL_SECONDS = 10
 USAGE_TIMEOUT_SECONDS = 30
 USAGE_LIMIT_HTTP_STATUS = 429
 FULL_UTILIZATION = 100
@@ -43,6 +51,12 @@ def ledger_path() -> Path:
     )
     state_directory.mkdir(parents=True, exist_ok=True)
     return state_directory / "tasks.json"
+
+
+def run_lock_directory() -> Path:
+    directory_path = ledger_path().parent / "running"
+    directory_path.mkdir(exist_ok=True)
+    return directory_path
 
 
 def load_tasks() -> dict[str, Any]:
@@ -77,11 +91,146 @@ def locked_tasks() -> Generator[dict[str, Any]]:
     with lock_path.open("r+", encoding="utf-8") as lock_file:
         fcntl.flock(lock_file, fcntl.LOCK_EX)
         tasks = load_tasks()
+        before = json.dumps(tasks, sort_keys=True)
         yield tasks
-        save_tasks(tasks)
+        if json.dumps(tasks, sort_keys=True) != before:
+            save_tasks(tasks)
 
 
-def reserve_task(task_id: str, record: str | dict[str, Any]) -> None:
+def task_environment(task: dict[str, Any]) -> dict[str, str]:
+    environment = task.get("environment")
+    if not isinstance(environment, dict):
+        return os.environ.copy()
+    return {**os.environ, **cast("dict[str, str]", environment)}
+
+
+def captured_environment() -> dict[str, str]:
+    return {
+        name: value
+        for name, value in os.environ.items()
+        if name in {"PATH", "LANG"} or name.startswith("LC_")
+    }
+
+
+def agent_plist_path() -> Path:
+    return Path.home() / "Library" / "LaunchAgents" / f"{AGENT_LABEL}.plist"
+
+
+def golem_command() -> list[str]:
+    return [str(Path(sys.executable).absolute()), str(Path(__file__).resolve())]
+
+
+def agent_plist_data() -> bytes:
+    environment: dict[str, str] = {}
+    state_home = os.environ.get("XDG_STATE_HOME")
+    if state_home is not None and Path(state_home).is_absolute():
+        environment["XDG_STATE_HOME"] = state_home
+    plist: dict[str, object] = {
+        "Label": AGENT_LABEL,
+        "ProgramArguments": [
+            "/usr/bin/caffeinate",
+            "-is",
+            *golem_command(),
+            "_agent",
+        ],
+        "RunAtLoad": True,
+        "StartInterval": AGENT_INTERVAL_SECONDS,
+        "StandardOutPath": str(ledger_path().parent / "agent.log"),
+        "StandardErrorPath": str(ledger_path().parent / "agent.log"),
+    }
+    if environment:
+        plist["EnvironmentVariables"] = environment
+    return plistlib.dumps(plist)
+
+
+def run_launchctl(arguments: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["launchctl", *arguments],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def launchctl_message(result: subprocess.CompletedProcess[str], fallback: str) -> str:
+    return result.stderr.strip() or result.stdout.strip() or fallback
+
+
+def agent_target() -> str:
+    return f"gui/{os.getuid()}/{AGENT_LABEL}"
+
+
+def install_agent() -> int:
+    plist_path = agent_plist_path()
+    plist_path.parent.mkdir(parents=True, exist_ok=True)
+    plist_path.write_bytes(agent_plist_data())
+    try:
+        run_launchctl(["bootout", agent_target()])
+        result = run_launchctl(["bootstrap", f"gui/{os.getuid()}", str(plist_path)])
+    except OSError as error:
+        plist_path.unlink(missing_ok=True)
+        raise SystemExit(f"golem: could not install agent: {error}") from error
+    if result.returncode:
+        plist_path.unlink(missing_ok=True)
+        message = launchctl_message(result, "launchctl bootstrap failed")
+        raise SystemExit(f"golem: could not install agent: {message}")
+    return 0
+
+
+def uninstall_agent() -> int:
+    with contextlib.suppress(OSError):
+        run_launchctl(["bootout", agent_target()])
+    agent_plist_path().unlink(missing_ok=True)
+    return 0
+
+
+def is_agent_installed() -> bool:
+    plist_path = agent_plist_path()
+    return plist_path.exists() and plist_path.read_bytes() == agent_plist_data()
+
+
+def require_agent() -> None:
+    if not is_agent_installed():
+        raise SystemExit(AGENT_ERROR)
+
+
+def wake_agent() -> None:
+    try:
+        result = run_launchctl(["kickstart", agent_target()])
+    except OSError as error:
+        print(f"golem: could not wake agent: {error}", file=sys.stderr)
+        return
+    if result.returncode:
+        message = launchctl_message(result, "launchctl kickstart failed")
+        print(f"golem: could not wake agent: {message}", file=sys.stderr)
+
+
+def new_session_id() -> str:
+    return str(uuid.uuid4())
+
+
+def new_task_record(
+    cwd: str,
+    prompt: str,
+    agent_args: tuple[str, ...],
+    when: datetime,
+    after: str | None = None,
+) -> dict[str, Any]:
+    record: dict[str, Any] = {
+        "agent_args": list(agent_args),
+        "cwd": cwd,
+        "due_at": when.isoformat(),
+        "environment": captured_environment(),
+        "prompt": prompt,
+        "session_id": new_session_id(),
+        "status": STATUS_SCHEDULED,
+    }
+    if after is not None:
+        record["after"] = after
+    return record
+
+
+def reserve_task(task_id: str, record: dict[str, Any]) -> None:
     with locked_tasks() as tasks:
         if task_id in tasks:
             raise SystemExit(f"golem: task already exists: {task_id}")
@@ -96,190 +245,36 @@ def waiting_dependent_ids(tasks: dict[str, Any], parent_id: str) -> list[str]:
     ]
 
 
-def reserve_dependent_task(
-    task_id: str,
-    record: dict[str, Any],
-    parent_id: str,
-) -> bool:
+def parent_has_succeeded(tasks: dict[str, Any], parent_id: str) -> bool:
+    parent = tasks.get(parent_id)
+    if not isinstance(parent, dict):
+        raise SystemExit(f"golem: task not found: {parent_id}")
+    parent_status = cast("dict[str, Any]", parent).get("status")
+    if parent_status == STATUS_CANCELLED:
+        raise SystemExit(f"golem: parent task is cancelled: {parent_id}")
+    return parent_status in SUCCEEDED_STATUSES
+
+
+def reserve_dependent_task(task_id: str, record: dict[str, Any], parent_id: str) -> bool:
     with locked_tasks() as tasks:
         if task_id in tasks:
             raise SystemExit(f"golem: task already exists: {task_id}")
-        if parent_id not in tasks:
-            raise SystemExit(f"golem: task not found: {parent_id}")
-        parent_status = tasks[parent_id]["status"]
-        if parent_status == STATUS_CANCELLED:
-            raise SystemExit(f"golem: parent task is cancelled: {parent_id}")
-        if parent_status in SUCCEEDED_STATUSES:
-            return False
+        if not parent_has_succeeded(tasks, parent_id):
+            record["status"] = STATUS_WAITING
+            record.pop("due_at", None)
+            tasks[task_id] = record
+            return True
         tasks[task_id] = record
-        return True
+        return False
 
 
-def new_session_id() -> str:
-    return str(uuid.uuid4())
-
-
-def run_claude(task: dict[str, Any]) -> tuple[int, str]:
-    session_id = cast("str", task["session_id"])
-    is_resuming = cast("int", task.get("usage_limit_resume_count", 0)) > 0
-    command = (
-        ["claude", "--resume", session_id, "--print", USAGE_LIMIT_RESUME_PROMPT]
-        if is_resuming
-        else ["claude", "--session-id", session_id, "--print", cast("str", task["prompt"])]
-    )
-    claude_process = subprocess.run(
-        [
-            *command,
-            "--output-format",
-            "json",
-            *cast("list[str]", task["agent_args"]),
-        ],
-        cwd=cast("str", task["cwd"]),
-        stdout=subprocess.PIPE,
-        encoding="utf-8",
-        check=False,
-    )
-    return claude_process.returncode, claude_process.stdout
-
-
-def new_task_record(
-    cwd: str,
-    prompt: str,
-    agent_args: tuple[str, ...],
-    when: datetime | None,
-    after: str | None = None,
-) -> dict[str, Any]:
-    record: dict[str, Any] = {
-        "cwd": cwd,
-        "prompt": prompt,
-        "agent_args": list(agent_args),
-        "status": STATUS_RUNNING,
-        "session_id": new_session_id(),
-    }
-    if after is not None:
-        record["status"] = STATUS_WAITING
-        record["after"] = after
-    if when is not None:
-        record["status"] = STATUS_SCHEDULED
-        record["due_at"] = when.isoformat()
-    return record
-
-
-def run(task_id: str, prompt: str, *agent_args: str) -> int:
-    record = new_task_record(str(Path.cwd()), prompt, agent_args, None)
-    reserve_task(task_id, record)
-    return execute_task(task_id, record)
-
-
-def pickup(task_id: str, *agent_args: str) -> int:
-    with locked_tasks() as tasks:
-        if task_id not in tasks:
-            raise SystemExit(f"golem: task not found: {task_id}")
-        task = cast("dict[str, Any]", tasks[task_id])
-        if task.get("status") in {STATUS_SCHEDULED, STATUS_WAITING, STATUS_CANCELLED}:
-            raise SystemExit(f"golem: task has not started: {task_id}")
-        if task.get("status") == STATUS_NEEDS_REVIEW:
-            task["status"] = STATUS_DONE
-        cwd = cast("str", task["cwd"])
-        session_id = cast("str", task["session_id"])
-    return subprocess.run(
-        ["claude", "--resume", session_id, *agent_args],
-        cwd=cwd,
-        check=False,
-    ).returncode
-
-
-def close(task_id: str) -> int:
-    with locked_tasks() as tasks:
-        if task_id not in tasks:
-            raise SystemExit(f"golem: task not found: {task_id}")
-        task = cast("dict[str, Any]", tasks[task_id])
-        if task.get("status") != STATUS_NEEDS_REVIEW:
-            raise SystemExit(f"golem: task does not need review: {task_id}")
-        task["status"] = STATUS_DONE
-    return 0
-
-
-def show_task_result(task_id: str) -> int:
-    tasks = load_tasks()
-    if task_id not in tasks:
-        raise SystemExit(f"golem: task not found: {task_id}")
-    task = cast("dict[str, Any]", tasks[task_id])
-    result = task.get("result")
-    if not isinstance(result, str):
-        raise SystemExit(f"golem: task has no result: {task_id}")
-    print_task_result(result)
-    return 0
-
-
-def cancel_task(task_id: str) -> int:
-    with locked_tasks() as tasks:
-        if task_id not in tasks:
-            raise SystemExit(f"golem: task not found: {task_id}")
-        task = cast("dict[str, Any]", tasks[task_id])
-        if task.get("status") not in {STATUS_SCHEDULED, STATUS_WAITING}:
-            raise SystemExit(f"golem: task is not scheduled: {task_id}")
-        at_job = task.get("at_job")
-        task["status"] = STATUS_CANCELLED
-        pending_task_ids = [task_id]
-        while pending_task_ids:
-            parent_id = pending_task_ids.pop()
-            for waiting_task_id in waiting_dependent_ids(tasks, parent_id):
-                waiting_task = cast("dict[str, Any]", tasks[waiting_task_id])
-                waiting_task["status"] = STATUS_CANCELLED
-                pending_task_ids.append(waiting_task_id)
-    if not isinstance(at_job, str):
-        return 0
-    remove_at_job(at_job)
-    return 0
-
-
-def remove_at_job(at_job: str) -> None:
-    message: str | None = None
-    try:
-        result = subprocess.run(
-            ["atrm", at_job],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except OSError as error:
-        message = str(error)
+def wake_agent_for_task(task_id: str, record: dict[str, Any]) -> int:
+    wake_agent()
+    due_at = datetime.fromisoformat(cast("str", record["due_at"]))
+    if due_at <= datetime.now(UTC):
+        print(f"golem: queued {task_id}")
     else:
-        if result.returncode:
-            message = result.stderr.strip() or result.stdout.strip() or "atrm failed"
-    if message is not None:
-        print(f"golem: could not cancel at job {at_job}: {message}", file=sys.stderr)
-
-
-def list_tasks() -> int:
-    tasks = load_tasks()
-    if not tasks:
-        print("golem: no tasks")
-        return 0
-    rows = [
-        (
-            task_id,
-            task["status"],
-            task["cwd"],
-            task.get("due_at", ""),
-            f"{task['after']} ({tasks[task['after']]['status']})"
-            if task["status"] == STATUS_WAITING
-            else "",
-        )
-        for task_id, task in tasks.items()
-    ]
-    rows.sort(key=lambda row: (row[1] != STATUS_NEEDS_REVIEW, row[0]))
-    headers = ("ID", "STATUS", "DIRECTORY", "DUE AT", "AFTER")
-    widths = [
-        max(len(str(value)) for value in column) for column in zip(headers, *rows, strict=True)
-    ]
-    for row in (headers, *rows):
-        print(
-            "  ".join(
-                str(value).ljust(width) for value, width in zip(row, widths, strict=True)
-            ).rstrip()
-        )
+        print(f"golem: scheduled {task_id} for {due_at:%Y-%m-%d %H:%M %Z %z}")
     return 0
 
 
@@ -303,11 +298,7 @@ def scheduled_time(value: str) -> datetime:
 
 def next_reset_time() -> datetime | None:
     requests = (
-        {
-            "type": "control_request",
-            "request_id": "init",
-            "request": {"subtype": "initialize"},
-        },
+        {"type": "control_request", "request_id": "init", "request": {"subtype": "initialize"}},
         {
             "type": "control_request",
             "request_id": "usage",
@@ -383,81 +374,245 @@ def reset_time_from_limit(limit: dict[str, Any]) -> datetime:
     return reset_time
 
 
-def at_job_number(at_output: str) -> str | None:
-    match = re.search(r"\bjob\s+(\d+)\s+at\b", at_output)
-    if match is None:
-        return None
-    return match.group(1)
+def planned_execution_time(*, is_now: bool, at_text: str | None) -> datetime:
+    if is_now:
+        return datetime.now(UTC)
+    when = next_reset_time() if at_text is None else scheduled_time(at_text)
+    if when is None:
+        return datetime.now(UTC)
+    return rounded_time(when)
 
 
-def submit_at_job(
-    task_id: str,
-    record: dict[str, Any],
-    when: datetime,
-    previous_record: dict[str, Any] | None = None,
-) -> int:
-    command = " ".join(
-        shlex.quote(part)
-        for part in (
-            str(Path(sys.executable).absolute()),
-            str(Path(__file__).resolve()),
-            "_execute",
-            task_id,
-            cast("str", record["session_id"]),
-        )
+def rounded_time(when: datetime) -> datetime:
+    when = when.astimezone(UTC)
+    if when.second or when.microsecond:
+        when += timedelta(minutes=1)
+    return when.replace(second=0, microsecond=0).astimezone()
+
+
+def run_lock_path(session_id: str) -> Path:
+    return run_lock_directory() / f"{session_id}.lock"
+
+
+def release_run_lock(lock_file: io.TextIOWrapper, session_id: str) -> None:
+    run_lock_path(session_id).unlink(missing_ok=True)
+    fcntl.flock(lock_file, fcntl.LOCK_UN)
+    lock_file.close()
+
+
+def has_agent_argument(agent_args: list[str], names: set[str]) -> bool:
+    return any(
+        argument == name or argument.startswith(f"{name}=")
+        for argument in agent_args
+        for name in names
     )
+
+
+def resolved_worktree(tasks: dict[str, Any], task: dict[str, Any]) -> str | None:
+    worktree = task.get("worktree")
+    if isinstance(worktree, str):
+        return worktree
+    parent_id = task.get("after")
+    parent = tasks.get(parent_id) if isinstance(parent_id, str) else None
+    if (
+        isinstance(parent, dict)
+        and cast("dict[str, Any]", parent).get("cwd") == task["cwd"]
+        and isinstance(cast("dict[str, Any]", parent).get("worktree"), str)
+    ):
+        return cast("str", parent["worktree"])
+    agent_args = cast("list[str]", task["agent_args"])
+    if has_agent_argument(agent_args, {"-w", "--worktree"}):
+        return None
     try:
         result = subprocess.run(
-            ["at", "-t", when.strftime("%Y%m%d%H%M.%S")],
-            input=f"{command}\n",
+            [
+                "git",
+                "-C",
+                cast("str", task["cwd"]),
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-common-dir",
+                "HEAD",
+            ],
             capture_output=True,
-            text=True,
+            encoding="utf-8",
             check=False,
         )
-        if result.returncode == 0:
-            at_job = at_job_number(result.stderr)
-            if at_job is None:
-                message = "at queued a job but its number is unknown; remove it with atq and atrm"
-            else:
-                with locked_tasks() as tasks:
-                    task = tasks.get(task_id)
-                    is_cancelled = task == {**record, "status": STATUS_CANCELLED}
-                    is_superseded = isinstance(task, dict) and (
-                        cast("dict[str, Any]", task).get("session_id") != record["session_id"]
-                    )
-                    if task == record:
-                        cast("dict[str, Any]", task)["at_job"] = at_job
-                if is_cancelled or is_superseded:
-                    remove_at_job(at_job)
-                    raise SystemExit(f"golem: task was cancelled while scheduling: {task_id}")
-                print(f"golem: scheduled {task_id} for {when:%Y-%m-%d %H:%M %Z %z}")
-                return 0
-        else:
-            message = result.stderr.strip() or result.stdout.strip() or "at failed"
-    except OSError as error:
-        message = str(error)
+    except OSError:
+        return None
+    if result.returncode:
+        return None
+    common_directory = Path(result.stdout.splitlines()[0])
+    return str(common_directory.parent / ".claude" / "worktrees" / cast("str", task["session_id"]))
 
+
+def acquire_run_lock(session_id: str) -> io.TextIOWrapper | None:
+    lock_file = run_lock_path(session_id).open("a+", encoding="utf-8")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock_file.close()
+        return None
+    return lock_file
+
+
+def claim_task_in_ledger(
+    tasks: dict[str, Any], task_id: str, session_id: str, expected_status: str
+) -> tuple[dict[str, Any], io.TextIOWrapper] | None:
+    task = tasks.get(task_id)
+    if not isinstance(task, dict):
+        return None
+    task_record = cast("dict[str, Any]", task)
+    if task_record.get("status") != expected_status or task_record.get("session_id") != session_id:
+        return None
+    lock_file = acquire_run_lock(session_id)
+    if lock_file is None:
+        return None
+    worktree = resolved_worktree(tasks, task_record)
+    if worktree is not None:
+        task_record["worktree"] = worktree
+    task_record["status"] = STATUS_RUNNING
+    return task_record.copy(), lock_file
+
+
+def claim_task(
+    task_id: str, session_id: str, expected_status: str
+) -> tuple[dict[str, Any], io.TextIOWrapper] | None:
     with locked_tasks() as tasks:
-        if tasks.get(task_id) == record:
-            if previous_record is None:
-                if waiting_dependent_ids(tasks, task_id):
-                    cast("dict[str, Any]", tasks[task_id])["status"] = STATUS_FAILED
-                else:
-                    del tasks[task_id]
-            else:
-                tasks[task_id] = previous_record
-    raise SystemExit(f"golem: could not schedule task: {message}")
+        return claim_task_in_ledger(tasks, task_id, session_id, expected_status)
 
 
-def schedule_new_task(
-    task_id: str,
-    prompt: str,
-    agent_args: tuple[str, ...],
-    when: datetime,
-) -> int:
-    record = new_task_record(str(Path.cwd()), prompt, agent_args, when)
-    reserve_task(task_id, record)
-    return submit_at_job(task_id, record, when)
+def task_directory(task: dict[str, Any]) -> str:
+    worktree = task.get("worktree")
+    if isinstance(worktree, str) and Path(worktree).is_dir():
+        return worktree
+    return cast("str", task["cwd"])
+
+
+def run_claude(task: dict[str, Any]) -> tuple[int, str]:
+    session_id = cast("str", task["session_id"])
+    is_resuming = cast("int", task.get("usage_limit_resume_count", 0)) > 0
+    command = (
+        ["claude", "--resume", session_id, "--print", USAGE_LIMIT_RESUME_PROMPT]
+        if is_resuming
+        else ["claude", "--session-id", session_id, "--print", cast("str", task["prompt"])]
+    )
+    agent_args = list(cast("list[str]", task["agent_args"]))
+    worktree = task.get("worktree")
+    if isinstance(worktree, str) and not Path(worktree).is_dir():
+        agent_args.extend(["--worktree", Path(worktree).name])
+    if not has_agent_argument(
+        agent_args,
+        {
+            "--allow-dangerously-skip-permissions",
+            "--dangerously-skip-permissions",
+            "--permission-mode",
+        },
+    ):
+        agent_args.append("--dangerously-skip-permissions")
+    claude_process = subprocess.run(
+        [*command, "--output-format", "json", *agent_args],
+        cwd=task_directory(task),
+        env=task_environment(task),
+        stdout=subprocess.PIPE,
+        encoding="utf-8",
+        check=False,
+    )
+    return claude_process.returncode, claude_process.stdout
+
+
+def pickup(task_id: str, *agent_args: str) -> int:
+    with locked_tasks() as tasks:
+        task = tasks.get(task_id)
+        if not isinstance(task, dict):
+            raise SystemExit(f"golem: task not found: {task_id}")
+        task_record = cast("dict[str, Any]", task)
+        if task_record.get("status") in {STATUS_SCHEDULED, STATUS_WAITING, STATUS_CANCELLED}:
+            raise SystemExit(f"golem: task has not started: {task_id}")
+        if task_record.get("status") == STATUS_NEEDS_REVIEW:
+            task_record["status"] = STATUS_DONE
+        session_id = cast("str", task_record["session_id"])
+        cwd = task_directory(task_record)
+    return subprocess.run(
+        ["claude", "--resume", session_id, *agent_args], cwd=cwd, check=False
+    ).returncode
+
+
+def close(task_id: str) -> int:
+    with locked_tasks() as tasks:
+        if task_id not in tasks:
+            raise SystemExit(f"golem: task not found: {task_id}")
+        task = cast("dict[str, Any]", tasks[task_id])
+        if task.get("status") != STATUS_NEEDS_REVIEW:
+            raise SystemExit(f"golem: task does not need review: {task_id}")
+        task["status"] = STATUS_DONE
+    return 0
+
+
+def print_task_result(result: str) -> None:
+    print(result, end="" if result.endswith("\n") else "\n")
+
+
+def show_task_result(task_id: str) -> int:
+    tasks = load_tasks()
+    if task_id not in tasks:
+        raise SystemExit(f"golem: task not found: {task_id}")
+    task = cast("dict[str, Any]", tasks[task_id])
+    result = task.get("result")
+    if not isinstance(result, str):
+        raise SystemExit(f"golem: task has no result: {task_id}")
+    print_task_result(result)
+    return 0
+
+
+def cancel_task(task_id: str) -> int:
+    with locked_tasks() as tasks:
+        task = tasks.get(task_id)
+        if not isinstance(task, dict):
+            raise SystemExit(f"golem: task not found: {task_id}")
+        task_record = cast("dict[str, Any]", task)
+        if task_record.get("status") not in {STATUS_SCHEDULED, STATUS_WAITING}:
+            raise SystemExit(f"golem: task is not scheduled: {task_id}")
+        task_record["status"] = STATUS_CANCELLED
+        pending_task_ids = [task_id]
+        while pending_task_ids:
+            parent_id = pending_task_ids.pop()
+            for dependent_id in waiting_dependent_ids(tasks, parent_id):
+                dependent = cast("dict[str, Any]", tasks[dependent_id])
+                dependent["status"] = STATUS_CANCELLED
+                pending_task_ids.append(dependent_id)
+    return 0
+
+
+def list_tasks() -> int:
+    tasks = load_tasks()
+    if not tasks:
+        print("golem: no tasks")
+        return 0
+    rows = [
+        (
+            task_id,
+            task["status"],
+            task["cwd"],
+            task.get("due_at", ""),
+            f"{task['after']} ({tasks[task['after']]['status']})"
+            if task["status"] == STATUS_WAITING
+            else "",
+        )
+        for task_id, task in tasks.items()
+    ]
+    rows.sort(key=lambda row: (row[1] != STATUS_NEEDS_REVIEW, row[0]))
+    headers = ("ID", "STATUS", "DIRECTORY", "DUE AT", "AFTER")
+    widths = [
+        max(len(str(value)) for value in column) for column in zip(headers, *rows, strict=True)
+    ]
+    for row in (headers, *rows):
+        print(
+            "  ".join(
+                str(value).ljust(width) for value, width in zip(row, widths, strict=True)
+            ).rstrip()
+        )
+    return 0
 
 
 def claude_result_and_usage_limit(output: str) -> tuple[str, bool]:
@@ -484,38 +639,30 @@ def claude_result_and_usage_limit(output: str) -> tuple[str, bool]:
     return result, response.get("api_error_status") == USAGE_LIMIT_HTTP_STATUS
 
 
-def mark_task_waiting_for_reset(
-    task_id: str,
-    result: str,
-) -> tuple[dict[str, Any], datetime] | None:
+def mark_task_waiting_for_reset(task_id: str, result: str) -> bool:
     try:
-        when = planned_execution_time(is_now=False, at_text=None)
+        when = next_reset_time()
     except SystemExit:
-        return None
+        return False
     if when is None:
-        return None
+        return False
+    when = rounded_time(when)
     with locked_tasks() as tasks:
         task = tasks.get(task_id)
-        if not isinstance(task, dict):
-            return None
+        if (
+            not isinstance(task, dict)
+            or cast("dict[str, Any]", task).get("status") != STATUS_RUNNING
+        ):
+            return False
         task_record = cast("dict[str, Any]", task)
-        if task_record.get("status") != STATUS_RUNNING:
-            return None
         task_record["result"] = result
-        task_record.pop("at_job", None)
         task_record["status"] = STATUS_SCHEDULED
         task_record["due_at"] = when.isoformat()
         task_record["usage_limit_resume_count"] = task_record.get("usage_limit_resume_count", 0) + 1
-        return task_record.copy(), when
+    return True
 
 
-def finish_task(
-    task_id: str,
-    result: str | None,
-    returncode: int,
-    *,
-    is_usage_limit: bool,
-) -> None:
+def finish_task(task_id: str, result: str | None, returncode: int, *, is_usage_limit: bool) -> None:
     with locked_tasks() as tasks:
         stored_task = tasks.get(task_id)
         if not isinstance(stored_task, dict):
@@ -531,31 +678,24 @@ def finish_task(
         task_record["returncode"] = returncode
 
 
-def claim_next_dependent(task_id: str) -> tuple[str, dict[str, Any]] | None:
+def claim_next_dependent(
+    task_id: str,
+) -> tuple[str, dict[str, Any], io.TextIOWrapper] | None:
     with locked_tasks() as tasks:
-        parent_record = cast("dict[str, Any]", tasks[task_id])
-        if parent_record.get("status") not in SUCCEEDED_STATUSES:
+        parent = tasks.get(task_id)
+        if (
+            not isinstance(parent, dict)
+            or cast("dict[str, Any]", parent).get("status") not in SUCCEEDED_STATUSES
+        ):
             return None
-        dependent_ids = waiting_dependent_ids(tasks, task_id)
-        if not dependent_ids:
-            return None
-        dependent_id = dependent_ids[0]
-        dependent_record = cast("dict[str, Any]", tasks[dependent_id])
-        dependent_record["status"] = STATUS_RUNNING
-        return dependent_id, dependent_record.copy()
-
-
-def print_task_result(result: str) -> None:
-    print(result, end="" if result.endswith("\n") else "\n")
-
-
-def drain_dependents(task_id: str) -> None:
-    while next_dependent := claim_next_dependent(task_id):
-        dependent_id, dependent_record = next_dependent
-        try:
-            execute_task(dependent_id, dependent_record)
-        except SystemExit as error:
-            print(error, file=sys.stderr)
+        for dependent_id in waiting_dependent_ids(tasks, task_id):
+            dependent = cast("dict[str, Any]", tasks[dependent_id])
+            session_id = cast("str", dependent["session_id"])
+            claim = claim_task_in_ledger(tasks, dependent_id, session_id, STATUS_WAITING)
+            if claim is not None:
+                record, lock_file = claim
+                return dependent_id, record, lock_file
+    return None
 
 
 def execute_task(task_id: str, task: dict[str, Any]) -> int:
@@ -567,45 +707,103 @@ def execute_task(task_id: str, task: dict[str, Any]) -> int:
         output = ""
     result, is_usage_limit = claude_result_and_usage_limit(output)
     usage_limit_resume_count = cast("int", task.get("usage_limit_resume_count", 0))
-    if is_usage_limit and usage_limit_resume_count < MAX_USAGE_LIMIT_RESUMES:
-        rescheduled_task = mark_task_waiting_for_reset(task_id, result)
-        if rescheduled_task is not None:
-            rescheduled_record, when = rescheduled_task
-            previous_record = {
-                **task,
-                "result": result,
-                "status": STATUS_FAILED,
-                "returncode": returncode,
-            }
-            submit_at_job(task_id, rescheduled_record, when, previous_record)
-            print_task_result(result)
-            return 0
-    finish_task(
-        task_id,
-        result if output else None,
-        returncode,
-        is_usage_limit=is_usage_limit,
-    )
-    if output:
-        print_task_result(result)
+    if (
+        is_usage_limit
+        and usage_limit_resume_count < MAX_USAGE_LIMIT_RESUMES
+        and mark_task_waiting_for_reset(task_id, result)
+    ):
+        return 0
+    finish_task(task_id, result if output else None, returncode, is_usage_limit=is_usage_limit)
     drain_dependents(task_id)
     return returncode
 
 
-def execute_scheduled_task(task_id: str, session_id: str) -> int:
-    with locked_tasks() as tasks:
-        task = tasks.get(task_id)
-        if not isinstance(task, dict):
-            return 0
-        task_record = cast("dict[str, Any]", task)
-        if (
-            task_record.get("status") != STATUS_SCHEDULED
-            or task_record.get("session_id") != session_id
-        ):
-            return 0
-        task_record["status"] = STATUS_RUNNING
+def execute_claimed_task(
+    task_id: str,
+    task: dict[str, Any],
+    lock_file: io.TextIOWrapper,
+) -> int:
+    try:
+        return execute_task(task_id, task)
+    finally:
+        release_run_lock(lock_file, cast("str", task["session_id"]))
 
-    return execute_task(task_id, task_record)
+
+def drain_dependents(task_id: str) -> None:
+    while next_dependent := claim_next_dependent(task_id):
+        dependent_id, dependent, lock_file = next_dependent
+        execute_claimed_task(dependent_id, dependent, lock_file)
+
+
+def execute_scheduled_task(task_id: str, session_id: str) -> int:
+    claim = claim_task(task_id, session_id, STATUS_SCHEDULED)
+    if claim is None:
+        return 0
+    task, lock_file = claim
+    return execute_claimed_task(task_id, task, lock_file)
+
+
+def reap_dead_task(task: dict[str, Any]) -> bool:
+    session_id = task.get("session_id")
+    if not isinstance(session_id, str):
+        return True
+    lock_file = acquire_run_lock(session_id)
+    if lock_file is None:
+        return False
+    release_run_lock(lock_file, session_id)
+    return True
+
+
+def start_task_executor(task_id: str, task: dict[str, Any]) -> subprocess.Popen[Any]:
+    return subprocess.Popen(
+        [
+            *golem_command(),
+            "_execute",
+            task_id,
+            cast("str", task["session_id"]),
+        ],
+        env=task_environment(task),
+        start_new_session=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+    )
+
+
+def start_due_tasks() -> bool:
+    due_tasks: list[tuple[str, dict[str, Any]]] = []
+    with locked_tasks() as tasks:
+        for task in tasks.values():
+            if not isinstance(task, dict):
+                continue
+            task_record = cast("dict[str, Any]", task)
+            if task_record.get("status") == STATUS_RUNNING and reap_dead_task(task_record):
+                task_record["status"] = STATUS_FAILED
+        now = datetime.now(UTC)
+        has_pending_work = False
+        for task_id, task in tasks.items():
+            if not isinstance(task, dict):
+                continue
+            task_record = cast("dict[str, Any]", task)
+            status = task_record.get("status")
+            if status not in {STATUS_SCHEDULED, STATUS_RUNNING}:
+                continue
+            has_pending_work = True
+            due_at = task_record.get("due_at")
+            if (
+                status == STATUS_SCHEDULED
+                and isinstance(due_at, str)
+                and datetime.fromisoformat(due_at) <= now
+            ):
+                due_tasks.append((task_id, task_record.copy()))
+    for task_id, task in due_tasks:
+        start_task_executor(task_id, task)
+    return has_pending_work
+
+
+def run_agent() -> int:
+    while start_due_tasks():
+        time.sleep(AGENT_POLL_SECONDS)
+    return 0
 
 
 def retryable_task(tasks: dict[str, Any], task_id: str) -> dict[str, Any]:
@@ -619,33 +817,22 @@ def retryable_task(tasks: dict[str, Any], task_id: str) -> dict[str, Any]:
 
 def retry_task(task_id: str, *, is_now: bool, at_text: str | None) -> int:
     retryable_task(load_tasks(), task_id)
+    require_agent()
     when = planned_execution_time(is_now=is_now, at_text=at_text)
-
     with locked_tasks() as tasks:
         task = retryable_task(tasks, task_id)
-        previous_record = task.copy()
         record = new_task_record(
             cast("str", task["cwd"]),
             cast("str", task["prompt"]),
             tuple(cast("list[str]", task["agent_args"])),
             when,
+            cast("str | None", task.get("after")),
         )
+        for name in ("environment", "worktree"):
+            if name in task:
+                record[name] = task[name]
         tasks[task_id] = record
-    if when is None:
-        return execute_task(task_id, record)
-    return submit_at_job(task_id, record, when, previous_record)
-
-
-def planned_execution_time(*, is_now: bool, at_text: str | None) -> datetime | None:
-    if is_now:
-        return None
-    when = next_reset_time() if at_text is None else scheduled_time(at_text)
-    if when is None:
-        return None
-    when = when.astimezone(UTC)
-    if when.second or when.microsecond:
-        when += timedelta(minutes=1)
-    return when.replace(second=0, microsecond=0).astimezone()
+    return wake_agent_for_task(task_id, record)
 
 
 def add_scheduling_arguments(add_argument: Callable[..., argparse.Action]) -> None:
@@ -658,21 +845,26 @@ def add_scheduling_arguments(add_argument: Callable[..., argparse.Action]) -> No
 
 
 def run_task_from_arguments(arguments: argparse.Namespace, agent_args: list[str]) -> int:
+    require_agent()
     prompt_text = (
         Path(arguments.file).read_text(encoding="utf-8") if arguments.file else arguments.prompt
     )
-    task_args = tuple(agent_args)
+    now = datetime.now(UTC)
+    record = new_task_record(str(Path.cwd()), prompt_text, tuple(agent_args), now, arguments.after)
     if arguments.after is not None:
-        dependent_record = new_task_record(
-            str(Path.cwd()), prompt_text, task_args, None, arguments.after
-        )
-        if reserve_dependent_task(arguments.id, dependent_record, arguments.after):
+        with locked_tasks() as tasks:
+            is_parent_succeeded = parent_has_succeeded(tasks, arguments.after)
+        if is_parent_succeeded:
+            when = planned_execution_time(is_now=arguments.now, at_text=arguments.at)
+            record["due_at"] = when.isoformat()
+        if reserve_dependent_task(arguments.id, record, arguments.after):
             print(f"golem: {arguments.id} will run after {arguments.after}")
             return 0
+        return wake_agent_for_task(arguments.id, record)
     when = planned_execution_time(is_now=arguments.now, at_text=arguments.at)
-    if when is None:
-        return run(arguments.id, prompt_text, *agent_args)
-    return schedule_new_task(arguments.id, prompt_text, task_args, when)
+    record["due_at"] = when.isoformat()
+    reserve_task(arguments.id, record)
+    return wake_agent_for_task(arguments.id, record)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -683,10 +875,11 @@ def main(argv: list[str] | None = None) -> int:
         separator_index = golem_args.index("--")
         agent_args = golem_args[separator_index + 1 :]
         golem_args = golem_args[:separator_index]
-
     parser = argparse.ArgumentParser(prog="golem")
     commands = parser.add_subparsers(dest="command", required=True)
 
+    agent_parser = commands.add_parser("agent")
+    agent_parser.add_argument("action", choices=("install", "uninstall"))
     run_command = commands.add_parser(
         "run",
         description=SCHEDULE_DESCRIPTION,
@@ -718,8 +911,12 @@ def main(argv: list[str] | None = None) -> int:
     execute_command = commands.add_parser("_execute")
     execute_command.add_argument("id")
     execute_command.add_argument("session_id")
+    commands.add_parser("_agent")
     arguments = parser.parse_args(golem_args)
-
+    if arguments.command == "agent":
+        return install_agent() if arguments.action == "install" else uninstall_agent()
+    if arguments.command == "_agent":
+        return run_agent()
     if arguments.command == "_execute":
         return execute_scheduled_task(arguments.id, arguments.session_id)
     if arguments.command == "pickup":
