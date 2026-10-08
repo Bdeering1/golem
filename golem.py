@@ -43,6 +43,7 @@ PERMISSION_ARGUMENTS = {
     "--dangerously-skip-permissions",
     "--permission-mode",
 }
+VERBOSE_ARGUMENT = "--verbose"
 
 
 def ledger_path() -> Path:
@@ -229,16 +230,19 @@ def new_session_id() -> str:
     return str(uuid.uuid4())
 
 
+def is_captured_variable(name: str) -> bool:
+    return name in {"PATH", "LANG"} or name.startswith("LC_")
+
+
 def captured_environment() -> dict[str, str]:
-    return {
-        name: value
-        for name, value in os.environ.items()
-        if name in {"PATH", "LANG"} or name.startswith("LC_")
-    }
+    return {name: value for name, value in os.environ.items() if is_captured_variable(name)}
 
 
 def task_environment(task: dict[str, Any]) -> dict[str, str]:
-    return {**os.environ, **task.get("environment", {})}
+    inherited_environment = {
+        name: value for name, value in os.environ.items() if not is_captured_variable(name)
+    }
+    return {**inherited_environment, **task.get("environment", {})}
 
 
 def has_agent_argument(agent_args: list[str], names: set[str]) -> bool:
@@ -294,8 +298,8 @@ def run_claude(task: dict[str, Any]) -> tuple[int, str]:
     )
     agent_args = cast("list[str]", task["agent_args"])
     default_args: list[str] = []
-    if "--verbose" not in agent_args:
-        default_args.append("--verbose")
+    if VERBOSE_ARGUMENT not in agent_args:
+        default_args.append(VERBOSE_ARGUMENT)
     worktree = task.get("worktree")
     if worktree is not None and not Path(worktree).is_dir():
         default_args += ["--worktree", Path(worktree).name]
@@ -476,7 +480,7 @@ def next_reset_time() -> datetime | None:
                 "--input-format",
                 "stream-json",
                 "--no-session-persistence",
-                "--verbose",
+                VERBOSE_ARGUMENT,
             ],
             input="".join(json.dumps(request) + "\n" for request in requests),
             env=child_environment,
