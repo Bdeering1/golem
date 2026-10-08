@@ -186,6 +186,7 @@ def expected_claude_args(task, prompt=PROMPT, agent_args=AGENT_ARGS):
         "--output-format",
         "json",
         *agent_args,
+        "--verbose",
         SKIP_PERMISSIONS,
     ]
 
@@ -453,14 +454,35 @@ def test_dependent_runs_in_parent_worktree_with_its_own_environment(
     ]
 
 
-def write_claude_output(fake_commands, result, *, api_error_status=None, is_verbose=False):
+def test_detected_worktree_is_shared_with_dependents(
+    installed_agent, fake_commands, git_repository, ledger_path, monkeypatch, tmp_path
+):
+    monkeypatch.chdir(git_repository)
+    detected_worktree = tmp_path / "detected-worktree"
+    detected_worktree.mkdir()
+    write_claude_output(
+        fake_commands, CLAUDE_RESULT, is_verbose=True, working_directory=str(detected_worktree)
+    )
+    golem.main(["run", PARENT_ID, PARENT_PROMPT, "--now", "--", "--worktree", "custom"])
+    golem.main(["run", CHILD_ID, CHILD_PROMPT, "--after", PARENT_ID])
+
+    golem.main(["_execute", PARENT_ID, read_task(ledger_path, PARENT_ID)["session_id"]])
+
+    child_cwd = fake_commands["claude-cwd"].read_text(encoding="utf-8").splitlines()[-1]
+    assert child_cwd == str(detected_worktree)
+
+
+def write_claude_output(
+    fake_commands, result, *, api_error_status=None, is_verbose=False, working_directory=None
+):
     output = {
         "api_error_status": api_error_status,
         "is_error": api_error_status is not None,
         "result": result,
         "type": "result",
     }
-    response = [{"type": "system", "subtype": "init"}, output] if is_verbose else output
+    init_message = {"type": "system", "subtype": "init", "cwd": working_directory}
+    response = [init_message, output] if is_verbose else output
     fake_commands["claude-stdout"].write_text(json.dumps(response), encoding="utf-8")
 
 
@@ -614,6 +636,7 @@ def test_usage_limited_task_resumes_at_reset_in_same_session(
         "--output-format",
         "json",
         *agent_args,
+        *([] if is_verbose else ["--verbose"]),
         SKIP_PERMISSIONS,
     ]
 

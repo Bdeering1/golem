@@ -35,7 +35,7 @@ USAGE_LIMIT_RESUME_PROMPT = "The usage limit has reset. Continue the task."
 SCHEDULE_DESCRIPTION = "Run at the next usage reset, or immediately if no usage window is active."
 AGENT_ERROR = "golem: the agent is not installed or is out of date; run golem agent install"
 AGENT_LABEL = "com.github.bdeering1.golem"
-AGENT_INTERVAL_SECONDS = 60
+AGENT_INTERVAL_SECONDS = 300
 AGENT_POLL_SECONDS = 10
 WORKTREE_ARGUMENTS = {"-w", "--worktree"}
 PERMISSION_ARGUMENTS = {
@@ -198,7 +198,7 @@ def install_agent() -> int:
     error = run_launchctl(["bootstrap", f"gui/{os.getuid()}", str(plist_path)])
     if error is not None:
         plist_path.unlink()
-        raise SystemExit(f"golem: could not install agent: {error}")
+        raise SystemExit(f"golem: could not install agent: {error}; run golem agent install again")
     return 0
 
 
@@ -294,6 +294,8 @@ def run_claude(task: dict[str, Any]) -> tuple[int, str]:
     )
     agent_args = cast("list[str]", task["agent_args"])
     default_args: list[str] = []
+    if "--verbose" not in agent_args:
+        default_args.append("--verbose")
     worktree = task.get("worktree")
     if worktree is not None and not Path(worktree).is_dir():
         default_args += ["--worktree", Path(worktree).name]
@@ -566,6 +568,28 @@ def claude_result_and_usage_limit(output: str) -> tuple[str, bool]:
     return result, response.get("api_error_status") == USAGE_LIMIT_HTTP_STATUS
 
 
+def claude_working_directory(output: str) -> str | None:
+    try:
+        parsed_response = cast("object", json.loads(output))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed_response, list):
+        return None
+    for message in cast("list[object]", parsed_response):
+        if not isinstance(message, dict):
+            continue
+        message_fields = cast("dict[str, object]", message)
+        working_directory = message_fields.get("cwd")
+        if message_fields.get("subtype") == "init" and isinstance(working_directory, str):
+            return working_directory
+    return None
+
+
+def record_worktree(task_id: str, worktree: str) -> None:
+    with locked_tasks() as tasks:
+        tasks[task_id]["worktree"] = worktree
+
+
 def mark_task_waiting_for_reset(task_id: str, result: str) -> bool:
     try:
         when = planned_execution_time(is_now=False, at_text=None)
@@ -658,6 +682,9 @@ def execute_task(task_id: str, task: dict[str, Any]) -> int:
         returncode = 127
         output = ""
     result, is_usage_limit = claude_result_and_usage_limit(output)
+    working_directory = claude_working_directory(output)
+    if working_directory is not None and working_directory != task["cwd"]:
+        record_worktree(task_id, working_directory)
     usage_limit_resume_count = cast("int", task.get("usage_limit_resume_count", 0))
     if (
         is_usage_limit
