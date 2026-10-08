@@ -33,10 +33,10 @@ FULL_UTILIZATION = 100
 MAX_USAGE_LIMIT_RESUMES = 2
 USAGE_LIMIT_RESUME_PROMPT = "The usage limit has reset. Continue the task."
 SCHEDULE_DESCRIPTION = "Run at the next usage reset, or immediately if no usage window is active."
-AGENT_ERROR = "golem: the agent is not installed or is out of date; run golem agent install"
-AGENT_LABEL = "com.github.bdeering1.golem"
-AGENT_INTERVAL_SECONDS = 300
-AGENT_POLL_SECONDS = 10
+LAUNCH_AGENT_ERROR = "golem: the agent is not installed or is out of date; run golem agent install"
+LAUNCH_AGENT_LABEL = "com.github.bdeering1.golem"
+LAUNCH_AGENT_INTERVAL_SECONDS = 300
+LAUNCH_AGENT_POLL_SECONDS = 10
 WORKTREE_ARGUMENTS = {"-w", "--worktree"}
 PERMISSION_ARGUMENTS = {
     "--allow-dangerously-skip-permissions",
@@ -151,21 +151,21 @@ def reserve_dependent_task(
         return True
 
 
-def agent_plist_path() -> Path:
-    return Path.home() / "Library" / "LaunchAgents" / f"{AGENT_LABEL}.plist"
+def launch_agent_plist_path() -> Path:
+    return Path.home() / "Library" / "LaunchAgents" / f"{LAUNCH_AGENT_LABEL}.plist"
 
 
 def golem_command() -> list[str]:
     return [str(Path(sys.executable).absolute()), str(Path(__file__).resolve())]
 
 
-def agent_plist_data() -> bytes:
+def launch_agent_plist_data() -> bytes:
     log_path = str(ledger_path().parent / "agent.log")
     plist: dict[str, object] = {
-        "Label": AGENT_LABEL,
+        "Label": LAUNCH_AGENT_LABEL,
         "ProgramArguments": ["/usr/bin/caffeinate", "-is", *golem_command(), "_agent"],
         "RunAtLoad": True,
-        "StartInterval": AGENT_INTERVAL_SECONDS,
+        "StartInterval": LAUNCH_AGENT_INTERVAL_SECONDS,
         "StandardOutPath": log_path,
         "StandardErrorPath": log_path,
     }
@@ -175,8 +175,8 @@ def agent_plist_data() -> bytes:
     return plistlib.dumps(plist)
 
 
-def agent_target() -> str:
-    return f"gui/{os.getuid()}/{AGENT_LABEL}"
+def launch_agent_target() -> str:
+    return f"gui/{os.getuid()}/{LAUNCH_AGENT_LABEL}"
 
 
 def run_launchctl(arguments: list[str]) -> str | None:
@@ -191,11 +191,11 @@ def run_launchctl(arguments: list[str]) -> str | None:
     return result.stderr.strip() or result.stdout.strip() or f"launchctl {arguments[0]} failed"
 
 
-def install_agent() -> int:
-    plist_path = agent_plist_path()
+def install_launch_agent() -> int:
+    plist_path = launch_agent_plist_path()
     plist_path.parent.mkdir(parents=True, exist_ok=True)
-    plist_path.write_bytes(agent_plist_data())
-    run_launchctl(["bootout", agent_target()])
+    plist_path.write_bytes(launch_agent_plist_data())
+    run_launchctl(["bootout", launch_agent_target()])
     error = run_launchctl(["bootstrap", f"gui/{os.getuid()}", str(plist_path)])
     if error is not None:
         plist_path.unlink()
@@ -203,20 +203,20 @@ def install_agent() -> int:
     return 0
 
 
-def uninstall_agent() -> int:
-    run_launchctl(["bootout", agent_target()])
-    agent_plist_path().unlink(missing_ok=True)
+def uninstall_launch_agent() -> int:
+    run_launchctl(["bootout", launch_agent_target()])
+    launch_agent_plist_path().unlink(missing_ok=True)
     return 0
 
 
-def require_agent() -> None:
-    plist_path = agent_plist_path()
-    if not plist_path.exists() or plist_path.read_bytes() != agent_plist_data():
-        raise SystemExit(AGENT_ERROR)
+def require_launch_agent() -> None:
+    plist_path = launch_agent_plist_path()
+    if not plist_path.exists() or plist_path.read_bytes() != launch_agent_plist_data():
+        raise SystemExit(LAUNCH_AGENT_ERROR)
 
 
-def wake_agent_for_task(task_id: str, when: datetime) -> int:
-    error = run_launchctl(["kickstart", agent_target()])
+def wake_launch_agent_and_report(task_id: str, when: datetime) -> int:
+    error = run_launchctl(["kickstart", launch_agent_target()])
     if error is not None:
         print(f"golem: could not wake agent: {error}", file=sys.stderr)
     if when <= datetime.now(UTC):
@@ -545,7 +545,7 @@ def schedule_new_task(
     due_time = when or datetime.now(UTC).astimezone()
     record = new_task_record(str(Path.cwd()), prompt, agent_args, due_time, after)
     reserve_task(task_id, record)
-    return wake_agent_for_task(task_id, due_time)
+    return wake_launch_agent_and_report(task_id, due_time)
 
 
 def claude_result_and_usage_limit(output: str) -> tuple[str, bool]:
@@ -735,7 +735,7 @@ def start_task_executor(task_id: str, task: dict[str, Any]) -> subprocess.Popen[
     )
 
 
-def start_due_tasks() -> None:
+def run_launch_agent_pass() -> None:
     now = datetime.now(UTC)
     due_tasks: list[tuple[str, dict[str, Any]]] = []
     with locked_tasks() as tasks:
@@ -757,11 +757,11 @@ def has_pending_tasks(tasks: dict[str, Any]) -> bool:
     return any(task["status"] in {STATUS_SCHEDULED, STATUS_RUNNING} for task in tasks.values())
 
 
-def run_agent() -> int:
-    start_due_tasks()
+def run_launch_agent() -> int:
+    run_launch_agent_pass()
     while has_pending_tasks(load_tasks()):
-        time.sleep(AGENT_POLL_SECONDS)
-        start_due_tasks()
+        time.sleep(LAUNCH_AGENT_POLL_SECONDS)
+        run_launch_agent_pass()
     return 0
 
 
@@ -776,7 +776,7 @@ def retryable_task(tasks: dict[str, Any], task_id: str) -> dict[str, Any]:
 
 def retry_task(task_id: str, *, is_now: bool, at_text: str | None) -> int:
     retryable_task(load_tasks(), task_id)
-    require_agent()
+    require_launch_agent()
     when = planned_execution_time(is_now=is_now, at_text=at_text) or datetime.now(UTC).astimezone()
 
     with locked_tasks() as tasks:
@@ -792,7 +792,7 @@ def retry_task(task_id: str, *, is_now: bool, at_text: str | None) -> int:
             if name in task:
                 record[name] = task[name]
         tasks[task_id] = record
-    return wake_agent_for_task(task_id, when)
+    return wake_launch_agent_and_report(task_id, when)
 
 
 def planned_execution_time(*, is_now: bool, at_text: str | None) -> datetime | None:
@@ -817,7 +817,7 @@ def add_scheduling_arguments(add_argument: Callable[..., argparse.Action]) -> No
 
 
 def run_task_from_arguments(arguments: argparse.Namespace, agent_args: list[str]) -> int:
-    require_agent()
+    require_launch_agent()
     prompt_text = (
         Path(arguments.file).read_text(encoding="utf-8") if arguments.file else arguments.prompt
     )
@@ -873,8 +873,8 @@ def main(argv: list[str] | None = None) -> int:
     retry_schedule_group = retry_command.add_mutually_exclusive_group()
     add_scheduling_arguments(retry_schedule_group.add_argument)
     commands.add_parser("list")
-    agent_command = commands.add_parser("agent")
-    agent_command.add_argument("action", choices=("install", "uninstall"))
+    launch_agent_command = commands.add_parser("agent")
+    launch_agent_command.add_argument("action", choices=("install", "uninstall"))
     commands.add_parser("_agent")
     execute_command = commands.add_parser("_execute")
     execute_command.add_argument("id")
@@ -882,11 +882,11 @@ def main(argv: list[str] | None = None) -> int:
     arguments = parser.parse_args(golem_args)
 
     if arguments.command == "_agent":
-        return run_agent()
+        return run_launch_agent()
     if arguments.command == "_execute":
         return execute_scheduled_task(arguments.id, arguments.session_id)
     if arguments.command == "agent":
-        return install_agent() if arguments.action == "install" else uninstall_agent()
+        return install_launch_agent() if arguments.action == "install" else uninstall_launch_agent()
     if arguments.command == "pickup":
         return pickup(arguments.id, *agent_args)
     if arguments.command == "close":
