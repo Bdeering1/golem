@@ -84,6 +84,9 @@ case "$1" in
     kickstart) exit "${GOLEM_LAUNCHCTL_KICKSTART_EXIT:-0}" ;;
 esac
 """,
+        "open": """#!/bin/sh
+printf '%s\\n' "$*" >> "$GOLEM_OPEN_ARGS"
+""",
     }.items():
         path = command_path / name
         path.write_text(script, encoding="utf-8")
@@ -103,6 +106,7 @@ def fake_commands(monkeypatch, tmp_path, fake_bin_path):
             "claude-stdout",
             "claude-unrelated",
             "launchctl-args",
+            "open-args",
         )
     }
     for path in paths.values():
@@ -182,7 +186,7 @@ def logged_claude_cwds(fake_commands):
     return fake_commands["claude-cwd"].read_text(encoding="utf-8").splitlines()
 
 
-def expected_claude_args(task, prompt=PROMPT, agent_args=AGENT_ARGS):
+def expected_claude_args(task, prompt=PROMPT, agent_args=AGENT_ARGS, task_id=TASK_ID):
     return [
         "--session-id",
         task["session_id"],
@@ -192,6 +196,8 @@ def expected_claude_args(task, prompt=PROMPT, agent_args=AGENT_ARGS):
         "json",
         *agent_args,
         golem.VERBOSE_ARGUMENT,
+        "--name",
+        task_id,
         SKIP_PERMISSIONS,
     ]
 
@@ -270,7 +276,7 @@ def test_launch_agent_pass_leaves_running_executor_alone(
     golem.main(["run", TASK_ID, PROMPT, "--now"])
     statuses_during_run: list[str] = []
 
-    def run_claude(task: dict[str, Any]) -> tuple[int, str]:
+    def run_claude(task_id: str, task: dict[str, Any]) -> tuple[int, str]:
         golem.run_launch_agent_pass()
         statuses_during_run.append(read_task(ledger_path)["status"])
         return 0, json.dumps({"result": CLAUDE_RESULT})
@@ -403,26 +409,40 @@ def empty_git_repository(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("agent_args", "repository_fixture", "has_default_worktree", "has_default_skip_permissions"),
+    (
+        "agent_args",
+        "repository_fixture",
+        "has_default_name",
+        "has_default_worktree",
+        "has_default_skip_permissions",
+    ),
     [
-        pytest.param([], "git_repository", True, True, id="defaults"),
-        pytest.param([], None, False, True, id="non-git"),
-        pytest.param([], "empty_git_repository", False, True, id="no-commits"),
+        pytest.param([], "git_repository", True, True, True, id="defaults"),
+        pytest.param([], None, True, False, True, id="non-git"),
+        pytest.param([], "empty_git_repository", True, False, True, id="no-commits"),
         pytest.param(
-            ["--permission-mode", "plan"], "git_repository", True, False, id="permission-mode"
+            ["--permission-mode", "plan"], "git_repository", True, True, False, id="permission-mode"
         ),
         pytest.param(
-            ["--permission-mode=plan"], "git_repository", True, False, id="permission-mode-value"
+            ["--permission-mode=plan"],
+            "git_repository",
+            True,
+            True,
+            False,
+            id="permission-mode-value",
         ),
         pytest.param(
             ["--allow-dangerously-skip-permissions"],
             "git_repository",
             True,
+            True,
             False,
             id="allow-permissions",
         ),
-        pytest.param([WORKTREE_FLAG, "custom"], "git_repository", False, True, id="worktree"),
-        pytest.param(["-w", "custom"], "git_repository", False, True, id="short-worktree"),
+        pytest.param([WORKTREE_FLAG, "custom"], "git_repository", True, False, True, id="worktree"),
+        pytest.param(["-w", "custom"], "git_repository", True, False, True, id="short-worktree"),
+        pytest.param(["--name", "custom"], "git_repository", False, True, True, id="name"),
+        pytest.param(["-n", "custom"], "git_repository", False, True, True, id="short-name"),
     ],
 )
 def test_headless_defaults_respect_agent_arguments(
@@ -433,6 +453,7 @@ def test_headless_defaults_respect_agent_arguments(
     request,
     agent_args,
     repository_fixture,
+    has_default_name,
     has_default_worktree,
     has_default_skip_permissions,
 ):
@@ -446,6 +467,7 @@ def test_headless_defaults_respect_agent_arguments(
     assert arguments[arguments.index("--output-format") + 2 :] == [
         *agent_args,
         golem.VERBOSE_ARGUMENT,
+        *(["--name", TASK_ID] if has_default_name else []),
         *([WORKTREE_FLAG, task["session_id"]] if has_default_worktree else []),
         *([SKIP_PERMISSIONS] if has_default_skip_permissions else []),
     ]
@@ -517,24 +539,53 @@ def write_claude_output(
     fake_commands["claude-stdout"].write_text(json.dumps(response), encoding="utf-8")
 
 
-@pytest.mark.parametrize("command", ["pickup", "close"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param(["pickup"], id="pickup"),
+        pytest.param(["pickup", "--app"], id="pickup-app"),
+        pytest.param(["close"], id="close"),
+    ],
+)
 def test_review_commands_complete_review_task(installed_launch_agent, ledger_path, command):
     golem.main(["run", TASK_ID, PROMPT, "--now"])
     task = read_task(ledger_path)
     golem.main(["_execute", TASK_ID, task["session_id"]])
 
-    assert golem.main([command, TASK_ID]) == 0
+    assert golem.main([*command, TASK_ID]) == 0
     assert read_task(ledger_path)["status"] == golem.STATUS_DONE
 
 
 @pytest.mark.parametrize(
     "status", [golem.STATUS_SCHEDULED, golem.STATUS_WAITING, golem.STATUS_CANCELLED]
 )
-def test_pickup_refuses_tasks_that_never_started(ledger_path, status):
+@pytest.mark.parametrize("pickup_args", [[], ["--app"]])
+def test_pickup_refuses_tasks_that_never_started(ledger_path, status, pickup_args):
     write_task(ledger_path, status)
 
     with pytest.raises(SystemExit, match=TASK_ID):
-        golem.main(["pickup", TASK_ID])
+        golem.main(["pickup", TASK_ID, *pickup_args])
+
+
+def test_pickup_app_opens_task_session_in_desktop_app(fake_commands, ledger_path):
+    write_task(ledger_path, golem.STATUS_NEEDS_REVIEW)
+
+    assert golem.main(["pickup", TASK_ID, "--app"]) == 0
+    assert (
+        fake_commands["open-args"].read_text(encoding="utf-8")
+        == f"claude://resume?session={read_task(ledger_path)['session_id']}\n"
+    )
+    assert logged_claude_calls(fake_commands) == []
+
+
+def test_pickup_app_rejects_agent_arguments(fake_commands, ledger_path):
+    write_task(ledger_path, golem.STATUS_NEEDS_REVIEW)
+
+    with pytest.raises(SystemExit):
+        golem.main(["pickup", TASK_ID, "--app", "--", *AGENT_ARGS])
+
+    assert read_task(ledger_path)["status"] == golem.STATUS_NEEDS_REVIEW
+    assert fake_commands["open-args"].read_text(encoding="utf-8") == ""
 
 
 def test_after_pending_parent_skips_usage_lookup(installed_launch_agent, ledger_path, monkeypatch):
@@ -668,6 +719,8 @@ def test_usage_limited_task_resumes_at_reset_in_same_session(
         "json",
         *agent_args,
         *([] if is_verbose else [golem.VERBOSE_ARGUMENT]),
+        "--name",
+        TASK_ID,
         SKIP_PERMISSIONS,
     ]
 
@@ -740,10 +793,10 @@ def test_scheduled_task_runs_waiting_chain(installed_launch_agent, fake_commands
     tasks = json.loads(ledger_path.read_text(encoding="utf-8"))
     assert {task["status"] for task in tasks.values()} == {golem.STATUS_NEEDS_REVIEW}
     assert logged_claude_calls(fake_commands) == [
-        expected_claude_args(tasks[PARENT_ID], PARENT_PROMPT),
-        expected_claude_args(tasks[CHILD_ID], CHILD_PROMPT),
-        expected_claude_args(tasks[GRANDCHILD_ID], GRANDCHILD_PROMPT),
-        expected_claude_args(tasks[SIBLING_ID], SIBLING_PROMPT),
+        expected_claude_args(tasks[PARENT_ID], PARENT_PROMPT, task_id=PARENT_ID),
+        expected_claude_args(tasks[CHILD_ID], CHILD_PROMPT, task_id=CHILD_ID),
+        expected_claude_args(tasks[GRANDCHILD_ID], GRANDCHILD_PROMPT, task_id=GRANDCHILD_ID),
+        expected_claude_args(tasks[SIBLING_ID], SIBLING_PROMPT, task_id=SIBLING_ID),
     ]
 
 
@@ -973,7 +1026,7 @@ def test_failed_dependent_does_not_block_later_sibling(
     create_waiting_chain()
     prompts: list[str] = []
 
-    def run_claude(task: dict[str, Any]) -> tuple[int, str]:
+    def run_claude(task_id: str, task: dict[str, Any]) -> tuple[int, str]:
         prompts.append(task["prompt"])
         return int(task["prompt"] == CHILD_PROMPT), json.dumps({"result": CLAUDE_RESULT})
 

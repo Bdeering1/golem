@@ -38,6 +38,7 @@ LAUNCH_AGENT_LABEL = "com.github.bdeering1.golem"
 LAUNCH_AGENT_INTERVAL_SECONDS = 300
 LAUNCH_AGENT_POLL_SECONDS = 10
 WORKTREE_ARGUMENTS = {"-w", "--worktree"}
+NAME_ARGUMENTS = {"-n", "--name"}
 PERMISSION_ARGUMENTS = {
     "--allow-dangerously-skip-permissions",
     "--dangerously-skip-permissions",
@@ -288,7 +289,7 @@ def task_directory(task: dict[str, Any]) -> str:
     return task["cwd"]
 
 
-def run_claude(task: dict[str, Any]) -> tuple[int, str]:
+def run_claude(task_id: str, task: dict[str, Any]) -> tuple[int, str]:
     session_id = cast("str", task["session_id"])
     is_resuming = cast("int", task.get("usage_limit_resume_count", 0)) > 0
     command = (
@@ -300,6 +301,8 @@ def run_claude(task: dict[str, Any]) -> tuple[int, str]:
     default_args: list[str] = []
     if VERBOSE_ARGUMENT not in agent_args:
         default_args.append(VERBOSE_ARGUMENT)
+    if not has_agent_argument(agent_args, NAME_ARGUMENTS):
+        default_args += ["--name", task_id]
     worktree = task.get("worktree")
     if worktree is not None and not Path(worktree).is_dir():
         default_args += ["--worktree", Path(worktree).name]
@@ -345,7 +348,7 @@ def new_task_record(
     return record
 
 
-def pickup(task_id: str, *agent_args: str) -> int:
+def pickup(task_id: str, *agent_args: str, is_app: bool) -> int:
     with locked_tasks() as tasks:
         if task_id not in tasks:
             raise SystemExit(f"golem: task not found: {task_id}")
@@ -356,11 +359,23 @@ def pickup(task_id: str, *agent_args: str) -> int:
             task["status"] = STATUS_DONE
         cwd = task_directory(task)
         session_id = cast("str", task["session_id"])
+    if is_app:
+        return subprocess.run(
+            ["open", f"claude://resume?session={session_id}"], check=False
+        ).returncode
     return subprocess.run(
         ["claude", "--resume", session_id, *agent_args],
         cwd=cwd,
         check=False,
     ).returncode
+
+
+def pickup_from_arguments(
+    parser: argparse.ArgumentParser, task_id: str, agent_args: list[str], *, is_app: bool
+) -> int:
+    if is_app and agent_args:
+        parser.error("pickup --app does not accept agent arguments")
+    return pickup(task_id, *agent_args, is_app=is_app)
 
 
 def close(task_id: str) -> int:
@@ -680,7 +695,7 @@ def drain_dependents(task_id: str) -> None:
 
 def execute_task(task_id: str, task: dict[str, Any]) -> int:
     try:
-        returncode, output = run_claude(task)
+        returncode, output = run_claude(task_id, task)
     except OSError as error:
         print(f"golem: could not execute task: {error}", file=sys.stderr)
         returncode = 127
@@ -859,6 +874,11 @@ def main(argv: list[str] | None = None) -> int:
 
     pickup_command = commands.add_parser("pickup")
     pickup_command.add_argument("id")
+    pickup_command.add_argument(
+        "--app",
+        action="store_true",
+        help="open the session in the Claude desktop app, in the app's default permission mode",
+    )
     close_command = commands.add_parser("close")
     close_command.add_argument("id")
     show_command = commands.add_parser("show")
@@ -888,7 +908,7 @@ def main(argv: list[str] | None = None) -> int:
     if arguments.command == "agent":
         return install_launch_agent() if arguments.action == "install" else uninstall_launch_agent()
     if arguments.command == "pickup":
-        return pickup(arguments.id, *agent_args)
+        return pickup_from_arguments(parser, arguments.id, agent_args, is_app=arguments.app)
     if arguments.command == "close":
         return close(arguments.id)
     if arguments.command == "show":
