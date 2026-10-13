@@ -559,7 +559,9 @@ def test_review_commands_complete_review_task(installed_launch_agent, ledger_pat
 @pytest.mark.parametrize(
     "status", [golem.STATUS_SCHEDULED, golem.STATUS_WAITING, golem.STATUS_CANCELLED]
 )
-@pytest.mark.parametrize("pickup_args", [[], ["--app"]])
+@pytest.mark.parametrize(
+    "pickup_args", [pytest.param([], id="terminal"), pytest.param(["--app"], id="app")]
+)
 def test_pickup_refuses_tasks_that_never_started(ledger_path, status, pickup_args):
     write_task(ledger_path, status)
 
