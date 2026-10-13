@@ -583,9 +583,10 @@ def test_pickup_app_opens_task_session_in_desktop_app(fake_commands, ledger_path
 def test_pickup_app_rejects_agent_arguments(fake_commands, ledger_path):
     write_task(ledger_path, golem.STATUS_NEEDS_REVIEW)
 
-    with pytest.raises(SystemExit):
+    with pytest.raises(SystemExit) as exit_info:
         golem.main(["pickup", TASK_ID, "--app", "--", *AGENT_ARGS])
 
+    assert exit_info.value.code == 2
     assert read_task(ledger_path)["status"] == golem.STATUS_NEEDS_REVIEW
     assert fake_commands["open-args"].read_text(encoding="utf-8") == ""
 
