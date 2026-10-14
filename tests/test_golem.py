@@ -1,8 +1,11 @@
 import json
+import multiprocessing
 import os
 import plistlib
 import re
+import select
 import shutil
+import signal
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -70,6 +73,15 @@ if [ -n "$worktree" ]; then
         mkdir -p "$(dirname "$common")/.claude/worktrees/$worktree"
     fi
 fi
+if [ -n "$GOLEM_CLAUDE_STARTED" ]; then
+    : > "$GOLEM_CLAUDE_STARTED"
+fi
+if [ -n "$GOLEM_CLAUDE_PID" ]; then
+    printf '%s\n' "$$" > "$GOLEM_CLAUDE_PID"
+fi
+while [ -n "$GOLEM_CLAUDE_HOLD" ] && [ -e "$GOLEM_CLAUDE_HOLD" ]; do
+    sleep 0.05
+done
 if [ -f "$GOLEM_CLAUDE_STDOUT" ]; then
     cat "$GOLEM_CLAUDE_STDOUT"
 else
@@ -103,6 +115,7 @@ def fake_commands(monkeypatch, tmp_path, fake_bin_path):
             "claude-cwd",
             "claude-lang",
             "claude-lc-time",
+            "claude-pid",
             "claude-stdout",
             "claude-unrelated",
             "launchctl-args",
@@ -180,6 +193,14 @@ def logged_claude_calls(fake_commands):
 def logged_claude_args(fake_commands):
     calls = logged_claude_calls(fake_commands)
     return calls[-1] if calls else []
+
+
+def wait_until(predicate):
+    for _ in range(100):
+        if predicate():
+            return
+        select.select([], [], [], 0.05)
+    pytest.fail("condition did not become true")
 
 
 def logged_claude_cwds(fake_commands):
@@ -276,7 +297,9 @@ def test_launch_agent_pass_leaves_running_executor_alone(
     golem.main(["run", TASK_ID, PROMPT, "--now"])
     statuses_during_run: list[str] = []
 
-    def run_claude(task_id: str, task: dict[str, Any]) -> tuple[int, str]:
+    def run_claude(
+        task_id: str, task: dict[str, Any], lock_file_descriptors: tuple[int, ...]
+    ) -> tuple[int, str]:
         golem.run_launch_agent_pass()
         statuses_during_run.append(read_task(ledger_path)["status"])
         return 0, json.dumps({"result": CLAUDE_RESULT})
@@ -762,7 +785,7 @@ def test_usage_limited_task_fails_when_it_cannot_be_rescheduled(
     )
     write_task(ledger_path, golem.STATUS_RUNNING)
 
-    golem.execute_task(TASK_ID, read_task(ledger_path))
+    golem.execute_task(TASK_ID, read_task(ledger_path), ())
     task = read_task(ledger_path)
     assert task["status"] == golem.STATUS_FAILED
     assert task["result"] == USAGE_LIMIT_RESULT
@@ -1029,7 +1052,9 @@ def test_failed_dependent_does_not_block_later_sibling(
     create_waiting_chain()
     prompts: list[str] = []
 
-    def run_claude(task_id: str, task: dict[str, Any]) -> tuple[int, str]:
+    def run_claude(
+        task_id: str, task: dict[str, Any], lock_file_descriptors: tuple[int, ...]
+    ) -> tuple[int, str]:
         prompts.append(task["prompt"])
         return int(task["prompt"] == CHILD_PROMPT), json.dumps({"result": CLAUDE_RESULT})
 
@@ -1060,3 +1085,378 @@ def test_usage_limit_resume_and_pickup_use_task_worktree(
     golem.main(["pickup", TASK_ID])
 
     assert logged_claude_cwds(fake_commands)[-2:] == [worktree, worktree]
+
+
+def test_executor_death_keeps_task_running_until_claude_exits(
+    installed_launch_agent, fake_commands, ledger_path, monkeypatch, tmp_path
+):
+    hold_path = tmp_path / "hold"
+    started_path = tmp_path / "started"
+    hold_path.touch()
+    monkeypatch.setenv("GOLEM_CLAUDE_HOLD", str(hold_path))
+    monkeypatch.setenv("GOLEM_CLAUDE_STARTED", str(started_path))
+    golem.main(["run", TASK_ID, PROMPT, "--now"])
+    task = read_task(ledger_path)
+    executor = golem.start_task_executor(TASK_ID, task)
+
+    try:
+        wait_until(started_path.exists)
+        os.kill(executor.pid, signal.SIGKILL)
+        executor.wait(timeout=3)
+
+        golem.run_launch_agent_pass()
+        assert read_task(ledger_path)["status"] == golem.STATUS_RUNNING
+        with pytest.raises(SystemExit, match="cannot be retried"):
+            golem.main(["retry", TASK_ID, "--now"])
+
+        hold_path.unlink()
+
+        wait_until(lambda: golem.is_run_lock_free(task["session_id"]))
+        golem.run_launch_agent_pass()
+        assert read_task(ledger_path)["status"] == golem.STATUS_FAILED
+    finally:
+        hold_path.unlink(missing_ok=True)
+        if executor.poll() is None:
+            executor.kill()
+            executor.wait()
+
+
+@pytest.mark.parametrize(
+    "contender",
+    [
+        pytest.param("scheduled", id="scheduled"),
+        pytest.param("retry", id="retry"),
+        pytest.param("usage-limit-resume", id="usage-limit-resume"),
+        pytest.param("pickup", id="pickup"),
+        pytest.param("pickup-app", id="pickup-app"),
+    ],
+)
+def test_shared_worktree_blocks_contenders_and_allows_other_worktrees(
+    installed_launch_agent, fake_commands, ledger_path, monkeypatch, tmp_path, contender
+):
+    shared_worktree = tmp_path / "shared"
+    other_worktree = tmp_path / "other"
+    shared_worktree.mkdir()
+    other_worktree.mkdir()
+    contender_status = {
+        "scheduled": golem.STATUS_SCHEDULED,
+        "retry": golem.STATUS_FAILED,
+        "usage-limit-resume": golem.STATUS_SCHEDULED,
+        "pickup": golem.STATUS_NEEDS_REVIEW,
+        "pickup-app": golem.STATUS_NEEDS_REVIEW,
+    }[contender]
+    contender_fields: dict[str, object] = {"worktree": str(shared_worktree)}
+    if contender == "usage-limit-resume":
+        contender_fields["usage_limit_resume_count"] = 1
+    write_tasks(
+        ledger_path,
+        {
+            TASK_ID: task_record(golem.STATUS_SCHEDULED, worktree=str(shared_worktree)),
+            CHILD_ID: task_record(contender_status, task_id=CHILD_ID, **contender_fields),
+            SIBLING_ID: task_record(
+                golem.STATUS_SCHEDULED, task_id=SIBLING_ID, worktree=str(other_worktree)
+            ),
+        },
+    )
+    run_task_ids: list[str] = []
+
+    def execute_contender() -> None:
+        if contender == "retry":
+            assert golem.main(["retry", CHILD_ID, "--now"]) == 0
+        if contender in {"pickup", "pickup-app"}:
+            with pytest.raises(SystemExit, match="directory is busy"):
+                golem.main(["pickup", CHILD_ID, *(["--app"] if contender == "pickup-app" else [])])
+            return
+        child = read_task(ledger_path, CHILD_ID)
+        assert golem.main(["_execute", CHILD_ID, child["session_id"]]) == 0
+
+    def run_claude(
+        task_id: str, task: dict[str, Any], lock_file_descriptors: tuple[int, ...]
+    ) -> tuple[int, str]:
+        run_task_ids.append(task_id)
+        if task_id == TASK_ID:
+            sibling = read_task(ledger_path, SIBLING_ID)
+            execute_contender()
+            assert golem.main(["_execute", SIBLING_ID, sibling["session_id"]]) == 0
+        return 0, json.dumps({"result": CLAUDE_RESULT})
+
+    monkeypatch.setattr(golem, "run_claude", run_claude)
+    first = read_task(ledger_path)
+    golem.main(["_execute", TASK_ID, first["session_id"]])
+
+    assert read_task(ledger_path, SIBLING_ID)["status"] == golem.STATUS_NEEDS_REVIEW
+    if contender in {"pickup", "pickup-app"}:
+        assert read_task(ledger_path, CHILD_ID)["status"] == golem.STATUS_NEEDS_REVIEW
+        assert (
+            golem.main(["pickup", CHILD_ID, *(["--app"] if contender == "pickup-app" else [])]) == 0
+        )
+        assert read_task(ledger_path, CHILD_ID)["status"] == golem.STATUS_DONE
+        assert run_task_ids == [TASK_ID, SIBLING_ID]
+        return
+    assert read_task(ledger_path, CHILD_ID)["status"] == golem.STATUS_SCHEDULED
+    child = read_task(ledger_path, CHILD_ID)
+    assert golem.main(["_execute", CHILD_ID, child["session_id"]]) == 0
+    assert run_task_ids == [TASK_ID, SIBLING_ID, CHILD_ID]
+
+
+@pytest.mark.parametrize("is_pickup_killed", [False, True], ids=["exits", "is-killed"])
+def test_pickup_holds_worktree_until_its_claude_process_exits(
+    fake_commands, ledger_path, monkeypatch, tmp_path, is_pickup_killed
+):
+    worktree = tmp_path / "shared"
+    worktree.mkdir()
+    hold_path = tmp_path / "hold"
+    started_path = tmp_path / "started"
+    claude_pid_path = fake_commands["claude-pid"]
+    hold_path.touch()
+    monkeypatch.setenv("GOLEM_CLAUDE_HOLD", str(hold_path))
+    monkeypatch.setenv("GOLEM_CLAUDE_STARTED", str(started_path))
+    monkeypatch.setenv("GOLEM_CLAUDE_PID", str(claude_pid_path))
+    headless_task = task_record(golem.STATUS_SCHEDULED, worktree=str(worktree))
+    write_tasks(
+        ledger_path,
+        {
+            "pickup": task_record(
+                golem.STATUS_NEEDS_REVIEW, task_id="pickup", worktree=str(worktree)
+            ),
+            TASK_ID: headless_task,
+        },
+    )
+    pickup_process = multiprocessing.get_context("fork").Process(
+        target=lambda: golem.main(["pickup", "pickup"])
+    )
+    pickup_process.start()
+    headless_session_id = str(headless_task["session_id"])
+    try:
+        wait_until(lambda: started_path.exists() and claude_pid_path.exists())
+        assert golem.main(["_execute", TASK_ID, headless_session_id]) == 0
+        assert read_task(ledger_path)["status"] == golem.STATUS_SCHEDULED
+        if is_pickup_killed:
+            pickup_pid = pickup_process.pid
+            assert pickup_pid is not None
+            os.kill(pickup_pid, signal.SIGKILL)
+            os.kill(int(claude_pid_path.read_text(encoding="utf-8")), signal.SIGKILL)
+        hold_path.unlink()
+        pickup_process.join(timeout=3)
+        assert not pickup_process.is_alive()
+        wait_until(
+            lambda: (
+                golem.main(["_execute", TASK_ID, headless_session_id]) == 0
+                and read_task(ledger_path)["status"] == golem.STATUS_NEEDS_REVIEW
+            )
+        )
+    finally:
+        hold_path.unlink(missing_ok=True)
+        try:
+            pickup_process.join(timeout=3)
+        finally:
+            if pickup_process.is_alive():
+                pickup_process.kill()
+                pickup_process.join()
+    assert pickup_process.exitcode == (-signal.SIGKILL if is_pickup_killed else 0)
+
+
+@pytest.mark.parametrize("first_dependent", ["busy", "missing"])
+def test_dependent_drain_stops_for_busy_worktrees_and_skips_missing_worktrees(
+    ledger_path, monkeypatch, tmp_path, first_dependent
+):
+    first_worktree = tmp_path / "first"
+    second_worktree = tmp_path / "second"
+    second_worktree.mkdir()
+    if first_dependent == "busy":
+        first_worktree.mkdir()
+    write_tasks(
+        ledger_path,
+        {
+            PARENT_ID: task_record(golem.STATUS_NEEDS_REVIEW, task_id=PARENT_ID),
+            CHILD_ID: task_record(
+                golem.STATUS_WAITING,
+                task_id=CHILD_ID,
+                after=PARENT_ID,
+                worktree=str(first_worktree),
+            ),
+            SIBLING_ID: task_record(
+                golem.STATUS_WAITING,
+                task_id=SIBLING_ID,
+                after=PARENT_ID,
+                worktree=str(second_worktree),
+            ),
+        },
+    )
+    run_task_ids: list[str] = []
+
+    def run_claude(
+        task_id: str, task: dict[str, Any], lock_file_descriptors: tuple[int, ...]
+    ) -> tuple[int, str]:
+        run_task_ids.append(task_id)
+        return 0, json.dumps({"result": CLAUDE_RESULT})
+
+    monkeypatch.setattr(golem, "run_claude", run_claude)
+    directory_lock_file = None
+    if first_dependent == "busy":
+        directory_lock_file = golem.acquire_lock(golem.directory_lock_path(str(first_worktree)))
+    try:
+        golem.drain_dependents(PARENT_ID)
+    finally:
+        if directory_lock_file is not None:
+            golem.release_lock(directory_lock_file)
+
+    if first_dependent == "busy":
+        assert run_task_ids == []
+        assert read_task(ledger_path, CHILD_ID)["status"] == golem.STATUS_WAITING
+        assert read_task(ledger_path, SIBLING_ID)["status"] == golem.STATUS_WAITING
+        return
+    assert run_task_ids == [SIBLING_ID]
+    assert read_task(ledger_path, CHILD_ID)["status"] == golem.STATUS_FAILED
+    assert read_task(ledger_path, CHILD_ID)["result"] == (
+        f"golem: worktree is missing: {first_worktree}"
+    )
+    assert read_task(ledger_path, SIBLING_ID)["status"] == golem.STATUS_NEEDS_REVIEW
+
+
+def test_agent_recovers_interrupted_dependent_draining_in_ledger_order(
+    fake_commands, ledger_path, monkeypatch
+):
+    write_tasks(
+        ledger_path,
+        {
+            PARENT_ID: task_record(golem.STATUS_NEEDS_REVIEW, task_id=PARENT_ID),
+            CHILD_ID: task_record(
+                golem.STATUS_WAITING,
+                task_id=CHILD_ID,
+                after=PARENT_ID,
+                prompt=CHILD_PROMPT,
+                agent_args=AGENT_ARGS,
+            ),
+            SIBLING_ID: task_record(
+                golem.STATUS_WAITING,
+                task_id=SIBLING_ID,
+                after=PARENT_ID,
+                prompt=SIBLING_PROMPT,
+                agent_args=AGENT_ARGS,
+            ),
+            "failed": task_record(golem.STATUS_FAILED, task_id="failed"),
+            GRANDCHILD_ID: task_record(golem.STATUS_WAITING, task_id=GRANDCHILD_ID, after="failed"),
+        },
+    )
+    started_task_ids: list[str] = []
+
+    def start_in_process(task_id: str, task: dict[str, Any]) -> None:
+        started_task_ids.append(task_id)
+        golem.main(["_execute", task_id, task["session_id"]])
+
+    monkeypatch.setattr(golem, "start_task_executor", start_in_process)
+    golem.run_launch_agent_pass()
+    golem.run_launch_agent_pass()
+
+    assert started_task_ids == [PARENT_ID]
+    assert logged_claude_calls(fake_commands) == [
+        expected_claude_args(read_task(ledger_path, CHILD_ID), CHILD_PROMPT, task_id=CHILD_ID),
+        expected_claude_args(
+            read_task(ledger_path, SIBLING_ID), SIBLING_PROMPT, task_id=SIBLING_ID
+        ),
+    ]
+    assert read_task(ledger_path, GRANDCHILD_ID)["status"] == golem.STATUS_WAITING
+
+
+def test_missing_worktrees_are_reported_or_fail_headless_execution(
+    installed_launch_agent, fake_commands, git_repository, ledger_path, monkeypatch, tmp_path
+):
+    missing_worktree = tmp_path / "missing"
+    missing_message = f"worktree is missing: {missing_worktree}"
+    write_task(ledger_path, golem.STATUS_NEEDS_REVIEW, worktree=str(missing_worktree))
+    original_tasks = read_tasks(ledger_path)
+
+    for pickup_args in (["pickup", TASK_ID], ["pickup", TASK_ID, "--app"]):
+        with pytest.raises(SystemExit, match=re.escape(missing_message)):
+            golem.main(pickup_args)
+        assert read_tasks(ledger_path) == original_tasks
+
+    write_task(ledger_path, golem.STATUS_FAILED, worktree=str(missing_worktree))
+    original_tasks = read_tasks(ledger_path)
+    with pytest.raises(SystemExit, match=re.escape(missing_message)):
+        golem.main(["retry", TASK_ID, "--now"])
+    assert read_tasks(ledger_path) == original_tasks
+    assert fake_commands["claude-args"].read_text(encoding="utf-8") == ""
+    assert fake_commands["open-args"].read_text(encoding="utf-8") == ""
+
+    write_tasks(
+        ledger_path,
+        {
+            TASK_ID: task_record(
+                golem.STATUS_SCHEDULED,
+                worktree=str(missing_worktree),
+                usage_limit_resume_count=1,
+            ),
+            PARENT_ID: task_record(
+                golem.STATUS_NEEDS_REVIEW, task_id=PARENT_ID, worktree=str(missing_worktree)
+            ),
+            CHILD_ID: task_record(golem.STATUS_WAITING, task_id=CHILD_ID, after=PARENT_ID),
+        },
+    )
+    task = read_task(ledger_path)
+    golem.main(["_execute", TASK_ID, task["session_id"]])
+    parent = read_task(ledger_path, PARENT_ID)
+    golem.main(["_execute", PARENT_ID, parent["session_id"]])
+
+    assert read_task(ledger_path)["result"] == f"golem: {missing_message}"
+    assert read_task(ledger_path, CHILD_ID)["result"] == f"golem: {missing_message}"
+    assert fake_commands["claude-args"].read_text(encoding="utf-8") == ""
+
+    pending_worktree = git_repository / ".claude" / "worktrees" / "pending"
+    monkeypatch.chdir(git_repository)
+    write_task(
+        ledger_path,
+        golem.STATUS_FAILED,
+        worktree=str(pending_worktree),
+        worktree_pending=True,
+    )
+    golem.main(["retry", TASK_ID, "--now"])
+    retry = read_task(ledger_path)
+    golem.main(["_execute", TASK_ID, retry["session_id"]])
+    assert pending_worktree.is_dir()
+    assert "worktree_pending" not in read_task(ledger_path)
+
+
+def test_launch_agent_reaps_finished_executor_while_future_task_is_pending(
+    fake_commands, ledger_path, monkeypatch
+):
+    write_tasks(
+        ledger_path,
+        {
+            TASK_ID: task_record(golem.STATUS_SCHEDULED),
+            "future": task_record(
+                golem.STATUS_SCHEDULED, task_id="future", due_at=RESET_TIME.isoformat()
+            ),
+        },
+    )
+    start_task_executor = golem.start_task_executor
+    processes: list[subprocess.Popen[bytes]] = []
+
+    def record_executor(task_id: str, task: dict[str, Any]) -> subprocess.Popen[bytes]:
+        process = start_task_executor(task_id, task)
+        processes.append(process)
+        return process
+
+    sleep_count = 0
+
+    def sleep_while_agent_polls(_: float) -> None:
+        nonlocal sleep_count
+        sleep_count += 1
+        if sleep_count == 1:
+            wait_until(lambda: fake_commands["claude-args"].read_text(encoding="utf-8") != "")
+            wait_until(
+                lambda: (
+                    os.waitid(os.P_PID, processes[0].pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+                    is not None
+                )
+            )
+            return
+        assert processes[0].returncode is not None
+        golem.cancel_task("future")
+
+    monkeypatch.setattr(golem, "start_task_executor", record_executor)
+    monkeypatch.setattr(golem.time, "sleep", sleep_while_agent_polls)
+
+    assert golem.run_launch_agent() == 0
+    assert processes[0].returncode is not None

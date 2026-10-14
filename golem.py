@@ -1,5 +1,6 @@
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import plistlib
@@ -102,20 +103,36 @@ def run_lock_path(session_id: str) -> Path:
     return lock_directory / f"{session_id}.lock"
 
 
-def acquire_run_lock(session_id: str) -> io.TextIOWrapper | None:
-    run_lock_file = run_lock_path(session_id).open("a", encoding="utf-8")
+def acquire_lock(lock_path: Path) -> io.TextIOWrapper | None:
+    lock_file = lock_path.open("a", encoding="utf-8")
     try:
-        fcntl.flock(run_lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
-        run_lock_file.close()
+        lock_file.close()
         return None
-    return run_lock_file
+    return lock_file
+
+
+def release_lock(lock_file: io.TextIOWrapper) -> None:
+    fcntl.flock(lock_file, fcntl.LOCK_UN)
+    lock_file.close()
+
+
+def acquire_run_lock(session_id: str) -> io.TextIOWrapper | None:
+    return acquire_lock(run_lock_path(session_id))
 
 
 def release_run_lock(run_lock_file: io.TextIOWrapper, session_id: str) -> None:
     run_lock_path(session_id).unlink(missing_ok=True)
-    fcntl.flock(run_lock_file, fcntl.LOCK_UN)
-    run_lock_file.close()
+    release_lock(run_lock_file)
+
+
+def directory_lock_path(directory: str) -> Path:
+    lock_directory = ledger_path().parent / "directories"
+    lock_directory.mkdir(exist_ok=True)
+    resolved_directory = str(Path(directory).resolve())
+    lock_name = hashlib.sha256(resolved_directory.encode()).hexdigest()
+    return lock_directory / f"{lock_name}.lock"
 
 
 def reserve_task(task_id: str, record: str | dict[str, Any]) -> None:
@@ -254,14 +271,14 @@ def has_agent_argument(agent_args: list[str], names: set[str]) -> bool:
     )
 
 
-def resolved_worktree(tasks: dict[str, Any], task: dict[str, Any]) -> str | None:
+def resolved_worktree(tasks: dict[str, Any], task: dict[str, Any]) -> tuple[str | None, bool]:
     if "worktree" in task:
-        return task["worktree"]
+        return task["worktree"], task.get("worktree_pending") is True
     parent = tasks.get(task.get("after", ""))
     if parent is not None and parent["cwd"] == task["cwd"] and "worktree" in parent:
-        return parent["worktree"]
+        return parent["worktree"], parent.get("worktree_pending") is True
     if has_agent_argument(task["agent_args"], WORKTREE_ARGUMENTS):
-        return None
+        return None, False
     result = subprocess.run(
         [
             "git",
@@ -277,9 +294,9 @@ def resolved_worktree(tasks: dict[str, Any], task: dict[str, Any]) -> str | None
         check=False,
     )
     if result.returncode:
-        return None
+        return None, False
     common_directory = Path(result.stdout.splitlines()[0])
-    return str(common_directory.parent / ".claude" / "worktrees" / task["session_id"])
+    return str(common_directory.parent / ".claude" / "worktrees" / task["session_id"]), True
 
 
 def task_directory(task: dict[str, Any]) -> str:
@@ -289,7 +306,38 @@ def task_directory(task: dict[str, Any]) -> str:
     return task["cwd"]
 
 
-def run_claude(task_id: str, task: dict[str, Any]) -> tuple[int, str]:
+def locked_task_directory(task: dict[str, Any], worktree: str | None) -> str:
+    return worktree if worktree is not None else task["cwd"]
+
+
+def worktree_missing_message(worktree: str | None, *, is_worktree_pending: bool) -> str | None:
+    if worktree is None or is_worktree_pending or Path(worktree).is_dir():
+        return None
+    return f"golem: worktree is missing: {worktree}"
+
+
+def clear_worktree_pending_if_created(task: dict[str, Any]) -> None:
+    worktree = task.get("worktree")
+    if worktree is not None and Path(worktree).is_dir():
+        task.pop("worktree_pending", None)
+
+
+def record_resolved_worktree(
+    task: dict[str, Any], worktree: str | None, *, is_worktree_pending: bool
+) -> None:
+    if worktree is None:
+        return
+    task["worktree"] = worktree
+    if is_worktree_pending:
+        task["worktree_pending"] = True
+    else:
+        task.pop("worktree_pending", None)
+    clear_worktree_pending_if_created(task)
+
+
+def run_claude(
+    task_id: str, task: dict[str, Any], lock_file_descriptors: tuple[int, ...]
+) -> tuple[int, str]:
     session_id = cast("str", task["session_id"])
     is_resuming = cast("int", task.get("usage_limit_resume_count", 0)) > 0
     command = (
@@ -320,6 +368,7 @@ def run_claude(task_id: str, task: dict[str, Any]) -> tuple[int, str]:
         env=task_environment(task),
         stdout=subprocess.PIPE,
         encoding="utf-8",
+        pass_fds=lock_file_descriptors,
         check=False,
     )
     return claude_process.returncode, claude_process.stdout
@@ -355,19 +404,33 @@ def pickup(task_id: str, *agent_args: str, is_app: bool) -> int:
         task = cast("dict[str, Any]", tasks[task_id])
         if task.get("status") in {STATUS_SCHEDULED, STATUS_WAITING, STATUS_CANCELLED}:
             raise SystemExit(f"golem: task has not started: {task_id}")
+        missing_worktree = worktree_missing_message(
+            task.get("worktree"), is_worktree_pending=task.get("worktree_pending") is True
+        )
+        if missing_worktree is not None:
+            raise SystemExit(missing_worktree)
+        directory = locked_task_directory(task, task.get("worktree"))
+        directory_lock_file = acquire_lock(directory_lock_path(directory))
+        if directory_lock_file is None:
+            raise SystemExit(f"golem: directory is busy: {directory}")
         if task.get("status") == STATUS_NEEDS_REVIEW:
             task["status"] = STATUS_DONE
         cwd = task_directory(task)
         session_id = cast("str", task["session_id"])
     if is_app:
+        release_lock(directory_lock_file)
         return subprocess.run(
             ["open", f"claude://resume?session={session_id}"], check=False
         ).returncode
-    return subprocess.run(
-        ["claude", "--resume", session_id, *agent_args],
-        cwd=cwd,
-        check=False,
-    ).returncode
+    try:
+        return subprocess.run(
+            ["claude", "--resume", session_id, *agent_args],
+            cwd=cwd,
+            pass_fds=(directory_lock_file.fileno(),),
+            check=False,
+        ).returncode
+    finally:
+        release_lock(directory_lock_file)
 
 
 def close(task_id: str) -> int:
@@ -599,6 +662,14 @@ def claude_working_directory(output: str) -> str | None:
 def record_worktree(task_id: str, worktree: str) -> None:
     with locked_tasks() as tasks:
         tasks[task_id]["worktree"] = worktree
+        tasks[task_id].pop("worktree_pending", None)
+
+
+def clear_recorded_worktree_pending(task_id: str) -> None:
+    with locked_tasks() as tasks:
+        task = tasks.get(task_id)
+        if isinstance(task, dict):
+            clear_worktree_pending_if_created(cast("dict[str, Any]", task))
 
 
 def mark_task_waiting_for_reset(task_id: str, result: str) -> bool:
@@ -649,21 +720,34 @@ def claim_task(
     task_id: str,
     session_id: str,
     expected_status: str,
-) -> tuple[dict[str, Any], io.TextIOWrapper] | None:
+) -> tuple[dict[str, Any], io.TextIOWrapper, io.TextIOWrapper] | None:
     task = tasks.get(task_id)
     if task is None or task["status"] != expected_status or task["session_id"] != session_id:
         return None
     run_lock_file = acquire_run_lock(session_id)
     if run_lock_file is None:
         return None
-    worktree = resolved_worktree(tasks, task)
-    if worktree is not None:
-        task["worktree"] = worktree
+    worktree, is_worktree_pending = resolved_worktree(tasks, task)
+    if missing_worktree := worktree_missing_message(
+        worktree, is_worktree_pending=is_worktree_pending
+    ):
+        record_resolved_worktree(task, worktree, is_worktree_pending=is_worktree_pending)
+        task["status"] = STATUS_FAILED
+        task["result"] = missing_worktree
+        release_run_lock(run_lock_file, session_id)
+        return None
+    directory_lock_file = acquire_lock(directory_lock_path(locked_task_directory(task, worktree)))
+    if directory_lock_file is None:
+        release_run_lock(run_lock_file, session_id)
+        return None
+    record_resolved_worktree(task, worktree, is_worktree_pending=is_worktree_pending)
     task["status"] = STATUS_RUNNING
-    return task.copy(), run_lock_file
+    return task.copy(), run_lock_file, directory_lock_file
 
 
-def claim_next_dependent(task_id: str) -> tuple[str, dict[str, Any], io.TextIOWrapper] | None:
+def claim_next_dependent(
+    task_id: str,
+) -> tuple[str, dict[str, Any], io.TextIOWrapper, io.TextIOWrapper] | None:
     with locked_tasks() as tasks:
         parent_record = cast("dict[str, Any]", tasks[task_id])
         if parent_record.get("status") not in SUCCEEDED_STATUSES:
@@ -673,6 +757,8 @@ def claim_next_dependent(task_id: str) -> tuple[str, dict[str, Any], io.TextIOWr
             claim = claim_task(tasks, dependent_id, session_id, STATUS_WAITING)
             if claim is not None:
                 return dependent_id, *claim
+            if tasks[dependent_id]["status"] == STATUS_WAITING:
+                return None
     return None
 
 
@@ -685,9 +771,9 @@ def drain_dependents(task_id: str) -> None:
         execute_claimed_task(*next_dependent)
 
 
-def execute_task(task_id: str, task: dict[str, Any]) -> int:
+def execute_task(task_id: str, task: dict[str, Any], lock_file_descriptors: tuple[int, ...]) -> int:
     try:
-        returncode, output = run_claude(task_id, task)
+        returncode, output = run_claude(task_id, task, lock_file_descriptors)
     except OSError as error:
         print(f"golem: could not execute task: {error}", file=sys.stderr)
         returncode = 127
@@ -696,6 +782,7 @@ def execute_task(task_id: str, task: dict[str, Any]) -> int:
     working_directory = claude_working_directory(output)
     if working_directory is not None and working_directory != task["cwd"]:
         record_worktree(task_id, working_directory)
+    clear_recorded_worktree_pending(task_id)
     usage_limit_resume_count = cast("int", task.get("usage_limit_resume_count", 0))
     if (
         is_usage_limit
@@ -709,7 +796,6 @@ def execute_task(task_id: str, task: dict[str, Any]) -> int:
         returncode,
         is_usage_limit=is_usage_limit,
     )
-    drain_dependents(task_id)
     return returncode
 
 
@@ -717,9 +803,19 @@ def execute_claimed_task(
     task_id: str,
     task: dict[str, Any],
     run_lock_file: io.TextIOWrapper,
+    directory_lock_file: io.TextIOWrapper,
 ) -> int:
     try:
-        return execute_task(task_id, task)
+        try:
+            returncode = execute_task(
+                task_id,
+                task,
+                (run_lock_file.fileno(), directory_lock_file.fileno()),
+            )
+        finally:
+            release_lock(directory_lock_file)
+        drain_dependents(task_id)
+        return returncode
     finally:
         release_run_lock(run_lock_file, task["session_id"])
 
@@ -732,6 +828,33 @@ def execute_scheduled_task(task_id: str, session_id: str) -> int:
     return execute_claimed_task(task_id, *claim)
 
 
+def drain_succeeded_task(task_id: str, session_id: str) -> bool:
+    with locked_tasks() as tasks:
+        task = tasks.get(task_id)
+        if not isinstance(task, dict):
+            return False
+        task_record = cast("dict[str, Any]", task)
+        if (
+            task_record.get("status") not in SUCCEEDED_STATUSES
+            or task_record.get("session_id") != session_id
+        ):
+            return False
+        run_lock_file = acquire_run_lock(session_id)
+    if run_lock_file is None:
+        return True
+    try:
+        drain_dependents(task_id)
+    finally:
+        release_run_lock(run_lock_file, session_id)
+    return True
+
+
+def execute_task_executor(task_id: str, session_id: str) -> int:
+    if drain_succeeded_task(task_id, session_id):
+        return 0
+    return execute_scheduled_task(task_id, session_id)
+
+
 def start_task_executor(task_id: str, task: dict[str, Any]) -> subprocess.Popen[bytes]:
     return subprocess.Popen(
         [*golem_command(), "_execute", task_id, task["session_id"]],
@@ -742,33 +865,59 @@ def start_task_executor(task_id: str, task: dict[str, Any]) -> subprocess.Popen[
     )
 
 
-def run_launch_agent_pass() -> None:
+def is_run_lock_free(session_id: str) -> bool:
+    run_lock_file = acquire_run_lock(session_id)
+    if run_lock_file is None:
+        return False
+    release_run_lock(run_lock_file, session_id)
+    return True
+
+
+def run_launch_agent_pass() -> list[subprocess.Popen[bytes]]:
     now = datetime.now(UTC)
     due_tasks: list[tuple[str, dict[str, Any]]] = []
     with locked_tasks() as tasks:
         for task_id, task in tasks.items():
             if task["status"] == STATUS_RUNNING:
-                run_lock_file = acquire_run_lock(task["session_id"])
-                if run_lock_file is not None:
-                    release_run_lock(run_lock_file, task["session_id"])
+                if is_run_lock_free(task["session_id"]):
                     task["status"] = STATUS_FAILED
             elif (
                 task["status"] == STATUS_SCHEDULED and datetime.fromisoformat(task["due_at"]) <= now
+            ) or (
+                task["status"] in SUCCEEDED_STATUSES
+                and waiting_dependent_ids(tasks, task_id)
+                and is_run_lock_free(task["session_id"])
             ):
                 due_tasks.append((task_id, task.copy()))
+    processes: list[subprocess.Popen[bytes]] = []
     for task_id, task in due_tasks:
-        start_task_executor(task_id, task)
+        processes.append(start_task_executor(task_id, task))
+    return processes
 
 
 def has_pending_tasks(tasks: dict[str, Any]) -> bool:
-    return any(task["status"] in {STATUS_SCHEDULED, STATUS_RUNNING} for task in tasks.values())
+    return any(
+        task["status"] in {STATUS_SCHEDULED, STATUS_RUNNING}
+        or (
+            task["status"] == STATUS_WAITING
+            and tasks.get(task.get("after", ""), {}).get("status") in SUCCEEDED_STATUSES
+        )
+        for task in tasks.values()
+    )
+
+
+def reap_finished_executors(
+    processes: list[subprocess.Popen[bytes]],
+) -> list[subprocess.Popen[bytes]]:
+    return [process for process in processes if process.poll() is None]
 
 
 def run_launch_agent() -> int:
-    run_launch_agent_pass()
+    processes = run_launch_agent_pass()
     while has_pending_tasks(load_tasks()):
         time.sleep(LAUNCH_AGENT_POLL_SECONDS)
-        run_launch_agent_pass()
+        processes = reap_finished_executors(processes)
+        processes.extend(run_launch_agent_pass())
     return 0
 
 
@@ -778,6 +927,11 @@ def retryable_task(tasks: dict[str, Any], task_id: str) -> dict[str, Any]:
     task = cast("dict[str, Any]", tasks[task_id])
     if task.get("status") not in {STATUS_FAILED, STATUS_CANCELLED}:
         raise SystemExit(f"golem: task cannot be retried: {task_id}")
+    missing_worktree = worktree_missing_message(
+        task.get("worktree"), is_worktree_pending=task.get("worktree_pending") is True
+    )
+    if missing_worktree is not None:
+        raise SystemExit(missing_worktree)
     return task
 
 
@@ -795,7 +949,7 @@ def retry_task(task_id: str, *, is_now: bool, at_text: str | None) -> int:
             when,
             task.get("after"),
         )
-        for name in ("environment", "worktree"):
+        for name in ("environment", "worktree", "worktree_pending"):
             if name in task:
                 record[name] = task[name]
         tasks[task_id] = record
@@ -909,7 +1063,7 @@ def build_parser() -> argparse.ArgumentParser:
     execute_command.add_argument("session_id")
     set_command_handler(
         execute_command,
-        lambda arguments: execute_scheduled_task(arguments.id, arguments.session_id),
+        lambda arguments: execute_task_executor(arguments.id, arguments.session_id),
     )
     return parser
 
