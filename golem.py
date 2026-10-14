@@ -38,6 +38,7 @@ LAUNCH_AGENT_LABEL = "com.github.bdeering1.golem"
 LAUNCH_AGENT_INTERVAL_SECONDS = 300
 LAUNCH_AGENT_POLL_SECONDS = 10
 WORKTREE_ARGUMENTS = {"-w", "--worktree"}
+NAME_ARGUMENTS = {"-n", "--name"}
 PERMISSION_ARGUMENTS = {
     "--allow-dangerously-skip-permissions",
     "--dangerously-skip-permissions",
@@ -288,7 +289,7 @@ def task_directory(task: dict[str, Any]) -> str:
     return task["cwd"]
 
 
-def run_claude(task: dict[str, Any]) -> tuple[int, str]:
+def run_claude(task_id: str, task: dict[str, Any]) -> tuple[int, str]:
     session_id = cast("str", task["session_id"])
     is_resuming = cast("int", task.get("usage_limit_resume_count", 0)) > 0
     command = (
@@ -300,6 +301,8 @@ def run_claude(task: dict[str, Any]) -> tuple[int, str]:
     default_args: list[str] = []
     if VERBOSE_ARGUMENT not in agent_args:
         default_args.append(VERBOSE_ARGUMENT)
+    if not has_agent_argument(agent_args, NAME_ARGUMENTS):
+        default_args += ["--name", task_id]
     worktree = task.get("worktree")
     if worktree is not None and not Path(worktree).is_dir():
         default_args += ["--worktree", Path(worktree).name]
@@ -345,7 +348,7 @@ def new_task_record(
     return record
 
 
-def pickup(task_id: str, *agent_args: str) -> int:
+def pickup(task_id: str, *agent_args: str, is_app: bool) -> int:
     with locked_tasks() as tasks:
         if task_id not in tasks:
             raise SystemExit(f"golem: task not found: {task_id}")
@@ -356,6 +359,10 @@ def pickup(task_id: str, *agent_args: str) -> int:
             task["status"] = STATUS_DONE
         cwd = task_directory(task)
         session_id = cast("str", task["session_id"])
+    if is_app:
+        return subprocess.run(
+            ["open", f"claude://resume?session={session_id}"], check=False
+        ).returncode
     return subprocess.run(
         ["claude", "--resume", session_id, *agent_args],
         cwd=cwd,
@@ -680,7 +687,7 @@ def drain_dependents(task_id: str) -> None:
 
 def execute_task(task_id: str, task: dict[str, Any]) -> int:
     try:
-        returncode, output = run_claude(task)
+        returncode, output = run_claude(task_id, task)
     except OSError as error:
         print(f"golem: could not execute task: {error}", file=sys.stderr)
         returncode = 127
@@ -816,12 +823,18 @@ def add_scheduling_arguments(add_argument: Callable[..., argparse.Action]) -> No
     )
 
 
-def run_task_from_arguments(arguments: argparse.Namespace, agent_args: list[str]) -> int:
+def set_command_handler(
+    command_parser: argparse.ArgumentParser, handler: Callable[[argparse.Namespace], int]
+) -> None:
+    command_parser.set_defaults(handler=handler)
+
+
+def run_task_from_arguments(arguments: argparse.Namespace) -> int:
     require_launch_agent()
     prompt_text = (
         Path(arguments.file).read_text(encoding="utf-8") if arguments.file else arguments.prompt
     )
-    task_args = tuple(agent_args)
+    task_args = tuple(arguments.agent_args)
     if arguments.after is not None:
         dependent_record = new_task_record(
             str(Path.cwd()), prompt_text, task_args, None, arguments.after
@@ -833,15 +846,7 @@ def run_task_from_arguments(arguments: argparse.Namespace, agent_args: list[str]
     return schedule_new_task(arguments.id, prompt_text, task_args, when, arguments.after)
 
 
-def main(argv: list[str] | None = None) -> int:
-    cast("io.TextIOWrapper", sys.stdout).reconfigure(encoding="utf-8")
-    golem_args = sys.argv[1:] if argv is None else argv
-    agent_args: list[str] = []
-    if "--" in golem_args:
-        separator_index = golem_args.index("--")
-        agent_args = golem_args[separator_index + 1 :]
-        golem_args = golem_args[:separator_index]
-
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="golem")
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -856,15 +861,28 @@ def main(argv: list[str] | None = None) -> int:
     run_schedule_group = run_command.add_mutually_exclusive_group()
     add_scheduling_arguments(run_schedule_group.add_argument)
     run_schedule_group.add_argument("--after", metavar="PARENT", help="run after PARENT succeeds")
+    set_command_handler(run_command, run_task_from_arguments)
 
     pickup_command = commands.add_parser("pickup")
     pickup_command.add_argument("id")
+    pickup_command.add_argument(
+        "--app",
+        action="store_true",
+        help="open the session in the Claude desktop app, in the app's default permission mode",
+    )
+    set_command_handler(
+        pickup_command,
+        lambda arguments: pickup(arguments.id, *arguments.agent_args, is_app=arguments.app),
+    )
     close_command = commands.add_parser("close")
     close_command.add_argument("id")
+    set_command_handler(close_command, lambda arguments: close(arguments.id))
     show_command = commands.add_parser("show")
     show_command.add_argument("id")
+    set_command_handler(show_command, lambda arguments: show_task_result(arguments.id))
     cancel_command = commands.add_parser("cancel")
     cancel_command.add_argument("id")
+    set_command_handler(cancel_command, lambda arguments: cancel_task(arguments.id))
     retry_command = commands.add_parser(
         "retry",
         description=SCHEDULE_DESCRIPTION,
@@ -872,36 +890,46 @@ def main(argv: list[str] | None = None) -> int:
     retry_command.add_argument("id")
     retry_schedule_group = retry_command.add_mutually_exclusive_group()
     add_scheduling_arguments(retry_schedule_group.add_argument)
-    commands.add_parser("list")
+    set_command_handler(
+        retry_command,
+        lambda arguments: retry_task(arguments.id, is_now=arguments.now, at_text=arguments.at),
+    )
+    set_command_handler(commands.add_parser("list"), lambda _: list_tasks())
     launch_agent_command = commands.add_parser("agent")
     launch_agent_command.add_argument("action", choices=("install", "uninstall"))
-    commands.add_parser("_agent")
+    set_command_handler(
+        launch_agent_command,
+        lambda arguments: (
+            install_launch_agent() if arguments.action == "install" else uninstall_launch_agent()
+        ),
+    )
+    set_command_handler(commands.add_parser("_agent"), lambda _: run_launch_agent())
     execute_command = commands.add_parser("_execute")
     execute_command.add_argument("id")
     execute_command.add_argument("session_id")
-    arguments = parser.parse_args(golem_args)
+    set_command_handler(
+        execute_command,
+        lambda arguments: execute_scheduled_task(arguments.id, arguments.session_id),
+    )
+    return parser
 
-    if arguments.command == "_agent":
-        return run_launch_agent()
-    if arguments.command == "_execute":
-        return execute_scheduled_task(arguments.id, arguments.session_id)
-    if arguments.command == "agent":
-        return install_launch_agent() if arguments.action == "install" else uninstall_launch_agent()
-    if arguments.command == "pickup":
-        return pickup(arguments.id, *agent_args)
-    if arguments.command == "close":
-        return close(arguments.id)
-    if arguments.command == "show":
-        return show_task_result(arguments.id)
-    if arguments.command == "cancel":
-        return cancel_task(arguments.id)
-    if arguments.command == "list":
-        return list_tasks()
-    if arguments.command == "retry":
-        if agent_args:
-            parser.error("retry does not accept agent arguments")
-        return retry_task(arguments.id, is_now=arguments.now, at_text=arguments.at)
-    return run_task_from_arguments(arguments, agent_args)
+
+def main(argv: list[str] | None = None) -> int:
+    cast("io.TextIOWrapper", sys.stdout).reconfigure(encoding="utf-8")
+    golem_args = sys.argv[1:] if argv is None else argv
+    agent_args: list[str] = []
+    if "--" in golem_args:
+        separator_index = golem_args.index("--")
+        agent_args = golem_args[separator_index + 1 :]
+        golem_args = golem_args[:separator_index]
+
+    parser = build_parser()
+    arguments = parser.parse_args(golem_args, argparse.Namespace(agent_args=agent_args))
+    if agent_args and arguments.command == "retry":
+        parser.error("retry does not accept agent arguments")
+    if agent_args and arguments.command == "pickup" and arguments.app:
+        parser.error("pickup --app does not accept agent arguments")
+    return arguments.handler(arguments)
 
 
 if __name__ == "__main__":
