@@ -316,6 +316,14 @@ def worktree_missing_message(worktree: str | None, *, is_worktree_pending: bool)
     return f"golem: worktree is missing: {worktree}"
 
 
+def reject_missing_worktree(task: dict[str, Any]) -> None:
+    missing_worktree = worktree_missing_message(
+        task.get("worktree"), is_worktree_pending=task.get("worktree_pending") is True
+    )
+    if missing_worktree is not None:
+        raise SystemExit(missing_worktree)
+
+
 def clear_worktree_pending_if_created(task: dict[str, Any]) -> None:
     worktree = task.get("worktree")
     if worktree is not None and Path(worktree).is_dir():
@@ -404,11 +412,7 @@ def pickup(task_id: str, *agent_args: str, is_app: bool) -> int:
         task = cast("dict[str, Any]", tasks[task_id])
         if task.get("status") in {STATUS_SCHEDULED, STATUS_WAITING, STATUS_CANCELLED}:
             raise SystemExit(f"golem: task has not started: {task_id}")
-        missing_worktree = worktree_missing_message(
-            task.get("worktree"), is_worktree_pending=task.get("worktree_pending") is True
-        )
-        if missing_worktree is not None:
-            raise SystemExit(missing_worktree)
+        reject_missing_worktree(task)
         directory = locked_task_directory(task, task.get("worktree"))
         directory_lock_file = acquire_lock(directory_lock_path(directory))
         if directory_lock_file is None:
@@ -828,31 +832,23 @@ def execute_scheduled_task(task_id: str, session_id: str) -> int:
     return execute_claimed_task(task_id, *claim)
 
 
-def drain_succeeded_task(task_id: str, session_id: str) -> bool:
-    with locked_tasks() as tasks:
-        task = tasks.get(task_id)
-        if not isinstance(task, dict):
-            return False
-        task_record = cast("dict[str, Any]", task)
-        if (
-            task_record.get("status") not in SUCCEEDED_STATUSES
-            or task_record.get("session_id") != session_id
-        ):
-            return False
+def drain_succeeded_task(task_id: str, session_id: str) -> None:
+    with locked_tasks():
         run_lock_file = acquire_run_lock(session_id)
     if run_lock_file is None:
-        return True
+        return
     try:
         drain_dependents(task_id)
     finally:
         release_run_lock(run_lock_file, session_id)
-    return True
 
 
-def execute_task_executor(task_id: str, session_id: str) -> int:
-    if drain_succeeded_task(task_id, session_id):
-        return 0
-    return execute_scheduled_task(task_id, session_id)
+def execute_or_drain_task(task_id: str, session_id: str) -> int:
+    task = load_tasks().get(task_id)
+    if task is None or task["session_id"] != session_id or task["status"] not in SUCCEEDED_STATUSES:
+        return execute_scheduled_task(task_id, session_id)
+    drain_succeeded_task(task_id, session_id)
+    return 0
 
 
 def start_task_executor(task_id: str, task: dict[str, Any]) -> subprocess.Popen[bytes]:
@@ -927,11 +923,7 @@ def retryable_task(tasks: dict[str, Any], task_id: str) -> dict[str, Any]:
     task = cast("dict[str, Any]", tasks[task_id])
     if task.get("status") not in {STATUS_FAILED, STATUS_CANCELLED}:
         raise SystemExit(f"golem: task cannot be retried: {task_id}")
-    missing_worktree = worktree_missing_message(
-        task.get("worktree"), is_worktree_pending=task.get("worktree_pending") is True
-    )
-    if missing_worktree is not None:
-        raise SystemExit(missing_worktree)
+    reject_missing_worktree(task)
     return task
 
 
@@ -1063,7 +1055,7 @@ def build_parser() -> argparse.ArgumentParser:
     execute_command.add_argument("session_id")
     set_command_handler(
         execute_command,
-        lambda arguments: execute_task_executor(arguments.id, arguments.session_id),
+        lambda arguments: execute_or_drain_task(arguments.id, arguments.session_id),
     )
     return parser
 
