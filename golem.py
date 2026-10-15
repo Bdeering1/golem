@@ -150,6 +150,13 @@ def waiting_dependent_ids(tasks: dict[str, Any], parent_id: str) -> list[str]:
     ]
 
 
+def has_running_dependent(tasks: dict[str, Any], parent_id: str) -> bool:
+    return any(
+        dependent["status"] == STATUS_RUNNING and dependent.get("after") == parent_id
+        for dependent in tasks.values()
+    )
+
+
 def reserve_dependent_task(
     task_id: str,
     record: dict[str, Any],
@@ -882,6 +889,7 @@ def run_launch_agent_pass() -> list[subprocess.Popen[bytes]]:
             ) or (
                 task["status"] in SUCCEEDED_STATUSES
                 and waiting_dependent_ids(tasks, task_id)
+                and not has_running_dependent(tasks, task_id)
                 and is_run_lock_free(task["session_id"])
             ):
                 due_tasks.append((task_id, task.copy()))
