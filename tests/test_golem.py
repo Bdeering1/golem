@@ -1401,11 +1401,14 @@ def test_agent_does_not_recover_draining_while_a_dependent_is_running(
     assert started_task_ids == []
 
 
-def test_agent_waits_to_start_tasks_until_their_recorded_worktree_is_free(
+def test_agent_waits_to_start_tasks_until_their_known_directory_is_free(
     ledger_path, started_task_ids, tmp_path
 ):
     worktree = tmp_path / "worktree"
     worktree.mkdir()
+    own_worktree_task = task_record(
+        golem.STATUS_SCHEDULED, task_id="own-worktree", agent_args=[WORKTREE_FLAG, "name"]
+    )
     write_tasks(
         ledger_path,
         {
@@ -1414,19 +1417,24 @@ def test_agent_waits_to_start_tasks_until_their_recorded_worktree_is_free(
             ),
             CHILD_ID: task_record(golem.STATUS_WAITING, task_id=CHILD_ID, after=PARENT_ID),
             SIBLING_ID: task_record(golem.STATUS_SCHEDULED, task_id=SIBLING_ID, after=PARENT_ID),
+            "own-worktree": own_worktree_task,
         },
     )
-    directory_lock_file = golem.acquire_lock(golem.directory_lock_path(str(worktree)))
-    assert directory_lock_file is not None
+    directory_lock_files = [
+        golem.acquire_lock(golem.directory_lock_path(directory))
+        for directory in (str(worktree), str(own_worktree_task["cwd"]))
+    ]
     try:
         golem.run_launch_agent_pass()
     finally:
-        golem.release_lock(directory_lock_file)
+        for directory_lock_file in directory_lock_files:
+            assert directory_lock_file is not None
+            golem.release_lock(directory_lock_file)
     assert started_task_ids == []
 
     golem.run_launch_agent_pass()
 
-    assert started_task_ids == [PARENT_ID, SIBLING_ID]
+    assert started_task_ids == [PARENT_ID, SIBLING_ID, "own-worktree"]
 
 
 @pytest.mark.parametrize(

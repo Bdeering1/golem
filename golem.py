@@ -883,11 +883,15 @@ def is_run_lock_free(session_id: str) -> bool:
     return True
 
 
-def is_recorded_worktree_busy(tasks: dict[str, Any], task: dict[str, Any]) -> bool:
+def is_known_directory_busy(tasks: dict[str, Any], task: dict[str, Any]) -> bool:
     recorded = recorded_worktree(tasks, task)
-    if recorded is None:
+    if recorded is not None:
+        directory = recorded[0]
+    elif has_agent_argument(task["agent_args"], WORKTREE_ARGUMENTS):
+        directory = task["cwd"]
+    else:
         return False
-    directory_lock_file = acquire_lock(directory_lock_path(recorded[0]))
+    directory_lock_file = acquire_lock(directory_lock_path(directory))
     if directory_lock_file is None:
         return True
     release_lock(directory_lock_file)
@@ -905,12 +909,12 @@ def run_launch_agent_pass() -> list[subprocess.Popen[bytes]]:
             elif (
                 task["status"] == STATUS_SCHEDULED
                 and datetime.fromisoformat(task["due_at"]) <= now
-                and not is_recorded_worktree_busy(tasks, task)
+                and not is_known_directory_busy(tasks, task)
             ) or (
                 task["status"] in SUCCEEDED_STATUSES
                 and (dependent_ids := waiting_dependent_ids(tasks, task_id))
                 and not has_running_dependent(tasks, task_id)
-                and not is_recorded_worktree_busy(tasks, tasks[dependent_ids[0]])
+                and not is_known_directory_busy(tasks, tasks[dependent_ids[0]])
                 and is_run_lock_free(task["session_id"])
             ):
                 due_tasks.append((task_id, task.copy()))
