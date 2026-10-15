@@ -1370,7 +1370,18 @@ def test_agent_recovers_interrupted_dependent_draining_in_ledger_order(
     assert read_task(ledger_path, GRANDCHILD_ID)["status"] == golem.STATUS_WAITING
 
 
-def test_agent_does_not_recover_draining_while_a_dependent_is_running(ledger_path, monkeypatch):
+@pytest.fixture
+def started_task_ids(monkeypatch):
+    task_ids: list[str] = []
+    monkeypatch.setattr(
+        golem, "start_task_executor", lambda task_id, task: task_ids.append(task_id)
+    )
+    return task_ids
+
+
+def test_agent_does_not_recover_draining_while_a_dependent_is_running(
+    ledger_path, started_task_ids
+):
     write_tasks(
         ledger_path,
         {
@@ -1379,12 +1390,6 @@ def test_agent_does_not_recover_draining_while_a_dependent_is_running(ledger_pat
             SIBLING_ID: task_record(golem.STATUS_WAITING, task_id=SIBLING_ID, after=PARENT_ID),
         },
     )
-    started_task_ids: list[str] = []
-
-    def record_executor(task_id: str, task: dict[str, Any]) -> None:
-        started_task_ids.append(task_id)
-
-    monkeypatch.setattr(golem, "start_task_executor", record_executor)
     child_session_id = read_task(ledger_path, CHILD_ID)["session_id"]
     child_run_lock_file = golem.acquire_run_lock(child_session_id)
     assert child_run_lock_file is not None
@@ -1394,6 +1399,34 @@ def test_agent_does_not_recover_draining_while_a_dependent_is_running(ledger_pat
         golem.release_run_lock(child_run_lock_file, child_session_id)
 
     assert started_task_ids == []
+
+
+def test_agent_waits_to_start_tasks_until_their_recorded_worktree_is_free(
+    ledger_path, started_task_ids, tmp_path
+):
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    write_tasks(
+        ledger_path,
+        {
+            PARENT_ID: task_record(
+                golem.STATUS_NEEDS_REVIEW, task_id=PARENT_ID, worktree=str(worktree)
+            ),
+            CHILD_ID: task_record(golem.STATUS_WAITING, task_id=CHILD_ID, after=PARENT_ID),
+            SIBLING_ID: task_record(golem.STATUS_SCHEDULED, task_id=SIBLING_ID, after=PARENT_ID),
+        },
+    )
+    directory_lock_file = golem.acquire_lock(golem.directory_lock_path(str(worktree)))
+    assert directory_lock_file is not None
+    try:
+        golem.run_launch_agent_pass()
+    finally:
+        golem.release_lock(directory_lock_file)
+    assert started_task_ids == []
+
+    golem.run_launch_agent_pass()
+
+    assert started_task_ids == [PARENT_ID, SIBLING_ID]
 
 
 @pytest.mark.parametrize(

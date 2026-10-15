@@ -278,12 +278,19 @@ def has_agent_argument(agent_args: list[str], names: set[str]) -> bool:
     )
 
 
-def resolved_worktree(tasks: dict[str, Any], task: dict[str, Any]) -> tuple[str | None, bool]:
+def recorded_worktree(tasks: dict[str, Any], task: dict[str, Any]) -> tuple[str, bool] | None:
     if "worktree" in task:
         return task["worktree"], task.get("worktree_pending") is True
     parent = tasks.get(task.get("after", ""))
     if parent is not None and parent["cwd"] == task["cwd"] and "worktree" in parent:
         return parent["worktree"], parent.get("worktree_pending") is True
+    return None
+
+
+def resolved_worktree(tasks: dict[str, Any], task: dict[str, Any]) -> tuple[str | None, bool]:
+    recorded = recorded_worktree(tasks, task)
+    if recorded is not None:
+        return recorded
     if has_agent_argument(task["agent_args"], WORKTREE_ARGUMENTS):
         return None, False
     result = subprocess.run(
@@ -876,6 +883,17 @@ def is_run_lock_free(session_id: str) -> bool:
     return True
 
 
+def is_recorded_worktree_busy(tasks: dict[str, Any], task: dict[str, Any]) -> bool:
+    recorded = recorded_worktree(tasks, task)
+    if recorded is None:
+        return False
+    directory_lock_file = acquire_lock(directory_lock_path(recorded[0]))
+    if directory_lock_file is None:
+        return True
+    release_lock(directory_lock_file)
+    return False
+
+
 def run_launch_agent_pass() -> list[subprocess.Popen[bytes]]:
     now = datetime.now(UTC)
     due_tasks: list[tuple[str, dict[str, Any]]] = []
@@ -885,11 +903,14 @@ def run_launch_agent_pass() -> list[subprocess.Popen[bytes]]:
                 if is_run_lock_free(task["session_id"]):
                     task["status"] = STATUS_FAILED
             elif (
-                task["status"] == STATUS_SCHEDULED and datetime.fromisoformat(task["due_at"]) <= now
+                task["status"] == STATUS_SCHEDULED
+                and datetime.fromisoformat(task["due_at"]) <= now
+                and not is_recorded_worktree_busy(tasks, task)
             ) or (
                 task["status"] in SUCCEEDED_STATUSES
-                and waiting_dependent_ids(tasks, task_id)
+                and (dependent_ids := waiting_dependent_ids(tasks, task_id))
                 and not has_running_dependent(tasks, task_id)
+                and not is_recorded_worktree_busy(tasks, tasks[dependent_ids[0]])
                 and is_run_lock_free(task["session_id"])
             ):
                 due_tasks.append((task_id, task.copy()))
