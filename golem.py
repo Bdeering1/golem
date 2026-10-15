@@ -313,7 +313,7 @@ def task_directory(task: dict[str, Any]) -> str:
     return task["cwd"]
 
 
-def locked_task_directory(task: dict[str, Any], worktree: str | None) -> str:
+def directory_to_lock(task: dict[str, Any], worktree: str | None) -> str:
     return worktree if worktree is not None else task["cwd"]
 
 
@@ -420,7 +420,7 @@ def pickup(task_id: str, *agent_args: str, is_app: bool) -> int:
         if task.get("status") in {STATUS_SCHEDULED, STATUS_WAITING, STATUS_CANCELLED}:
             raise SystemExit(f"golem: task has not started: {task_id}")
         reject_missing_worktree(task)
-        directory = locked_task_directory(task, task.get("worktree"))
+        directory = directory_to_lock(task, task.get("worktree"))
         directory_lock_file = acquire_lock(directory_lock_path(directory))
         if directory_lock_file is None:
             raise SystemExit(f"golem: directory is busy: {directory}")
@@ -747,7 +747,7 @@ def claim_task(
         task["result"] = missing_worktree
         release_run_lock(run_lock_file, session_id)
         return None
-    directory_lock_file = acquire_lock(directory_lock_path(locked_task_directory(task, worktree)))
+    directory_lock_file = acquire_lock(directory_lock_path(directory_to_lock(task, worktree)))
     if directory_lock_file is None:
         release_run_lock(run_lock_file, session_id)
         return None
