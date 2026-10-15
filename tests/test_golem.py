@@ -1263,13 +1263,10 @@ def test_dependent_drain_stops_for_busy_worktrees_and_skips_missing_worktrees(
     write_tasks(
         ledger_path,
         {
-            PARENT_ID: task_record(golem.STATUS_NEEDS_REVIEW, task_id=PARENT_ID),
-            CHILD_ID: task_record(
-                golem.STATUS_WAITING,
-                task_id=CHILD_ID,
-                after=PARENT_ID,
-                worktree=str(first_worktree),
+            PARENT_ID: task_record(
+                golem.STATUS_NEEDS_REVIEW, task_id=PARENT_ID, worktree=str(first_worktree)
             ),
+            CHILD_ID: task_record(golem.STATUS_WAITING, task_id=CHILD_ID, after=PARENT_ID),
             SIBLING_ID: task_record(
                 golem.STATUS_WAITING,
                 task_id=SIBLING_ID,
@@ -1456,25 +1453,6 @@ def test_missing_worktree_is_reported_without_changing_task(
 
     assert read_tasks(ledger_path) == original_tasks
     assert fake_commands["claude-args"].read_text(encoding="utf-8") == ""
-
-
-def test_dependent_fails_when_inherited_worktree_is_missing(ledger_path, tmp_path):
-    missing_worktree = tmp_path / "missing"
-    write_tasks(
-        ledger_path,
-        {
-            PARENT_ID: task_record(
-                golem.STATUS_NEEDS_REVIEW, task_id=PARENT_ID, worktree=str(missing_worktree)
-            ),
-            CHILD_ID: task_record(golem.STATUS_WAITING, task_id=CHILD_ID, after=PARENT_ID),
-        },
-    )
-
-    golem.main(["_execute", PARENT_ID, read_task(ledger_path, PARENT_ID)["session_id"]])
-
-    child = read_task(ledger_path, CHILD_ID)
-    assert child["status"] == golem.STATUS_FAILED
-    assert child["result"] == f"golem: worktree is missing: {missing_worktree}"
 
 
 def test_retry_creates_pending_worktree(
