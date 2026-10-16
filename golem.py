@@ -104,14 +104,18 @@ def locked_tasks() -> Generator[dict[str, Any]]:
             save_tasks(tasks)
 
 
-def run_lock_path(session_id: str) -> Path:
+def run_lock_directory() -> Path:
     lock_directory = ledger_path().parent / "running"
     lock_directory.mkdir(exist_ok=True)
-    return lock_directory / f"{session_id}.lock"
+    return lock_directory
+
+
+def run_lock_path(session_id: str) -> Path:
+    return run_lock_directory() / f"{session_id}.lock"
 
 
 def remove_orphan_run_locks() -> None:
-    for lock_path in run_lock_path("cleanup").parent.glob("*.lock"):
+    for lock_path in run_lock_directory().glob("*.lock"):
         is_run_lock_free(lock_path.stem)
 
 
@@ -120,8 +124,7 @@ def remove_interrupted_ledger_writes() -> None:
     for temporary_path in task_ledger_path.parent.glob(
         f"{ledger_temporary_prefix(task_ledger_path)}*"
     ):
-        if temporary_path.is_file():
-            temporary_path.unlink(missing_ok=True)
+        temporary_path.unlink(missing_ok=True)
 
 
 def acquire_lock(lock_path: Path) -> io.TextIOWrapper | None:
@@ -494,30 +497,20 @@ def close(task_id: str) -> int:
     return 0
 
 
-def archive_tasks(task_ids: list[str], *, archive_all: bool) -> int:
+def archive_tasks(task_ids: list[str] | None) -> int:
     with locked_tasks() as tasks:
-        if archive_all:
-            selected_task_ids = [
+        if task_ids is None:
+            task_ids = [
                 task_id for task_id, task in tasks.items() if task["status"] in ARCHIVABLE_STATUSES
             ]
-        else:
-            for task_id in task_ids:
-                if task_id not in tasks:
-                    raise SystemExit(f"golem: task not found: {task_id}")
-                if tasks[task_id]["status"] not in ARCHIVABLE_STATUSES:
-                    raise SystemExit(f"golem: task cannot be archived: {task_id}")
-            selected_task_ids = task_ids
-        for task_id in selected_task_ids:
+        for task_id in task_ids:
+            if task_id not in tasks:
+                raise SystemExit(f"golem: task not found: {task_id}")
+            if tasks[task_id]["status"] not in ARCHIVABLE_STATUSES:
+                raise SystemExit(f"golem: task cannot be archived: {task_id}")
+        for task_id in task_ids:
             tasks[task_id]["archived"] = True
     return 0
-
-
-def archive_tasks_from_arguments(
-    arguments: argparse.Namespace, command_parser: argparse.ArgumentParser
-) -> int:
-    if arguments.archive_all == bool(arguments.ids):
-        command_parser.error("provide task IDs or --all")
-    return archive_tasks(arguments.ids, archive_all=arguments.archive_all)
 
 
 def show_task_result(task_id: str) -> int:
@@ -550,12 +543,12 @@ def cancel_task(task_id: str) -> int:
     return 0
 
 
-def list_tasks(*, include_archived: bool = False) -> int:
+def list_tasks(*, is_archived_included: bool = False) -> int:
     tasks = load_tasks()
     visible_tasks = {
         task_id: task
         for task_id, task in tasks.items()
-        if include_archived or not task.get("archived")
+        if is_archived_included or not task.get("archived")
     }
     if not visible_tasks:
         print("golem: no tasks")
@@ -1140,16 +1133,19 @@ def build_parser() -> argparse.ArgumentParser:
         lambda arguments: retry_task(arguments.id, is_now=arguments.now, at_text=arguments.at),
     )
     list_command = commands.add_parser("list")
-    list_command.add_argument("--all", action="store_true", dest="include_archived")
+    list_command.add_argument("--all", action="store_true", help="include archived tasks")
     set_command_handler(
-        list_command, lambda arguments: list_tasks(include_archived=arguments.include_archived)
+        list_command, lambda arguments: list_tasks(is_archived_included=arguments.all)
     )
     archive_command = commands.add_parser("archive")
-    archive_command.add_argument("ids", metavar="ID", nargs="*")
-    archive_command.add_argument("--all", action="store_true", dest="archive_all")
+    archive_target_group = archive_command.add_mutually_exclusive_group(required=True)
+    archive_target_group.add_argument("ids", metavar="ID", nargs="*", default=None)
+    archive_target_group.add_argument(
+        "--all", action="store_true", help="archive every done, failed, or cancelled task"
+    )
     set_command_handler(
         archive_command,
-        lambda arguments: archive_tasks_from_arguments(arguments, archive_command),
+        lambda arguments: archive_tasks(None if arguments.all else arguments.ids),
     )
     launch_agent_command = commands.add_parser(
         "agent",
