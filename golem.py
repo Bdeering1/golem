@@ -5,6 +5,7 @@ import json
 import os
 import plistlib
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -27,6 +28,8 @@ STATUS_FAILED = "failed"
 STATUS_DONE = "done"
 STATUS_CANCELLED = "cancelled"
 SUCCEEDED_STATUSES = {STATUS_NEEDS_REVIEW, STATUS_DONE}
+ARCHIVABLE_STATUSES = {STATUS_DONE, STATUS_FAILED, STATUS_CANCELLED}
+AGENT_LOG_MAX_BYTES = 1024 * 1024
 USAGE_ERROR = "golem: usage lookup unavailable"
 USAGE_TIMEOUT_SECONDS = 30
 USAGE_LIMIT_HTTP_STATUS = 429
@@ -59,6 +62,10 @@ def ledger_path() -> Path:
     return state_directory / "tasks.json"
 
 
+def ledger_temporary_prefix(task_ledger_path: Path) -> str:
+    return f".{task_ledger_path.name}."
+
+
 def load_tasks() -> dict[str, Any]:
     task_ledger_path = ledger_path()
     if not task_ledger_path.exists():
@@ -70,7 +77,7 @@ def save_tasks(tasks: dict[str, Any]) -> None:
     task_ledger_path = ledger_path()
     file_descriptor, temporary_name = tempfile.mkstemp(
         dir=task_ledger_path.parent,
-        prefix=f".{task_ledger_path.name}.",
+        prefix=ledger_temporary_prefix(task_ledger_path),
         text=True,
     )
     temporary_path = Path(temporary_name)
@@ -101,6 +108,20 @@ def run_lock_path(session_id: str) -> Path:
     lock_directory = ledger_path().parent / "running"
     lock_directory.mkdir(exist_ok=True)
     return lock_directory / f"{session_id}.lock"
+
+
+def remove_orphan_run_locks() -> None:
+    for lock_path in run_lock_path("cleanup").parent.glob("*.lock"):
+        is_run_lock_free(lock_path.stem)
+
+
+def remove_interrupted_ledger_writes() -> None:
+    task_ledger_path = ledger_path()
+    for temporary_path in task_ledger_path.parent.glob(
+        f"{ledger_temporary_prefix(task_ledger_path)}*"
+    ):
+        if temporary_path.is_file():
+            temporary_path.unlink(missing_ok=True)
 
 
 def acquire_lock(lock_path: Path) -> io.TextIOWrapper | None:
@@ -184,8 +205,19 @@ def golem_command() -> list[str]:
     return [str(Path(sys.executable).absolute()), str(Path(__file__).resolve())]
 
 
+def agent_log_path() -> Path:
+    return ledger_path().parent / "agent.log"
+
+
+def rotate_agent_log() -> None:
+    log_path = agent_log_path()
+    if log_path.exists() and log_path.stat().st_size > AGENT_LOG_MAX_BYTES:
+        shutil.copyfile(log_path, log_path.with_name(f"{log_path.name}.1"))
+        log_path.write_text("", encoding="utf-8")
+
+
 def launch_agent_plist_data() -> bytes:
-    log_path = str(ledger_path().parent / "agent.log")
+    log_path = str(agent_log_path())
     plist: dict[str, object] = {
         "Label": LAUNCH_AGENT_LABEL,
         "ProgramArguments": ["/usr/bin/caffeinate", "-is", *golem_command(), "_agent"],
@@ -462,6 +494,32 @@ def close(task_id: str) -> int:
     return 0
 
 
+def archive_tasks(task_ids: list[str], *, archive_all: bool) -> int:
+    with locked_tasks() as tasks:
+        if archive_all:
+            selected_task_ids = [
+                task_id for task_id, task in tasks.items() if task["status"] in ARCHIVABLE_STATUSES
+            ]
+        else:
+            for task_id in task_ids:
+                if task_id not in tasks:
+                    raise SystemExit(f"golem: task not found: {task_id}")
+                if tasks[task_id]["status"] not in ARCHIVABLE_STATUSES:
+                    raise SystemExit(f"golem: task cannot be archived: {task_id}")
+            selected_task_ids = task_ids
+        for task_id in selected_task_ids:
+            tasks[task_id]["archived"] = True
+    return 0
+
+
+def archive_tasks_from_arguments(
+    arguments: argparse.Namespace, command_parser: argparse.ArgumentParser
+) -> int:
+    if arguments.archive_all == bool(arguments.ids):
+        command_parser.error("provide task IDs or --all")
+    return archive_tasks(arguments.ids, archive_all=arguments.archive_all)
+
+
 def show_task_result(task_id: str) -> int:
     tasks = load_tasks()
     if task_id not in tasks:
@@ -492,9 +550,14 @@ def cancel_task(task_id: str) -> int:
     return 0
 
 
-def list_tasks() -> int:
+def list_tasks(*, include_archived: bool = False) -> int:
     tasks = load_tasks()
-    if not tasks:
+    visible_tasks = {
+        task_id: task
+        for task_id, task in tasks.items()
+        if include_archived or not task.get("archived")
+    }
+    if not visible_tasks:
         print("golem: no tasks")
         return 0
     rows = [
@@ -507,7 +570,7 @@ def list_tasks() -> int:
             if task["status"] == STATUS_WAITING
             else "",
         )
-        for task_id, task in tasks.items()
+        for task_id, task in visible_tasks.items()
     ]
     rows.sort(key=lambda row: (row[1] != STATUS_NEEDS_REVIEW, row[0]))
     headers = ("ID", "STATUS", "DIRECTORY", "DUE AT", "AFTER")
@@ -899,9 +962,12 @@ def is_known_directory_busy(tasks: dict[str, Any], task: dict[str, Any]) -> bool
 
 
 def run_launch_agent_pass() -> list[subprocess.Popen[bytes]]:
+    rotate_agent_log()
     now = datetime.now(UTC)
     due_tasks: list[tuple[str, dict[str, Any]]] = []
     with locked_tasks() as tasks:
+        remove_orphan_run_locks()
+        remove_interrupted_ledger_writes()
         for task_id, task in tasks.items():
             if task["status"] == STATUS_RUNNING:
                 if is_run_lock_free(task["session_id"]):
@@ -1073,8 +1139,26 @@ def build_parser() -> argparse.ArgumentParser:
         retry_command,
         lambda arguments: retry_task(arguments.id, is_now=arguments.now, at_text=arguments.at),
     )
-    set_command_handler(commands.add_parser("list"), lambda _: list_tasks())
-    launch_agent_command = commands.add_parser("agent")
+    list_command = commands.add_parser("list")
+    list_command.add_argument("--all", action="store_true", dest="include_archived")
+    set_command_handler(
+        list_command, lambda arguments: list_tasks(include_archived=arguments.include_archived)
+    )
+    archive_command = commands.add_parser("archive")
+    archive_command.add_argument("ids", metavar="ID", nargs="*")
+    archive_command.add_argument("--all", action="store_true", dest="archive_all")
+    set_command_handler(
+        archive_command,
+        lambda arguments: archive_tasks_from_arguments(arguments, archive_command),
+    )
+    launch_agent_command = commands.add_parser(
+        "agent",
+        description=(
+            "Agent logs are written to agent.log in the state directory; when it exceeds "
+            f"{AGENT_LOG_MAX_BYTES // 1024**2} MiB it is copied to agent.log.1, replacing "
+            "the previous copy, and truncated."
+        ),
+    )
     launch_agent_command.add_argument("action", choices=("install", "uninstall"))
     set_command_handler(
         launch_agent_command,
