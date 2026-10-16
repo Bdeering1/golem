@@ -46,55 +46,94 @@ PERMISSION_ARGUMENTS = {
     "--permission-mode",
 }
 VERBOSE_ARGUMENT = "--verbose"
+WORKTREE_OWNER_GOLEM = "golem"
+WORKTREE_OWNER_EXTERNAL = "external"
+CLAUDE_LOCK_PATTERN = re.compile(r"claude session (\S+) \(pid (\d+) start .+\)")
 
 
-def ledger_path() -> Path:
+def state_directory() -> Path:
     state_home = Path(os.environ.get("XDG_STATE_HOME", ""))
-    state_directory = (
+    golem_state_directory = (
         state_home / "golem"
         if state_home.is_absolute()
         else Path.home() / ".local" / "state" / "golem"
     )
-    state_directory.mkdir(parents=True, exist_ok=True)
-    return state_directory / "tasks.json"
+    golem_state_directory.mkdir(parents=True, exist_ok=True)
+    return golem_state_directory
+
+
+def ledger_path() -> Path:
+    return state_directory() / "tasks.json"
+
+
+def worktree_ledger_path() -> Path:
+    return state_directory() / "worktrees.json"
+
+
+def settings_path() -> Path:
+    return state_directory() / "settings.json"
+
+
+def load_json(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    return cast("dict[str, Any]", json.loads(path.read_text(encoding="utf-8")))
 
 
 def load_tasks() -> dict[str, Any]:
-    task_ledger_path = ledger_path()
-    if not task_ledger_path.exists():
-        return {}
-    return json.loads(task_ledger_path.read_text(encoding="utf-8"))
+    return load_json(ledger_path())
 
 
-def save_tasks(tasks: dict[str, Any]) -> None:
-    task_ledger_path = ledger_path()
+def load_worktrees() -> dict[str, Any]:
+    return load_json(worktree_ledger_path())
+
+
+def save_json(path: Path, value: dict[str, Any]) -> None:
     file_descriptor, temporary_name = tempfile.mkstemp(
-        dir=task_ledger_path.parent,
-        prefix=f".{task_ledger_path.name}.",
+        dir=path.parent,
+        prefix=f".{path.name}.",
         text=True,
     )
     temporary_path = Path(temporary_name)
     try:
         with os.fdopen(file_descriptor, "w", encoding="utf-8") as temporary_file:
-            temporary_file.write(json.dumps(tasks, indent=2) + "\n")
+            temporary_file.write(json.dumps(value, indent=2) + "\n")
         temporary_path.chmod(0o600)
-        temporary_path.replace(task_ledger_path)
+        temporary_path.replace(path)
     finally:
         if temporary_path.exists():
             temporary_path.unlink()
 
 
+def save_tasks(tasks: dict[str, Any]) -> None:
+    save_json(ledger_path(), tasks)
+
+
+def save_settings(settings: dict[str, Any]) -> None:
+    save_json(settings_path(), settings)
+
+
 @contextmanager
-def locked_tasks() -> Generator[dict[str, Any]]:
+def locked_ledger() -> Generator[tuple[dict[str, Any], dict[str, Any]]]:
     lock_path = ledger_path().with_suffix(".lock")
     lock_path.touch(exist_ok=True)
     with lock_path.open("r+", encoding="utf-8") as lock_file:
         fcntl.flock(lock_file, fcntl.LOCK_EX)
         tasks = load_tasks()
-        original_ledger_text = json.dumps(tasks)
-        yield tasks
-        if json.dumps(tasks) != original_ledger_text:
+        worktrees = load_worktrees()
+        original_tasks_text = json.dumps(tasks)
+        original_worktrees_text = json.dumps(worktrees)
+        yield tasks, worktrees
+        if json.dumps(tasks) != original_tasks_text:
             save_tasks(tasks)
+        if json.dumps(worktrees) != original_worktrees_text:
+            save_json(worktree_ledger_path(), worktrees)
+
+
+@contextmanager
+def locked_tasks() -> Generator[dict[str, Any]]:
+    with locked_ledger() as (tasks, _):
+        yield tasks
 
 
 def run_lock_path(session_id: str) -> Path:
@@ -278,13 +317,99 @@ def has_agent_argument(agent_args: list[str], names: set[str]) -> bool:
     )
 
 
+def resolved_path(path: str) -> str:
+    return str(Path(path).resolve())
+
+
+def git_common_directory(directory: str) -> str | None:
+    result = subprocess.run(
+        [
+            "git",
+            "-C",
+            directory,
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-common-dir",
+        ],
+        capture_output=True,
+        encoding="utf-8",
+        check=False,
+    )
+    if result.returncode:
+        return None
+    return result.stdout.strip()
+
+
+def git_has_head(directory: str) -> bool:
+    return (
+        subprocess.run(
+            ["git", "-C", directory, "rev-parse", "--verify", "HEAD"],
+            capture_output=True,
+            encoding="utf-8",
+            check=False,
+        ).returncode
+        == 0
+    )
+
+
 def recorded_worktree(tasks: dict[str, Any], task: dict[str, Any]) -> tuple[str, bool] | None:
-    if "worktree" in task:
-        return task["worktree"], task.get("worktree_pending") is True
-    parent = tasks.get(task.get("after", ""))
-    if parent is not None and parent["cwd"] == task["cwd"] and "worktree" in parent:
-        return parent["worktree"], parent.get("worktree_pending") is True
-    return None
+    ancestor = task
+    while True:
+        if "worktree" in ancestor:
+            return ancestor["worktree"], ancestor.get("worktree_pending") is True
+        parent = tasks.get(ancestor.get("after", ""))
+        parent_task = cast("dict[str, Any]", parent)
+        if not isinstance(parent, dict) or parent_task.get("cwd") != task.get("cwd"):
+            return None
+        ancestor = cast("dict[str, Any]", parent)
+
+
+def worktree_resource(worktrees: dict[str, Any], worktree: str | None) -> dict[str, Any] | None:
+    if worktree is None:
+        return None
+    resource = worktrees.get(resolved_path(worktree))
+    return cast("dict[str, Any]", resource) if isinstance(resource, dict) else None
+
+
+def clear_worktree_release(worktrees: dict[str, Any], worktree: str | None) -> None:
+    resource = worktree_resource(worktrees, worktree)
+    if resource is not None:
+        resource.pop("released_at", None)
+
+
+def new_worktree_resource(
+    owner: str,
+    repository: str | None,
+    session_id: str,
+) -> dict[str, Any]:
+    resource: dict[str, Any] = {
+        "owner": owner,
+        "session_id": session_id,
+        "created_at": datetime.now(UTC).isoformat(),
+    }
+    if repository is not None:
+        resource["repository"] = repository
+    return resource
+
+
+def record_golem_worktree(
+    worktrees: dict[str, Any], worktree: str, repository: str, session_id: str
+) -> None:
+    worktrees.setdefault(
+        resolved_path(worktree),
+        new_worktree_resource(WORKTREE_OWNER_GOLEM, repository, session_id),
+    )
+
+
+def record_external_worktree(worktrees: dict[str, Any], worktree: str, session_id: str) -> None:
+    worktrees.setdefault(
+        resolved_path(worktree),
+        new_worktree_resource(
+            WORKTREE_OWNER_EXTERNAL,
+            git_common_directory(worktree),
+            session_id,
+        ),
+    )
 
 
 def resolved_worktree(tasks: dict[str, Any], task: dict[str, Any]) -> tuple[str | None, bool]:
@@ -293,24 +418,10 @@ def resolved_worktree(tasks: dict[str, Any], task: dict[str, Any]) -> tuple[str 
         return recorded
     if has_agent_argument(task["agent_args"], WORKTREE_ARGUMENTS):
         return None, False
-    result = subprocess.run(
-        [
-            "git",
-            "-C",
-            task["cwd"],
-            "rev-parse",
-            "--path-format=absolute",
-            "--git-common-dir",
-            "HEAD",
-        ],
-        capture_output=True,
-        encoding="utf-8",
-        check=False,
-    )
-    if result.returncode:
+    common_directory = git_common_directory(task["cwd"])
+    if common_directory is None or not git_has_head(task["cwd"]):
         return None, False
-    common_directory = Path(result.stdout.splitlines()[0])
-    return str(common_directory.parent / ".claude" / "worktrees" / task["session_id"]), True
+    return str(Path(common_directory).parent / ".claude" / "worktrees" / task["session_id"]), True
 
 
 def task_directory(task: dict[str, Any]) -> str:
@@ -324,15 +435,23 @@ def directory_to_lock(task: dict[str, Any], worktree: str | None) -> str:
     return worktree if worktree is not None else task["cwd"]
 
 
-def worktree_missing_message(worktree: str | None, *, is_worktree_pending: bool) -> str | None:
+def worktree_missing_message(
+    worktree: str | None,
+    worktrees: dict[str, Any],
+    *,
+    is_worktree_pending: bool,
+) -> str | None:
     if worktree is None or is_worktree_pending or Path(worktree).is_dir():
         return None
+    resource = worktree_resource(worktrees, worktree)
+    if resource is not None and resource.get("removed_at") is not None:
+        return f"golem: worktree was removed: {worktree}"
     return f"golem: worktree is missing: {worktree}"
 
 
-def reject_missing_worktree(task: dict[str, Any]) -> None:
+def reject_missing_worktree(task: dict[str, Any], worktrees: dict[str, Any]) -> None:
     missing_worktree = worktree_missing_message(
-        task.get("worktree"), is_worktree_pending=task.get("worktree_pending") is True
+        task.get("worktree"), worktrees, is_worktree_pending=task.get("worktree_pending") is True
     )
     if missing_worktree is not None:
         raise SystemExit(missing_worktree)
@@ -420,20 +539,29 @@ def new_task_record(
 
 
 def pickup(task_id: str, *agent_args: str, is_app: bool) -> int:
-    with locked_tasks() as tasks:
+    with locked_ledger() as (tasks, worktrees):
         if task_id not in tasks:
             raise SystemExit(f"golem: task not found: {task_id}")
         task = cast("dict[str, Any]", tasks[task_id])
         if task.get("status") in {STATUS_SCHEDULED, STATUS_WAITING, STATUS_CANCELLED}:
             raise SystemExit(f"golem: task has not started: {task_id}")
-        reject_missing_worktree(task)
-        directory = directory_to_lock(task, task.get("worktree"))
+        recorded = recorded_worktree(tasks, task)
+        worktree = recorded[0] if recorded is not None else task.get("worktree")
+        missing_worktree = worktree_missing_message(
+            worktree,
+            worktrees,
+            is_worktree_pending=recorded is not None and recorded[1],
+        )
+        if missing_worktree is not None:
+            raise SystemExit(missing_worktree)
+        directory = directory_to_lock(task, worktree)
         directory_lock_file = acquire_lock(directory_lock_path(directory))
         if directory_lock_file is None:
             raise SystemExit(f"golem: directory is busy: {directory}")
+        clear_worktree_release(worktrees, worktree)
         if task.get("status") == STATUS_NEEDS_REVIEW:
             task["status"] = STATUS_DONE
-        cwd = task_directory(task)
+        cwd = worktree if worktree is not None and Path(worktree).is_dir() else task_directory(task)
         session_id = cast("str", task["session_id"])
     if is_app:
         release_lock(directory_lock_file)
@@ -678,9 +806,11 @@ def claude_working_directory(output: str) -> str | None:
 
 
 def record_worktree(task_id: str, worktree: str) -> None:
-    with locked_tasks() as tasks:
+    with locked_ledger() as (tasks, worktrees):
         tasks[task_id]["worktree"] = worktree
         tasks[task_id].pop("worktree_pending", None)
+        task = cast("dict[str, Any]", tasks[task_id])
+        record_external_worktree(worktrees, worktree, cast("str", task["session_id"]))
 
 
 def clear_recorded_worktree_pending(task_id: str) -> None:
@@ -735,6 +865,7 @@ def finish_task(
 
 def claim_task(
     tasks: dict[str, Any],
+    worktrees: dict[str, Any],
     task_id: str,
     session_id: str,
     expected_status: str,
@@ -745,9 +876,10 @@ def claim_task(
     run_lock_file = acquire_run_lock(session_id)
     if run_lock_file is None:
         return None
+    recorded = recorded_worktree(tasks, task)
     worktree, is_worktree_pending = resolved_worktree(tasks, task)
     if missing_worktree := worktree_missing_message(
-        worktree, is_worktree_pending=is_worktree_pending
+        worktree, worktrees, is_worktree_pending=is_worktree_pending
     ):
         record_resolved_worktree(task, worktree, is_worktree_pending=is_worktree_pending)
         task["status"] = STATUS_FAILED
@@ -759,6 +891,11 @@ def claim_task(
         release_run_lock(run_lock_file, session_id)
         return None
     record_resolved_worktree(task, worktree, is_worktree_pending=is_worktree_pending)
+    if recorded is None and worktree is not None:
+        repository = git_common_directory(task["cwd"])
+        if repository is not None:
+            record_golem_worktree(worktrees, worktree, repository, session_id)
+    clear_worktree_release(worktrees, worktree)
     task["status"] = STATUS_RUNNING
     return task.copy(), run_lock_file, directory_lock_file
 
@@ -766,13 +903,13 @@ def claim_task(
 def claim_next_dependent(
     task_id: str,
 ) -> tuple[str, dict[str, Any], io.TextIOWrapper, io.TextIOWrapper] | None:
-    with locked_tasks() as tasks:
+    with locked_ledger() as (tasks, worktrees):
         parent_record = cast("dict[str, Any]", tasks[task_id])
         if parent_record.get("status") not in SUCCEEDED_STATUSES:
             return None
         for dependent_id in waiting_dependent_ids(tasks, task_id):
             session_id = tasks[dependent_id]["session_id"]
-            claim = claim_task(tasks, dependent_id, session_id, STATUS_WAITING)
+            claim = claim_task(tasks, worktrees, dependent_id, session_id, STATUS_WAITING)
             if claim is not None:
                 return dependent_id, *claim
             if tasks[dependent_id]["status"] == STATUS_WAITING:
@@ -839,8 +976,8 @@ def execute_claimed_task(
 
 
 def execute_scheduled_task(task_id: str, session_id: str) -> int:
-    with locked_tasks() as tasks:
-        claim = claim_task(tasks, task_id, session_id, STATUS_SCHEDULED)
+    with locked_ledger() as (tasks, worktrees):
+        claim = claim_task(tasks, worktrees, task_id, session_id, STATUS_SCHEDULED)
     if claim is None:
         return 0
     return execute_claimed_task(task_id, *claim)
@@ -881,6 +1018,261 @@ def is_run_lock_free(session_id: str) -> bool:
         return False
     release_run_lock(run_lock_file, session_id)
     return True
+
+
+def task_uses_worktree(tasks: dict[str, Any], task: dict[str, Any], worktree: str) -> bool:
+    recorded = recorded_worktree(tasks, task)
+    if recorded is not None and resolved_path(recorded[0]) == resolved_path(worktree):
+        return True
+    task_directory_path = Path(cast("str", task["cwd"])).resolve()
+    worktree_path = Path(worktree).resolve()
+    return task_directory_path == worktree_path or worktree_path in task_directory_path.parents
+
+
+def worktree_task_ids(tasks: dict[str, Any], worktree: str) -> list[str]:
+    return [
+        task_id
+        for task_id, task in tasks.items()
+        if isinstance(task, dict)
+        and task_uses_worktree(tasks, cast("dict[str, Any]", task), worktree)
+    ]
+
+
+def git_worktree_entries(repository: str) -> list[list[str]] | None:
+    result = subprocess.run(
+        ["git", "-C", repository, "worktree", "list", "--porcelain"],
+        capture_output=True,
+        encoding="utf-8",
+        check=False,
+    )
+    if result.returncode:
+        return None
+    return [entry.splitlines() for entry in result.stdout.strip().split("\n\n") if entry]
+
+
+def git_worktree_entry(entries: list[list[str]], worktree: str) -> list[str] | None:
+    return next(
+        (entry for entry in entries if entry[0] == f"worktree {resolved_path(worktree)}"), None
+    )
+
+
+def git_worktree_lock_reason(entry: list[str]) -> str | None:
+    for line in entry[1:]:
+        if line == "locked":
+            return ""
+        if line.startswith("locked "):
+            return line.removeprefix("locked ")
+    return None
+
+
+def is_verified_stale_worktree_lock(
+    resource: dict[str, Any], tasks: dict[str, Any], worktree: str, reason: str
+) -> bool:
+    match = CLAUDE_LOCK_PATTERN.fullmatch(reason)
+    if match is None:
+        return False
+    session_id, process_id_text = match.groups()
+    session_ids = {cast("str", resource["session_id"])}
+    session_ids.update(
+        cast("str", task["session_id"])
+        for task in tasks.values()
+        if isinstance(task, dict)
+        and task_uses_worktree(tasks, cast("dict[str, Any]", task), worktree)
+    )
+    if session_id not in session_ids:
+        return False
+    try:
+        os.kill(int(process_id_text), 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    return False
+
+
+def git_worktree_retention_reasons(
+    resource: dict[str, Any],
+    tasks: dict[str, Any],
+    worktree: str,
+    entries: list[list[str]] | None,
+) -> list[str]:
+    if not Path(worktree).is_dir():
+        return ["missing"]
+    repository = resource.get("repository")
+    if not isinstance(repository, str):
+        return ["repository unknown"]
+    if entries is None:
+        return ["repository unavailable"]
+    matching_entry = git_worktree_entry(entries, worktree)
+    if matching_entry is None:
+        return ["not a registered worktree"]
+    if entries[0] == matching_entry:
+        return ["original checkout"]
+    reasons: list[str] = []
+    lock_reason = git_worktree_lock_reason(matching_entry)
+    if lock_reason is not None and not is_verified_stale_worktree_lock(
+        resource, tasks, worktree, lock_reason
+    ):
+        reasons.append("worktree lock is active")
+    status_result = subprocess.run(
+        ["git", "-C", worktree, "status", "--porcelain"],
+        capture_output=True,
+        encoding="utf-8",
+        check=False,
+    )
+    if status_result.returncode or status_result.stdout:
+        reasons.append("local changes")
+    branch_result = subprocess.run(
+        ["git", "-C", worktree, "symbolic-ref", "-q", "HEAD"],
+        capture_output=True,
+        encoding="utf-8",
+        check=False,
+    )
+    if branch_result.returncode:
+        ref_result = subprocess.run(
+            ["git", "-C", worktree, "for-each-ref", "--contains", "HEAD"],
+            capture_output=True,
+            encoding="utf-8",
+            check=False,
+        )
+        if ref_result.returncode or not ref_result.stdout.strip():
+            reasons.append("unpublished commits")
+    return reasons
+
+
+def task_worktree_retention_reasons(
+    tasks: dict[str, Any], worktree: str, *, is_released: bool
+) -> list[str]:
+    reasons: list[str] = []
+    worktree_tasks = [
+        cast("dict[str, Any]", task)
+        for task in tasks.values()
+        if task_uses_worktree(tasks, task, worktree)
+    ]
+    if any(task.get("status") == STATUS_RUNNING for task in worktree_tasks):
+        reasons.append("in use")
+    for task in worktree_tasks:
+        status = task.get("status")
+        if status in {STATUS_SCHEDULED, STATUS_WAITING}:
+            reasons.append(f"task {status}")
+        elif status == STATUS_NEEDS_REVIEW:
+            reasons.append("task needs review")
+        elif status in {STATUS_FAILED, STATUS_CANCELLED} and not is_released:
+            reasons.append("task can be retried; release or explicit remove allows removal")
+    return reasons
+
+
+def worktree_retention_reasons(
+    tasks: dict[str, Any],
+    worktrees: dict[str, Any],
+    worktree: str,
+    *,
+    is_checking_directory_lock: bool = True,
+    is_released: bool = False,
+    worktree_entries: list[list[str]] | None = None,
+    is_worktree_entries_loaded: bool = False,
+) -> list[str]:
+    resource = worktree_resource(worktrees, worktree)
+    if resource is None:
+        return ["ownership unknown"]
+    if resource.get("owner") == WORKTREE_OWNER_EXTERNAL:
+        return ["not created by Golem"]
+    if resource.get("removed_at") is not None:
+        return ["already removed"]
+    if resource.get("owner") != WORKTREE_OWNER_GOLEM:
+        return ["ownership unknown"]
+    reasons: list[str] = []
+    if is_checking_directory_lock:
+        directory_lock_file = acquire_lock(directory_lock_path(worktree))
+        if directory_lock_file is None:
+            reasons.append("in use")
+        else:
+            release_lock(directory_lock_file)
+    reasons.extend(
+        task_worktree_retention_reasons(
+            tasks,
+            worktree,
+            is_released=resource.get("released_at") is not None or is_released,
+        )
+    )
+    if not is_worktree_entries_loaded:
+        repository = resource.get("repository")
+        worktree_entries = git_worktree_entries(repository) if isinstance(repository, str) else None
+    reasons.extend(git_worktree_retention_reasons(resource, tasks, worktree, worktree_entries))
+    return list(dict.fromkeys(reasons))
+
+
+def record_worktree_removal_error(resource: dict[str, Any], error: str) -> tuple[bool, list[str]]:
+    resource["removal_error"] = error
+    return False, [error]
+
+
+def git_worktree_command_result(
+    repository: str, command: str, worktree: str
+) -> tuple[bool, str | None]:
+    result = subprocess.run(
+        ["git", "-C", repository, "worktree", command, worktree],
+        capture_output=True,
+        encoding="utf-8",
+        check=False,
+    )
+    if result.returncode:
+        return (
+            False,
+            result.stderr.strip() or result.stdout.strip() or "git worktree command failed",
+        )
+    return True, None
+
+
+def remove_locked_worktree(
+    resource: dict[str, Any],
+    tasks: dict[str, Any],
+    worktree: str,
+    entries: list[list[str]],
+) -> tuple[bool, list[str]]:
+    repository = cast("str", resource["repository"])
+    entry = cast("list[str]", git_worktree_entry(entries, worktree))
+    lock_reason = git_worktree_lock_reason(entry)
+    if lock_reason is not None:
+        if not is_verified_stale_worktree_lock(resource, tasks, worktree, lock_reason):
+            return False, ["worktree lock is active"]
+        is_unlocked, unlock_error = git_worktree_command_result(repository, "unlock", worktree)
+        if not is_unlocked:
+            return record_worktree_removal_error(resource, cast("str", unlock_error))
+    is_removed, removal_error = git_worktree_command_result(repository, "remove", worktree)
+    if not is_removed:
+        return record_worktree_removal_error(resource, cast("str", removal_error))
+    resource["removed_at"] = datetime.now(UTC).isoformat()
+    resource.pop("removal_error", None)
+    return True, []
+
+
+def remove_worktree_resource(
+    tasks: dict[str, Any], worktrees: dict[str, Any], worktree: str, *, is_released: bool = False
+) -> tuple[bool, list[str]]:
+    resource = worktree_resource(worktrees, worktree)
+    if resource is None:
+        return False, worktree_retention_reasons(tasks, worktrees, worktree)
+    directory_lock_file = acquire_lock(directory_lock_path(worktree))
+    if directory_lock_file is None:
+        return False, ["in use"]
+    try:
+        repository = resource.get("repository")
+        entries = git_worktree_entries(repository) if isinstance(repository, str) else None
+        reasons = worktree_retention_reasons(
+            tasks,
+            worktrees,
+            worktree,
+            is_checking_directory_lock=False,
+            is_released=is_released,
+            worktree_entries=entries,
+            is_worktree_entries_loaded=True,
+        )
+        if reasons:
+            return False, reasons
+        return remove_locked_worktree(resource, tasks, worktree, cast("list[list[str]]", entries))
+    finally:
+        release_lock(directory_lock_file)
 
 
 def is_known_directory_busy(tasks: dict[str, Any], task: dict[str, Any]) -> bool:
@@ -935,6 +1327,141 @@ def has_pending_tasks(tasks: dict[str, Any]) -> bool:
     )
 
 
+def list_worktrees() -> int:
+    tasks = load_tasks()
+    worktrees = load_worktrees()
+    worktree_paths = set(worktrees)
+    for task in tasks.values():
+        if isinstance(task, dict):
+            recorded = recorded_worktree(tasks, cast("dict[str, Any]", task))
+            if recorded is not None:
+                worktree_paths.add(resolved_path(recorded[0]))
+    if not worktree_paths:
+        print("golem: no worktrees")
+        return 0
+    rows: list[tuple[str, str, str, str]] = []
+    for worktree in sorted(worktree_paths):
+        resource = worktree_resource(worktrees, worktree)
+        reasons = worktree_retention_reasons(tasks, worktrees, worktree)
+        if resource is not None and isinstance(resource.get("removal_error"), str):
+            reasons.append(f"removal error: {resource['removal_error']}")
+        state = "eligible" if not reasons else "retained"
+        if resource is not None and resource.get("removed_at") is not None:
+            state = "removed"
+        rows.append(
+            (
+                worktree,
+                ",".join(worktree_task_ids(tasks, worktree)),
+                state,
+                "; ".join(reasons),
+            )
+        )
+    headers = ("PATH", "TASKS", "STATE", "REASON")
+    widths = [
+        max(len(str(value)) for value in column) for column in zip(headers, *rows, strict=True)
+    ]
+    for row in (headers, *rows):
+        print(
+            "  ".join(
+                str(value).ljust(width) for value, width in zip(row, widths, strict=True)
+            ).rstrip()
+        )
+    return 0
+
+
+def task_worktree(tasks: dict[str, Any], task_id: str) -> str:
+    task = tasks.get(task_id)
+    if not isinstance(task, dict):
+        raise SystemExit(f"golem: task not found: {task_id}")
+    recorded = recorded_worktree(tasks, cast("dict[str, Any]", task))
+    if recorded is None:
+        raise SystemExit(f"golem: task has no worktree: {task_id}")
+    return recorded[0]
+
+
+def release_worktree(task_id: str) -> int:
+    with locked_ledger() as (tasks, worktrees):
+        worktree = task_worktree(tasks, task_id)
+        resource = worktree_resource(worktrees, worktree)
+        if resource is None:
+            raise SystemExit(f"golem: worktree ownership is unknown: {worktree}")
+        if resource.get("owner") != WORKTREE_OWNER_GOLEM:
+            raise SystemExit(f"golem: worktree was not created by Golem: {worktree}")
+        if resource.get("removed_at") is not None:
+            raise SystemExit(f"golem: worktree already removed: {worktree}")
+        resource["released_at"] = datetime.now(UTC).isoformat()
+    return 0
+
+
+def remove_worktree(task_id: str) -> int:
+    with locked_ledger() as (tasks, worktrees):
+        worktree = task_worktree(tasks, task_id)
+        resource = worktree_resource(worktrees, worktree)
+        if resource is not None and resource.get("removed_at") is not None:
+            print(f"golem: worktree already removed: {worktree}")
+            return 0
+        is_removed, reasons = remove_worktree_resource(tasks, worktrees, worktree, is_released=True)
+        if is_removed:
+            print(f"golem: removed worktree: {worktree}")
+            return 0
+        print(f"golem: retained worktree: {worktree}: {'; '.join(reasons)}", file=sys.stderr)
+        return 1
+
+
+def set_worktree_auto_remove(retention_days: int | None) -> int:
+    settings = load_json(settings_path())
+    if retention_days is None:
+        settings.pop("worktree_retention_days", None)
+    else:
+        settings["worktree_retention_days"] = retention_days
+    save_settings(settings)
+    return 0
+
+
+def set_worktree_auto_remove_from_arguments(arguments: argparse.Namespace) -> int:
+    if arguments.off:
+        return set_worktree_auto_remove(None)
+    retention_days = cast("int", arguments.after)
+    if retention_days < 0:
+        raise SystemExit("golem: --after must be non-negative")
+    return set_worktree_auto_remove(retention_days)
+
+
+def auto_remove_worktrees() -> None:
+    settings = load_json(settings_path())
+    retention_days = cast("int | None", settings.get("worktree_retention_days"))
+    if retention_days is None:
+        return
+    now = datetime.now(UTC)
+    with locked_ledger() as (tasks, worktrees):
+        for worktree, resource in cast("dict[str, dict[str, Any]]", worktrees).items():
+            if (
+                resource.get("owner") != WORKTREE_OWNER_GOLEM
+                or resource.get("removed_at") is not None
+            ):
+                continue
+            if "released_at" not in resource:
+                continue
+            released_at = cast("str", resource["released_at"])
+            eligible_at = datetime.fromisoformat(released_at) + timedelta(days=retention_days)
+            if now < eligible_at:
+                continue
+            try:
+                is_removed, reasons = remove_worktree_resource(tasks, worktrees, worktree)
+            except OSError as error:
+                is_removed, reasons = record_worktree_removal_error(resource, str(error))
+            if is_removed:
+                print(
+                    f"golem: removed worktree: {worktree}",
+                    file=sys.stderr,
+                )
+            elif resource.get("removal_error") in reasons:
+                print(
+                    f"golem: retained worktree: {worktree}: {'; '.join(reasons)}",
+                    file=sys.stderr,
+                )
+
+
 def reap_finished_executors(
     processes: list[subprocess.Popen[bytes]],
 ) -> list[subprocess.Popen[bytes]]:
@@ -942,6 +1469,7 @@ def reap_finished_executors(
 
 
 def run_launch_agent() -> int:
+    auto_remove_worktrees()
     processes = run_launch_agent_pass()
     while has_pending_tasks(load_tasks()):
         time.sleep(LAUNCH_AGENT_POLL_SECONDS)
@@ -956,17 +1484,19 @@ def retryable_task(tasks: dict[str, Any], task_id: str) -> dict[str, Any]:
     task = cast("dict[str, Any]", tasks[task_id])
     if task.get("status") not in {STATUS_FAILED, STATUS_CANCELLED}:
         raise SystemExit(f"golem: task cannot be retried: {task_id}")
-    reject_missing_worktree(task)
     return task
 
 
 def retry_task(task_id: str, *, is_now: bool, at_text: str | None) -> int:
-    retryable_task(load_tasks(), task_id)
+    tasks = load_tasks()
+    retryable = retryable_task(tasks, task_id)
+    reject_missing_worktree(retryable, load_worktrees())
     require_launch_agent()
     when = planned_execution_time(is_now=is_now, at_text=at_text) or datetime.now(UTC).astimezone()
 
-    with locked_tasks() as tasks:
+    with locked_ledger() as (tasks, worktrees):
         task = retryable_task(tasks, task_id)
+        reject_missing_worktree(task, worktrees)
         record = new_task_record(
             cast("str", task["cwd"]),
             cast("str", task["prompt"]),
@@ -978,6 +1508,7 @@ def retry_task(task_id: str, *, is_now: bool, at_text: str | None) -> int:
             if name in task:
                 record[name] = task[name]
         tasks[task_id] = record
+        clear_worktree_release(worktrees, record.get("worktree"))
     return wake_launch_agent_and_report(task_id, when)
 
 
@@ -1023,6 +1554,23 @@ def run_task_from_arguments(arguments: argparse.Namespace) -> int:
             return 0
     when = planned_execution_time(is_now=arguments.now, at_text=arguments.at)
     return schedule_new_task(arguments.id, prompt_text, task_args, when, arguments.after)
+
+
+def add_worktree_commands(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
+    worktree_command = add_parser("worktree")
+    worktree_commands = worktree_command.add_subparsers(dest="worktree_command", required=True)
+    set_command_handler(worktree_commands.add_parser("list"), lambda _: list_worktrees())
+    remove_worktree_command = worktree_commands.add_parser("remove")
+    remove_worktree_command.add_argument("id")
+    set_command_handler(remove_worktree_command, lambda arguments: remove_worktree(arguments.id))
+    release_worktree_command = worktree_commands.add_parser("release")
+    release_worktree_command.add_argument("id")
+    set_command_handler(release_worktree_command, lambda arguments: release_worktree(arguments.id))
+    auto_remove_worktree_command = worktree_commands.add_parser("auto-remove")
+    auto_remove_group = auto_remove_worktree_command.add_mutually_exclusive_group(required=True)
+    auto_remove_group.add_argument("--after", type=int, metavar="DAYS")
+    auto_remove_group.add_argument("--off", action="store_true")
+    set_command_handler(auto_remove_worktree_command, set_worktree_auto_remove_from_arguments)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1074,6 +1622,7 @@ def build_parser() -> argparse.ArgumentParser:
         lambda arguments: retry_task(arguments.id, is_now=arguments.now, at_text=arguments.at),
     )
     set_command_handler(commands.add_parser("list"), lambda _: list_tasks())
+    add_worktree_commands(commands.add_parser)
     launch_agent_command = commands.add_parser("agent")
     launch_agent_command.add_argument("action", choices=("install", "uninstall"))
     set_command_handler(

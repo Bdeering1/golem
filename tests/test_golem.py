@@ -7,7 +7,7 @@ import select
 import shutil
 import signal
 import subprocess
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Never
 
@@ -174,6 +174,32 @@ def write_task(ledger_path, status, *, task_id=TASK_ID, **fields: object):
 def write_tasks(ledger_path, tasks):
     ledger_path.parent.mkdir(parents=True, exist_ok=True)
     ledger_path.write_text(json.dumps(tasks), encoding="utf-8")
+
+
+def write_worktrees(worktrees):
+    golem.worktree_ledger_path().write_text(json.dumps(worktrees), encoding="utf-8")
+
+
+def git_worktree(repository_path):
+    worktree_path = repository_path / "worktree"
+    subprocess.run(
+        ["/usr/bin/git", "worktree", "add", "-qb", "worktree", "worktree"],
+        cwd=repository_path,
+        check=True,
+    )
+    return worktree_path
+
+
+def golem_worktree_resource(repository_path, worktree_path, *, released_at=None):
+    resource = {
+        "owner": golem.WORKTREE_OWNER_GOLEM,
+        "repository": golem.git_common_directory(str(repository_path)),
+        "session_id": "fix-thing-session",
+        "created_at": datetime.now(UTC).isoformat(),
+    }
+    if released_at is not None:
+        resource["released_at"] = released_at
+    return {str(worktree_path.resolve()): resource}
 
 
 def read_tasks(ledger_path):
@@ -1522,3 +1548,379 @@ def test_waiting_dependent_of_succeeded_parent_keeps_launch_agent_running():
     }
 
     assert golem.has_pending_tasks(tasks)
+
+
+def test_claim_records_golem_worktree_resource_and_dependent_reuses_it(
+    installed_launch_agent, fake_commands, git_repository, ledger_path, monkeypatch
+):
+    monkeypatch.chdir(git_repository)
+    golem.main(["run", PARENT_ID, PARENT_PROMPT, "--now"])
+    golem.main(["run", CHILD_ID, CHILD_PROMPT, "--after", PARENT_ID])
+    parent = read_task(ledger_path, PARENT_ID)
+    common_directory = golem.git_common_directory(str(git_repository))
+    assert common_directory is not None
+    parent_worktree = Path(common_directory).parent / ".claude" / "worktrees" / parent["session_id"]
+    write_claude_output(
+        fake_commands,
+        CLAUDE_RESULT,
+        is_verbose=True,
+        working_directory=str(parent_worktree),
+    )
+
+    golem.main(["_execute", PARENT_ID, parent["session_id"]])
+
+    parent_worktree = read_task(ledger_path, PARENT_ID)["worktree"]
+    worktrees = golem.load_worktrees()
+    resource = worktrees[str(Path(parent_worktree).resolve())]
+    assert resource["owner"] == golem.WORKTREE_OWNER_GOLEM
+    assert resource["repository"] == golem.git_common_directory(str(git_repository))
+    assert read_task(ledger_path, CHILD_ID)["worktree"] == parent_worktree
+    tasks = read_tasks(ledger_path)
+    tasks[CHILD_ID]["status"] = golem.STATUS_FAILED
+    write_tasks(ledger_path, tasks)
+
+    assert golem.main(["retry", CHILD_ID, "--now"]) == 0
+    assert read_task(ledger_path, CHILD_ID)["worktree"] == parent_worktree
+    assert golem.load_worktrees()[str(Path(parent_worktree).resolve())] == resource
+
+
+@pytest.mark.parametrize(
+    ("owner", "expected_reason"),
+    [
+        pytest.param(None, "ownership unknown", id="legacy"),
+        pytest.param(golem.WORKTREE_OWNER_EXTERNAL, "not created by Golem", id="external"),
+    ],
+)
+def test_worktree_list_retains_non_golem_worktrees(
+    capsys, git_repository, ledger_path, owner, expected_reason
+):
+    worktree = git_worktree(git_repository)
+    write_task(ledger_path, golem.STATUS_DONE, worktree=str(worktree))
+    if owner is not None:
+        write_worktrees(
+            {
+                str(worktree.resolve()): {
+                    "owner": owner,
+                    "repository": golem.git_common_directory(str(git_repository)),
+                    "session_id": "other",
+                    "created_at": datetime.now(UTC).isoformat(),
+                }
+            }
+        )
+
+    assert golem.main(["worktree", "list"]) == 0
+
+    assert expected_reason in capsys.readouterr().out
+
+
+def test_worktree_remove_records_removal_and_preserves_branch(capsys, git_repository, ledger_path):
+    worktree = git_worktree(git_repository)
+    write_task(ledger_path, golem.STATUS_DONE, worktree=str(worktree))
+    write_worktrees(golem_worktree_resource(git_repository, worktree))
+
+    assert golem.main(["worktree", "remove", TASK_ID]) == 0
+    assert not worktree.exists()
+    assert golem.load_worktrees()[str(worktree.resolve())]["removed_at"]
+    assert golem.main(["worktree", "remove", TASK_ID]) == 0
+
+    assert "already removed" in capsys.readouterr().out
+    assert (
+        subprocess.run(
+            ["/usr/bin/git", "show-ref", "--verify", "--quiet", "refs/heads/worktree"],
+            cwd=git_repository,
+            check=False,
+        ).returncode
+        == 0
+    )
+
+
+def test_worktree_remove_retains_local_changes(git_repository, ledger_path):
+    worktree = git_worktree(git_repository)
+    changed_file = worktree / "changed"
+    changed_file.write_text("keep", encoding="utf-8")
+    write_task(ledger_path, golem.STATUS_DONE, worktree=str(worktree))
+    write_worktrees(golem_worktree_resource(git_repository, worktree))
+
+    assert golem.main(["worktree", "remove", TASK_ID]) == 1
+
+    assert changed_file.read_text(encoding="utf-8") == "keep"
+    assert "removal_error" not in golem.load_worktrees()[str(worktree.resolve())]
+
+
+def test_worktree_remove_retains_detached_worktree_with_unpublished_commit(
+    git_repository, ledger_path
+):
+    worktree = git_worktree(git_repository)
+    subprocess.run(["/usr/bin/git", "switch", "--detach"], cwd=worktree, check=True)
+    (worktree / "commit").write_text("keep", encoding="utf-8")
+    subprocess.run(["/usr/bin/git", "add", "commit"], cwd=worktree, check=True)
+    subprocess.run(
+        [
+            "/usr/bin/git",
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "user.name=Test",
+            "commit",
+            "-qm",
+            "unpublished",
+        ],
+        cwd=worktree,
+        check=True,
+    )
+    commit_id = subprocess.run(
+        ["/usr/bin/git", "rev-parse", "HEAD"],
+        cwd=worktree,
+        capture_output=True,
+        encoding="utf-8",
+        check=True,
+    ).stdout.strip()
+    write_task(ledger_path, golem.STATUS_DONE, worktree=str(worktree))
+    write_worktrees(golem_worktree_resource(git_repository, worktree))
+
+    assert golem.main(["worktree", "remove", TASK_ID]) == 1
+    assert worktree.is_dir()
+    assert (
+        subprocess.run(
+            ["/usr/bin/git", "log", "-1", "--format=%H"],
+            cwd=worktree,
+            capture_output=True,
+            encoding="utf-8",
+            check=True,
+        ).stdout.strip()
+        == commit_id
+    )
+
+
+def test_worktree_remove_retains_task_using_worktree_as_its_directory(git_repository, ledger_path):
+    worktree = git_worktree(git_repository)
+    write_tasks(
+        ledger_path,
+        {
+            TASK_ID: task_record(golem.STATUS_DONE, worktree=str(worktree)),
+            "scheduled": task_record(
+                golem.STATUS_SCHEDULED,
+                task_id="scheduled",
+                cwd=str(worktree / "nested"),
+            ),
+        },
+    )
+    write_worktrees(golem_worktree_resource(git_repository, worktree))
+
+    assert golem.main(["worktree", "remove", TASK_ID]) == 1
+    assert worktree.is_dir()
+
+
+def test_worktree_remove_does_not_release_a_refused_resource(git_repository, ledger_path):
+    worktree = git_worktree(git_repository)
+    write_task(ledger_path, golem.STATUS_NEEDS_REVIEW, worktree=str(worktree))
+    write_worktrees(golem_worktree_resource(git_repository, worktree))
+
+    assert golem.main(["worktree", "remove", TASK_ID]) == 1
+    assert "released_at" not in golem.load_worktrees()[str(worktree.resolve())]
+
+
+@pytest.mark.parametrize(
+    "status",
+    [golem.STATUS_SCHEDULED, golem.STATUS_WAITING, golem.STATUS_NEEDS_REVIEW],
+)
+def test_worktree_removal_retains_tasks_that_still_require_it(git_repository, ledger_path, status):
+    worktree = git_worktree(git_repository)
+    write_task(ledger_path, status, worktree=str(worktree))
+    write_worktrees(
+        golem_worktree_resource(git_repository, worktree, released_at=RESET_TIME.isoformat())
+    )
+
+    assert golem.main(["worktree", "remove", TASK_ID]) == 1
+    assert worktree.is_dir()
+
+
+def test_removed_worktree_is_reported_by_pickup_and_retry(
+    installed_launch_agent, git_repository, ledger_path
+):
+    worktree = git_worktree(git_repository)
+    write_task(ledger_path, golem.STATUS_NEEDS_REVIEW, worktree=str(worktree))
+    worktrees = golem_worktree_resource(git_repository, worktree)
+    write_worktrees(worktrees)
+    write_task(ledger_path, golem.STATUS_DONE, worktree=str(worktree))
+    assert golem.main(["worktree", "remove", TASK_ID]) == 0
+    write_task(ledger_path, golem.STATUS_NEEDS_REVIEW, worktree=str(worktree))
+
+    with pytest.raises(SystemExit, match="worktree was removed"):
+        golem.main(["pickup", TASK_ID])
+    write_task(ledger_path, golem.STATUS_FAILED, worktree=str(worktree))
+    with pytest.raises(SystemExit, match="worktree was removed"):
+        golem.main(["retry", TASK_ID, "--now"])
+
+
+@pytest.mark.parametrize(
+    ("retention_days", "released_ago", "expected_exists"),
+    [
+        pytest.param(None, timedelta(days=2), True, id="disabled"),
+        pytest.param(1, None, True, id="unreleased"),
+        pytest.param(1, timedelta(hours=23), True, id="before-retention"),
+        pytest.param(1, timedelta(days=1), False, id="at-retention"),
+    ],
+)
+def test_auto_remove_requires_release_and_retention(
+    git_repository, ledger_path, retention_days, released_ago, expected_exists
+):
+    worktree = git_worktree(git_repository)
+    write_task(ledger_path, golem.STATUS_DONE, worktree=str(worktree))
+    released_at = (
+        (datetime.now(UTC) - released_ago).isoformat() if released_ago is not None else None
+    )
+    write_worktrees(golem_worktree_resource(git_repository, worktree, released_at=released_at))
+    if retention_days is not None:
+        golem.set_worktree_auto_remove(retention_days)
+
+    golem.auto_remove_worktrees()
+    assert worktree.is_dir() is expected_exists
+
+
+@pytest.mark.parametrize("status", [golem.STATUS_SCHEDULED, golem.STATUS_WAITING])
+def test_worktree_removal_retains_inheriting_dependent(git_repository, ledger_path, status):
+    worktree = git_worktree(git_repository)
+    write_tasks(
+        ledger_path,
+        {
+            PARENT_ID: task_record(golem.STATUS_DONE, task_id=PARENT_ID, worktree=str(worktree)),
+            CHILD_ID: task_record(golem.STATUS_WAITING, task_id=CHILD_ID, after=PARENT_ID),
+        },
+    )
+    tasks = read_tasks(ledger_path)
+    tasks[CHILD_ID]["status"] = status
+    write_tasks(ledger_path, tasks)
+    write_worktrees(golem_worktree_resource(git_repository, worktree))
+
+    assert golem.main(["worktree", "remove", PARENT_ID]) == 1
+    assert worktree.is_dir()
+
+
+def test_worktree_list_retains_unreleased_retryable_task(capsys, git_repository, ledger_path):
+    worktree = git_worktree(git_repository)
+    write_task(ledger_path, golem.STATUS_FAILED, worktree=str(worktree))
+    write_worktrees(golem_worktree_resource(git_repository, worktree))
+
+    assert golem.main(["worktree", "list"]) == 0
+
+    assert "retained" in capsys.readouterr().out
+
+
+def test_worktree_remove_retains_directory_in_use(git_repository, ledger_path):
+    worktree = git_worktree(git_repository)
+    write_task(ledger_path, golem.STATUS_DONE, worktree=str(worktree))
+    write_worktrees(golem_worktree_resource(git_repository, worktree))
+    directory_lock_file = golem.acquire_lock(golem.directory_lock_path(str(worktree)))
+    assert directory_lock_file is not None
+    try:
+        assert golem.main(["worktree", "remove", TASK_ID]) == 1
+    finally:
+        golem.release_lock(directory_lock_file)
+
+    assert worktree.is_dir()
+
+
+@pytest.mark.parametrize(
+    ("reason", "is_process_missing", "is_removed"),
+    [
+        pytest.param(
+            "claude session fix-thing-session (pid 1 start 2026-10-16T00:00:00Z)",
+            True,
+            True,
+            id="stale-claude-lock",
+        ),
+        pytest.param(
+            "claude session fix-thing-session (pid 1 start 2026-10-16T00:00:00Z)",
+            False,
+            False,
+            id="live-claude-lock",
+        ),
+        pytest.param("unverified lock", False, False, id="unverified-lock"),
+    ],
+)
+def test_worktree_remove_respects_locks(
+    git_repository, ledger_path, monkeypatch, reason, is_process_missing, is_removed
+):
+    worktree = git_worktree(git_repository)
+    write_task(ledger_path, golem.STATUS_DONE, worktree=str(worktree))
+    write_worktrees(golem_worktree_resource(git_repository, worktree))
+    golem.subprocess.run(
+        [
+            "git",
+            "-C",
+            str(git_repository),
+            "worktree",
+            "lock",
+            "--reason",
+            reason,
+            str(worktree),
+        ],
+        check=True,
+    )
+
+    def report_process(_: int, __: int) -> None:
+        if is_process_missing:
+            raise ProcessLookupError
+
+    monkeypatch.setattr(golem.os, "kill", report_process)
+
+    assert golem.main(["worktree", "remove", TASK_ID]) == int(not is_removed)
+    assert worktree.is_dir() is not is_removed
+
+
+def test_worktree_remove_retains_bare_git_lock(git_repository, ledger_path):
+    worktree = git_worktree(git_repository)
+    write_task(ledger_path, golem.STATUS_DONE, worktree=str(worktree))
+    write_worktrees(golem_worktree_resource(git_repository, worktree))
+    golem.subprocess.run(
+        ["/usr/bin/git", "worktree", "lock", str(worktree)], cwd=git_repository, check=True
+    )
+
+    assert golem.main(["worktree", "remove", TASK_ID]) == 1
+    assert worktree.is_dir()
+
+
+def test_worktree_remove_records_git_removal_failure(
+    capsys, git_repository, ledger_path, monkeypatch
+):
+    worktree = git_worktree(git_repository)
+    write_task(ledger_path, golem.STATUS_DONE, worktree=str(worktree))
+    write_worktrees(golem_worktree_resource(git_repository, worktree))
+
+    def fail_removal(_: str, command: str, __: str) -> tuple[bool, str | None]:
+        if command == "remove":
+            return False, "could not remove"
+        return True, None
+
+    monkeypatch.setattr(golem, "git_worktree_command_result", fail_removal)
+
+    assert golem.main(["worktree", "remove", TASK_ID]) == 1
+    resource = golem.load_worktrees()[str(worktree.resolve())]
+    assert resource["removal_error"] == "could not remove"
+    assert "removed_at" not in resource
+    assert worktree.is_dir()
+    assert golem.main(["worktree", "list"]) == 0
+    assert "could not remove" in capsys.readouterr().out
+
+
+def test_pickup_revokes_worktree_release(git_repository, ledger_path):
+    worktree = git_worktree(git_repository)
+    write_task(ledger_path, golem.STATUS_NEEDS_REVIEW, worktree=str(worktree))
+    write_worktrees(
+        golem_worktree_resource(git_repository, worktree, released_at=RESET_TIME.isoformat())
+    )
+
+    assert golem.main(["pickup", TASK_ID]) == 0
+
+    assert "released_at" not in golem.load_worktrees()[str(worktree.resolve())]
+
+
+def test_close_does_not_release_worktree(git_repository, ledger_path):
+    worktree = git_worktree(git_repository)
+    write_task(ledger_path, golem.STATUS_NEEDS_REVIEW, worktree=str(worktree))
+    write_worktrees(golem_worktree_resource(git_repository, worktree))
+
+    assert golem.main(["close", TASK_ID]) == 0
+
+    assert "released_at" not in golem.load_worktrees()[str(worktree.resolve())]
