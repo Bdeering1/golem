@@ -358,10 +358,11 @@ def recorded_worktree(tasks: dict[str, Any], task: dict[str, Any]) -> tuple[str,
         if "worktree" in ancestor:
             return ancestor["worktree"], ancestor.get("worktree_pending") is True
         parent = tasks.get(ancestor.get("after", ""))
-        parent_task = cast("dict[str, Any]", parent)
-        if not isinstance(parent, dict) or parent_task.get("cwd") != task.get("cwd"):
+        if not isinstance(parent, dict):
             return None
         ancestor = cast("dict[str, Any]", parent)
+        if ancestor.get("cwd") != task.get("cwd"):
+            return None
 
 
 def worktree_resource(worktrees: dict[str, Any], worktree: str | None) -> dict[str, Any] | None:
@@ -545,23 +546,15 @@ def pickup(task_id: str, *agent_args: str, is_app: bool) -> int:
         task = cast("dict[str, Any]", tasks[task_id])
         if task.get("status") in {STATUS_SCHEDULED, STATUS_WAITING, STATUS_CANCELLED}:
             raise SystemExit(f"golem: task has not started: {task_id}")
-        recorded = recorded_worktree(tasks, task)
-        worktree = recorded[0] if recorded is not None else task.get("worktree")
-        missing_worktree = worktree_missing_message(
-            worktree,
-            worktrees,
-            is_worktree_pending=recorded is not None and recorded[1],
-        )
-        if missing_worktree is not None:
-            raise SystemExit(missing_worktree)
-        directory = directory_to_lock(task, worktree)
+        reject_missing_worktree(task, worktrees)
+        directory = directory_to_lock(task, task.get("worktree"))
         directory_lock_file = acquire_lock(directory_lock_path(directory))
         if directory_lock_file is None:
             raise SystemExit(f"golem: directory is busy: {directory}")
-        clear_worktree_release(worktrees, worktree)
+        clear_worktree_release(worktrees, task.get("worktree"))
         if task.get("status") == STATUS_NEEDS_REVIEW:
             task["status"] = STATUS_DONE
-        cwd = worktree if worktree is not None and Path(worktree).is_dir() else task_directory(task)
+        cwd = task_directory(task)
         session_id = cast("str", task["session_id"])
     if is_app:
         release_lock(directory_lock_file)
@@ -1226,7 +1219,6 @@ def git_worktree_command_result(
 
 def remove_locked_worktree(
     resource: dict[str, Any],
-    tasks: dict[str, Any],
     worktree: str,
     entries: list[list[str]],
 ) -> tuple[bool, list[str]]:
@@ -1234,8 +1226,6 @@ def remove_locked_worktree(
     entry = cast("list[str]", git_worktree_entry(entries, worktree))
     lock_reason = git_worktree_lock_reason(entry)
     if lock_reason is not None:
-        if not is_verified_stale_worktree_lock(resource, tasks, worktree, lock_reason):
-            return False, ["worktree lock is active"]
         is_unlocked, unlock_error = git_worktree_command_result(repository, "unlock", worktree)
         if not is_unlocked:
             return record_worktree_removal_error(resource, cast("str", unlock_error))
@@ -1270,7 +1260,7 @@ def remove_worktree_resource(
         )
         if reasons:
             return False, reasons
-        return remove_locked_worktree(resource, tasks, worktree, cast("list[list[str]]", entries))
+        return remove_locked_worktree(resource, worktree, cast("list[list[str]]", entries))
     finally:
         release_lock(directory_lock_file)
 

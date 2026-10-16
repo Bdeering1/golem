@@ -1739,9 +1739,7 @@ def test_removed_worktree_is_reported_by_pickup_and_retry(
     installed_launch_agent, git_repository, ledger_path
 ):
     worktree = git_worktree(git_repository)
-    write_task(ledger_path, golem.STATUS_NEEDS_REVIEW, worktree=str(worktree))
-    worktrees = golem_worktree_resource(git_repository, worktree)
-    write_worktrees(worktrees)
+    write_worktrees(golem_worktree_resource(git_repository, worktree))
     write_task(ledger_path, golem.STATUS_DONE, worktree=str(worktree))
     assert golem.main(["worktree", "remove", TASK_ID]) == 0
     write_task(ledger_path, golem.STATUS_NEEDS_REVIEW, worktree=str(worktree))
@@ -1785,12 +1783,9 @@ def test_worktree_removal_retains_inheriting_dependent(git_repository, ledger_pa
         ledger_path,
         {
             PARENT_ID: task_record(golem.STATUS_DONE, task_id=PARENT_ID, worktree=str(worktree)),
-            CHILD_ID: task_record(golem.STATUS_WAITING, task_id=CHILD_ID, after=PARENT_ID),
+            CHILD_ID: task_record(status, task_id=CHILD_ID, after=PARENT_ID),
         },
     )
-    tasks = read_tasks(ledger_path)
-    tasks[CHILD_ID]["status"] = status
-    write_tasks(ledger_path, tasks)
     write_worktrees(golem_worktree_resource(git_repository, worktree))
 
     assert golem.main(["worktree", "remove", PARENT_ID]) == 1
