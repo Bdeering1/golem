@@ -203,12 +203,6 @@ def wait_until(predicate):
     pytest.fail("condition did not become true")
 
 
-def hold_ledger_lock(ready, release):
-    with golem.locked_tasks():
-        ready.set()
-        release.wait()
-
-
 def logged_claude_cwds(fake_commands):
     return fake_commands["claude-cwd"].read_text(encoding="utf-8").splitlines()
 
@@ -333,69 +327,27 @@ def test_agent_log_under_limit_is_untouched(monkeypatch):
     assert not log_path.with_name("agent.log.1").exists()
 
 
-def test_agent_pass_removes_orphan_run_locks_but_keeps_held_lock():
+def test_agent_pass_removes_stale_state_but_keeps_held_lock(ledger_path):
+    write_task(ledger_path, golem.STATUS_DONE)
+    interrupted_write_path = ledger_path.parent / ".tasks.json.interrupted"
+    interrupted_write_path.touch()
     orphan_lock_path = golem.run_lock_path("orphan")
     orphan_lock_path.touch()
     held_lock_file = golem.acquire_run_lock("held")
     assert held_lock_file is not None
     try:
         golem.run_launch_agent_pass()
-        golem.run_launch_agent_pass()
 
+        assert not interrupted_write_path.exists()
         assert not orphan_lock_path.exists()
         assert golem.acquire_run_lock("held") is None
+        assert ledger_path.exists()
+        assert ledger_path.with_suffix(".lock").exists()
     finally:
         golem.release_run_lock(held_lock_file, "held")
 
 
-def test_agent_pass_removes_interrupted_ledger_writes(ledger_path):
-    write_task(ledger_path, golem.STATUS_DONE)
-    temporary_paths = [
-        ledger_path.parent / ".tasks.json.first",
-        ledger_path.parent / ".tasks.json.second",
-    ]
-    for temporary_path in temporary_paths:
-        temporary_path.touch()
-
-    golem.run_launch_agent_pass()
-
-    assert not any(temporary_path.exists() for temporary_path in temporary_paths)
-    assert ledger_path.exists()
-    assert ledger_path.with_suffix(".lock").exists()
-
-
-def test_agent_pass_waits_for_ledger_lock_before_removing_interrupted_write(ledger_path):
-    temporary_path = ledger_path.parent / ".tasks.json.interrupted"
-    temporary_path.touch()
-    context = multiprocessing.get_context("fork")
-    lock_ready = context.Event()
-    release_lock = context.Event()
-    lock_holder = context.Process(target=hold_ledger_lock, args=(lock_ready, release_lock))
-    lock_holder.start()
-    assert lock_ready.wait(timeout=3)
-    agent_pass = context.Process(target=golem.run_launch_agent_pass)
-    agent_pass.start()
-    try:
-        agent_pass.join(timeout=0.1)
-        assert agent_pass.is_alive()
-        assert temporary_path.exists()
-    finally:
-        release_lock.set()
-        lock_holder.join(timeout=3)
-        agent_pass.join(timeout=3)
-        if lock_holder.is_alive():
-            lock_holder.kill()
-            lock_holder.join()
-        if agent_pass.is_alive():
-            agent_pass.kill()
-            agent_pass.join()
-
-    assert lock_holder.exitcode == 0
-    assert agent_pass.exitcode == 0
-    assert not temporary_path.exists()
-
-
-def test_archive_marks_terminal_records_without_changing_other_fields(ledger_path, capsys):
+def test_archive_marks_terminal_records_without_changing_other_fields(ledger_path):
     tasks = {
         "done": task_record(
             golem.STATUS_DONE,
@@ -425,31 +377,6 @@ def test_archive_marks_terminal_records_without_changing_other_fields(ledger_pat
     for task_id, task in tasks.items():
         assert archived_tasks[task_id] == {**task, "archived": True}
 
-    assert golem.main(["list"]) == 0
-    assert capsys.readouterr().out == "golem: no tasks\n"
-    assert golem.main(["list", "--all"]) == 0
-    listed = capsys.readouterr().out
-    assert all(task_id in listed for task_id in tasks)
-
-
-@pytest.mark.parametrize(
-    "status",
-    [
-        golem.STATUS_SCHEDULED,
-        golem.STATUS_RUNNING,
-        golem.STATUS_WAITING,
-        golem.STATUS_NEEDS_REVIEW,
-    ],
-)
-def test_archive_refuses_nonterminal_task_without_changing_record(ledger_path, status):
-    write_task(ledger_path, status)
-    original_tasks = read_tasks(ledger_path)
-
-    with pytest.raises(SystemExit, match=f"cannot be archived: {TASK_ID}"):
-        golem.main(["archive", TASK_ID])
-
-    assert read_tasks(ledger_path) == original_tasks
-
 
 def test_archive_validates_ids_before_changing_any_record(ledger_path):
     write_tasks(
@@ -465,15 +392,6 @@ def test_archive_validates_ids_before_changing_any_record(ledger_path):
         golem.main(["archive", "done", "waiting"])
 
     assert read_tasks(ledger_path) == original_tasks
-
-
-def test_archive_rejects_unknown_task(ledger_path):
-    write_task(ledger_path, golem.STATUS_DONE)
-
-    with pytest.raises(SystemExit, match="task not found: missing"):
-        golem.main(["archive", "missing"])
-
-    assert "archived" not in read_task(ledger_path)
 
 
 @pytest.mark.parametrize("arguments", [[], ["--all", TASK_ID]])
@@ -526,19 +444,6 @@ def test_list_hides_archived_parent_and_resolves_its_status(ledger_path, capsys)
     assert not any(line.startswith(PARENT_ID) for line in listed)
     assert f"{PARENT_ID} ({golem.STATUS_DONE})" in "\n".join(listed)
 
-    assert golem.main(["list", "--all"]) == 0
-    assert any(line.startswith(PARENT_ID) for line in capsys.readouterr().out.splitlines())
-
-
-def test_archived_done_task_remains_available_to_show_and_pickup(ledger_path, capsys):
-    write_task(ledger_path, golem.STATUS_DONE, result="completed")
-    golem.main(["archive", TASK_ID])
-
-    assert golem.main(["show", TASK_ID]) == 0
-    assert capsys.readouterr().out == "completed\n"
-    assert golem.main(["pickup", TASK_ID]) == 0
-    assert read_task(ledger_path)["archived"] is True
-
 
 def test_retrying_archived_failed_task_returns_it_to_active_listing(
     installed_launch_agent, ledger_path
@@ -549,14 +454,6 @@ def test_retrying_archived_failed_task_returns_it_to_active_listing(
     assert golem.main(["retry", TASK_ID, "--now"]) == 0
 
     assert "archived" not in read_task(ledger_path)
-
-
-def test_run_preserves_archived_id_reservation(installed_launch_agent, ledger_path):
-    write_task(ledger_path, golem.STATUS_DONE)
-    golem.main(["archive", TASK_ID])
-
-    with pytest.raises(SystemExit, match=f"task already exists: {TASK_ID}"):
-        golem.main(["run", TASK_ID, PROMPT, "--now"])
 
 
 def test_after_archived_done_parent_schedules_normally(

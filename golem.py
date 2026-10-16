@@ -116,7 +116,9 @@ def run_lock_path(session_id: str) -> Path:
 
 def remove_orphan_run_locks() -> None:
     for lock_path in run_lock_directory().glob("*.lock"):
-        is_run_lock_free(lock_path.stem)
+        run_lock_file = acquire_run_lock(lock_path.stem)
+        if run_lock_file is not None:
+            release_run_lock(run_lock_file, lock_path.stem)
 
 
 def remove_interrupted_ledger_writes() -> None:
