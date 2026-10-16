@@ -1067,10 +1067,7 @@ def is_verified_stale_worktree_lock(
     session_id, process_id_text = match.groups()
     session_ids = {cast("str", resource["session_id"])}
     session_ids.update(
-        cast("str", task["session_id"])
-        for task in tasks.values()
-        if isinstance(task, dict)
-        and task_uses_worktree(tasks, cast("dict[str, Any]", task), worktree)
+        cast("str", tasks[task_id]["session_id"]) for task_id in worktree_task_ids(tasks, worktree)
     )
     if session_id not in session_ids:
         return False
@@ -1138,9 +1135,7 @@ def task_worktree_retention_reasons(
 ) -> list[str]:
     reasons: list[str] = []
     worktree_tasks = [
-        cast("dict[str, Any]", task)
-        for task in tasks.values()
-        if task_uses_worktree(tasks, task, worktree)
+        cast("dict[str, Any]", tasks[task_id]) for task_id in worktree_task_ids(tasks, worktree)
     ]
     if any(task.get("status") == STATUS_RUNNING for task in worktree_tasks):
         reasons.append("in use")
@@ -1151,7 +1146,7 @@ def task_worktree_retention_reasons(
         elif status == STATUS_NEEDS_REVIEW:
             reasons.append("task needs review")
         elif status in {STATUS_FAILED, STATUS_CANCELLED} and not is_released:
-            reasons.append("task can be retried; release or explicit remove allows removal")
+            reasons.append("task can be retried (release or remove to override)")
     return reasons
 
 
@@ -1333,11 +1328,12 @@ def list_worktrees() -> int:
     for worktree in sorted(worktree_paths):
         resource = worktree_resource(worktrees, worktree)
         reasons = worktree_retention_reasons(tasks, worktrees, worktree)
-        if resource is not None and isinstance(resource.get("removal_error"), str):
-            reasons.append(f"removal error: {resource['removal_error']}")
         state = "eligible" if not reasons else "retained"
         if resource is not None and resource.get("removed_at") is not None:
             state = "removed"
+            reasons = []
+        if resource is not None and isinstance(resource.get("removal_error"), str):
+            reasons.append(f"last removal error: {resource['removal_error']}")
         rows.append(
             (
                 worktree,
