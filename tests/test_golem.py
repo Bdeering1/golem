@@ -347,6 +347,45 @@ def test_agent_pass_removes_stale_state_but_keeps_held_lock(ledger_path):
         golem.release_run_lock(held_lock_file, "held")
 
 
+def test_agent_cleanup_waits_for_active_ledger_write(ledger_path, monkeypatch):
+    context = multiprocessing.get_context("fork")
+    write_started = context.Event()
+    finish_write = context.Event()
+    replace = Path.replace
+    flock = golem.fcntl.flock
+
+    def pause_write(temporary_path, task_ledger_path) -> Path:
+        write_started.set()
+        assert finish_write.wait(timeout=5)
+        return replace(temporary_path, task_ledger_path)
+
+    monkeypatch.setattr(Path, "replace", pause_write)
+    writer = context.Process(
+        target=lambda: golem.reserve_task(TASK_ID, task_record(golem.STATUS_DONE))
+    )
+    writer.start()
+
+    def resume_write(lock_file, operation) -> None:
+        if operation == golem.fcntl.LOCK_EX:
+            finish_write.set()
+        flock(lock_file, operation)
+
+    monkeypatch.setattr(golem.fcntl, "flock", resume_write)
+    try:
+        assert write_started.wait(timeout=3)
+
+        golem.run_launch_agent_pass()
+        writer.join(timeout=3)
+
+        assert writer.exitcode == 0
+        assert read_task(ledger_path)["status"] == golem.STATUS_DONE
+    finally:
+        finish_write.set()
+        if writer.is_alive():
+            writer.kill()
+        writer.join()
+
+
 def test_launch_agent_pass_leaves_running_executor_alone(
     installed_launch_agent, ledger_path, monkeypatch
 ):
