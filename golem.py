@@ -12,7 +12,7 @@ import tempfile
 import time
 import uuid
 from contextlib import contextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -27,6 +27,25 @@ STATUS_NEEDS_REVIEW = "needs_review"
 STATUS_FAILED = "failed"
 STATUS_DONE = "done"
 STATUS_CANCELLED = "cancelled"
+LIST_STATUS_ORDER = (
+    STATUS_NEEDS_REVIEW,
+    STATUS_FAILED,
+    STATUS_RUNNING,
+    STATUS_SCHEDULED,
+    STATUS_WAITING,
+    STATUS_DONE,
+    STATUS_CANCELLED,
+)
+STATUS_COLORS = {
+    STATUS_NEEDS_REVIEW: 33,
+    STATUS_FAILED: 196,
+    STATUS_RUNNING: 39,
+    STATUS_SCHEDULED: 208,
+    STATUS_WAITING: 141,
+    STATUS_DONE: 34,
+    STATUS_CANCELLED: 244,
+}
+ANSI_RESET = "\033[0m"
 SUCCEEDED_STATUSES = {STATUS_NEEDS_REVIEW, STATUS_DONE}
 AGENT_LOG_MAX_BYTES = 1024 * 1024
 USAGE_ERROR = "golem: usage lookup unavailable"
@@ -671,32 +690,70 @@ def cancel_task(task_id: str) -> int:
     return 0
 
 
+def display_directory(directory: str) -> str:
+    try:
+        return str(Path("~") / Path(directory).relative_to(Path.home()))
+    except ValueError:
+        return directory
+
+
+def display_due_at(due_at: str, today: date) -> str:
+    local_due_at = datetime.fromisoformat(due_at).astimezone()
+    day_text = f"{local_due_at:%b} {local_due_at.day}, {local_due_at:%Y}"
+    if local_due_at.date() == today:
+        day_text = "today"
+    elif local_due_at.date() == today + timedelta(days=1):
+        day_text = "tomorrow"
+    time_text = local_due_at.strftime("%I:%M%p").lstrip("0").lower()
+    return f"{day_text} {time_text} {local_due_at:%Z}"
+
+
+def is_color_enabled() -> bool:
+    return sys.stdout.isatty() and "NO_COLOR" not in os.environ and os.environ.get("TERM") != "dumb"
+
+
+def display_status(status: str, width: int, *, is_color: bool) -> str:
+    padded_status = status.ljust(width)
+    if not is_color:
+        return padded_status
+    return f"\033[38;5;{STATUS_COLORS[status]}m{padded_status}{ANSI_RESET}"
+
+
 def list_tasks() -> int:
     tasks = load_tasks()
     if not tasks:
         print("golem: no tasks")
         return 0
+    today = datetime.now().astimezone().date()
     rows = [
         (
             task_id,
             task["status"],
-            task["cwd"],
-            task.get("due_at", ""),
-            f"{task['after']} ({tasks[task['after']]['status']})"
-            if task["status"] == STATUS_WAITING
-            else "",
+            display_directory(task["cwd"]),
+            display_due_at(task["due_at"], today) if "due_at" in task else "",
+            task["after"] if task["status"] == STATUS_WAITING else "",
         )
         for task_id, task in tasks.items()
     ]
-    rows.sort(key=lambda row: (row[1] != STATUS_NEEDS_REVIEW, row[0]))
+    rows.sort(key=lambda row: (LIST_STATUS_ORDER.index(row[1]), row[0]))
     headers = ("ID", "STATUS", "DIRECTORY", "DUE AT", "AFTER")
     widths = [
         max(len(str(value)) for value in column) for column in zip(headers, *rows, strict=True)
     ]
-    for row in (headers, *rows):
+    is_color = is_color_enabled()
+    print(
+        "  ".join(value.ljust(width) for value, width in zip(headers, widths, strict=True)).rstrip()
+    )
+    for task_id, status, directory, due_at, after in rows:
         print(
             "  ".join(
-                str(value).ljust(width) for value, width in zip(row, widths, strict=True)
+                (
+                    task_id.ljust(widths[0]),
+                    display_status(status, widths[1], is_color=is_color),
+                    directory.ljust(widths[2]),
+                    due_at.ljust(widths[3]),
+                    after.ljust(widths[4]),
+                )
             ).rstrip()
         )
     return 0
