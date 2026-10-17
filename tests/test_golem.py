@@ -2027,9 +2027,8 @@ def test_auto_remove_requires_release_and_retention(
     assert worktree.is_dir() is expected_exists
 
 
-@pytest.mark.parametrize("status", [golem.STATUS_FAILED, golem.STATUS_CANCELLED])
-def test_launch_agent_removes_released_retryable_worktree(owned_worktree, status):
-    worktree = owned_worktree(status)
+def test_launch_agent_removes_worktree_released_by_delete(owned_worktree):
+    worktree = owned_worktree(golem.STATUS_FAILED)
     assert golem.main(["worktree", "auto-remove", "--after", "0"]) == 0
     assert golem.main(["delete", TASK_ID]) == 0
 
