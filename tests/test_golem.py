@@ -291,6 +291,101 @@ def test_launch_agent_pass_starts_due_tasks_and_fails_abandoned_ones(ledger_path
     assert read_tasks(ledger_path)["future"]["status"] == golem.STATUS_SCHEDULED
 
 
+def test_agent_log_copy_truncates_active_writer(monkeypatch):
+    monkeypatch.setattr(golem, "AGENT_LOG_MAX_BYTES", 16)
+    log_path = golem.agent_log_path()
+    first_content = "first log content\n"
+    second_content = "second log content\n"
+
+    with log_path.open("a", encoding="utf-8") as log_file:
+        log_file.write(first_content)
+        log_file.flush()
+
+        golem.run_launch_agent_pass()
+
+        assert log_path.with_name("agent.log.1").read_text(encoding="utf-8") == first_content
+        assert log_path.read_text(encoding="utf-8") == ""
+
+        log_file.write(second_content)
+        log_file.flush()
+        assert log_path.read_text(encoding="utf-8") == second_content
+
+        golem.run_launch_agent_pass()
+
+    assert log_path.with_name("agent.log.1").read_text(encoding="utf-8") == second_content
+    assert log_path.read_text(encoding="utf-8") == ""
+
+
+def test_agent_log_under_limit_is_untouched(monkeypatch):
+    monkeypatch.setattr(golem, "AGENT_LOG_MAX_BYTES", 16)
+    log_path = golem.agent_log_path()
+    log_path.write_text("under limit", encoding="utf-8")
+
+    golem.run_launch_agent_pass()
+
+    assert log_path.read_text(encoding="utf-8") == "under limit"
+    assert not log_path.with_name("agent.log.1").exists()
+
+
+def test_agent_pass_removes_stale_state_but_keeps_held_lock(ledger_path):
+    write_task(ledger_path, golem.STATUS_DONE)
+    interrupted_write_path = ledger_path.parent / ".tasks.json.interrupted"
+    interrupted_write_path.touch()
+    orphan_lock_path = golem.run_lock_path("orphan")
+    orphan_lock_path.touch()
+    held_lock_file = golem.acquire_run_lock("held")
+    assert held_lock_file is not None
+    try:
+        golem.run_launch_agent_pass()
+
+        assert not interrupted_write_path.exists()
+        assert not orphan_lock_path.exists()
+        assert golem.acquire_run_lock("held") is None
+        assert ledger_path.exists()
+        assert ledger_path.with_suffix(".lock").exists()
+    finally:
+        golem.release_run_lock(held_lock_file, "held")
+
+
+def test_agent_cleanup_waits_for_active_ledger_write(ledger_path, monkeypatch):
+    context = multiprocessing.get_context("fork")
+    write_started = context.Event()
+    finish_write = context.Event()
+    replace = Path.replace
+    flock = golem.fcntl.flock
+
+    def pause_write(temporary_path, task_ledger_path) -> Path:
+        write_started.set()
+        assert finish_write.wait(timeout=5)
+        return replace(temporary_path, task_ledger_path)
+
+    monkeypatch.setattr(Path, "replace", pause_write)
+    writer = context.Process(
+        target=lambda: golem.reserve_task(TASK_ID, task_record(golem.STATUS_DONE))
+    )
+    writer.start()
+
+    def resume_write(lock_file, operation) -> None:
+        if operation == golem.fcntl.LOCK_EX:
+            finish_write.set()
+        flock(lock_file, operation)
+
+    monkeypatch.setattr(golem.fcntl, "flock", resume_write)
+    try:
+        assert write_started.wait(timeout=3)
+
+        golem.run_launch_agent_pass()
+        writer.join(timeout=3)
+
+        assert writer.exitcode == 0
+        assert read_task(ledger_path)["status"] == golem.STATUS_DONE
+    finally:
+        finish_write.set()
+        if writer.is_alive():
+            writer.kill()
+        writer.join()
+
+
 def test_launch_agent_pass_leaves_running_executor_alone(
     installed_launch_agent, ledger_path, monkeypatch
 ):
