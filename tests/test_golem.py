@@ -224,7 +224,7 @@ def test_list_groups_visible_tasks_by_status_and_id(ledger_path, capsys):
         "done",
         "cancelled",
     ]
-    assert "parent (needs_review)" in list_row(output, "waiting")
+    assert list_row(output, "waiting").split()[-1] == "parent"
 
 
 def test_list_abbreviates_only_home_and_its_descendants(ledger_path, capsys, tmp_path):

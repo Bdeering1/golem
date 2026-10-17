@@ -736,9 +736,7 @@ def list_tasks() -> int:
             task["status"],
             display_directory(task["cwd"]),
             display_due_at(task["due_at"], today) if "due_at" in task else "",
-            f"{task['after']} ({tasks[task['after']]['status']})"
-            if task["status"] == STATUS_WAITING
-            else "",
+            task["after"] if task["status"] == STATUS_WAITING else "",
         )
         for task_id, task in tasks.items()
     ]
