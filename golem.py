@@ -443,14 +443,16 @@ def is_worktree_owner_verified(worktree: str, session_id: str) -> bool:
         return False
 
 
-def record_created_worktree_owner(task: dict[str, Any]) -> None:
+def record_created_worktree_owner(task_id: str, task: dict[str, Any]) -> None:
     worktree = cast("str", task["worktree"])
-    with locked_ledger() as (_, worktrees):
+    with locked_ledger() as (tasks, worktrees):
+        current_task = cast("dict[str, Any]", tasks.get(task_id, {}))
         resource = worktree_resource(worktrees, worktree)
         if (
-            resource is None
+            current_task.get("session_id") != task["session_id"]
+            or current_task.get("worktree") != worktree
+            or resource is None
             or resource.get("owner") != WORKTREE_OWNER_GOLEM
-            or resource.get("session_id") != task["session_id"]
             or git_common_directory(worktree) != resource.get("repository")
         ):
             return
@@ -568,7 +570,7 @@ def run_claude(
         check=False,
     )
     if is_creating_worktree:
-        record_created_worktree_owner(task)
+        record_created_worktree_owner(task_id, task)
     return claude_process.returncode, claude_process.stdout
 
 
@@ -1080,11 +1082,11 @@ def is_run_lock_free(session_id: str) -> bool:
 
 def task_uses_worktree(tasks: dict[str, Any], task: dict[str, Any], worktree: str) -> bool:
     recorded = recorded_worktree(tasks, task)
-    if recorded is not None and resolved_path(recorded[0]) == resolved_path(worktree):
-        return True
-    task_directory_path = Path(cast("str", task["cwd"])).resolve()
+    directories = [cast("str", task["cwd"])]
+    if recorded is not None:
+        directories.append(recorded[0])
     worktree_path = Path(worktree).resolve()
-    return task_directory_path == worktree_path or worktree_path in task_directory_path.parents
+    return any(Path(directory).resolve().is_relative_to(worktree_path) for directory in directories)
 
 
 def worktree_task_ids(tasks: dict[str, Any], worktree: str) -> list[str]:
@@ -1176,7 +1178,9 @@ def git_worktree_retention_reasons(
         reasons.append("index flags may hide local changes")
     branch_result = run_git(worktree, "symbolic-ref", "-q", "HEAD")
     if branch_result.returncode:
-        ref_result = run_git(worktree, "for-each-ref", "--contains", "HEAD")
+        ref_result = run_git(
+            repository, "for-each-ref", "--contains", matching_entry[1].removeprefix("HEAD ")
+        )
         if ref_result.returncode or not ref_result.stdout.strip():
             reasons.append("unpublished commits")
     return reasons
@@ -1236,6 +1240,11 @@ def worktree_retention_reasons(
             is_released=resource.get("released_at") is not None or is_released,
         )
     )
+    if entries is not None and any(
+        Path(worktree).resolve() in Path(entry[0].removeprefix("worktree ")).resolve().parents
+        for entry in entries
+    ):
+        reasons.append("contains another worktree")
     reasons.extend(git_worktree_retention_reasons(resource, tasks, worktree, entries))
     return list(dict.fromkeys(reasons))
 
