@@ -1439,12 +1439,7 @@ def delete_task(task_id: str, *, is_removing_worktree: bool) -> int:
                 raise SystemExit(f"golem: task has no worktree: {task_id}")
             resource = worktree_resource(worktrees, worktree)
             if resource is None or resource.get("removed_at") is None:
-                is_removed, reasons = remove_worktree_resource(
-                    remaining_tasks,
-                    worktrees,
-                    worktree,
-                    is_released=not worktree_task_ids(remaining_tasks, worktree),
-                )
+                is_removed, reasons = remove_worktree_resource(remaining_tasks, worktrees, worktree)
                 if not is_removed:
                     print(
                         f"golem: retained worktree: {worktree}: {'; '.join(reasons)}",
@@ -1457,7 +1452,7 @@ def delete_task(task_id: str, *, is_removing_worktree: bool) -> int:
                 task_uses_worktree(tasks, task, path)
                 and resource.get("owner") == WORKTREE_OWNER_GOLEM
                 and resource.get("removed_at") is None
-                and not worktree_task_ids(remaining_tasks, path)
+                and not worktree_task_ids(tasks, path)
             ):
                 resource.setdefault("released_at", datetime.now(UTC).isoformat())
         print(f"golem: deleted task: {task_id}")

@@ -1834,6 +1834,21 @@ def test_delete_releases_worktree_only_after_its_last_task(owned_worktree, ledge
     assert golem.load_worktrees()[str(worktree.resolve())]["released_at"]
 
 
+def test_delete_retains_worktree_shared_with_retryable_task(owned_worktree, ledger_path):
+    worktree = owned_worktree()
+    write_tasks(
+        ledger_path,
+        {
+            TASK_ID: task_record(golem.STATUS_DONE, worktree=str(worktree)),
+            "other": task_record(golem.STATUS_FAILED, task_id="other", worktree=str(worktree)),
+        },
+    )
+
+    assert golem.main(["delete", TASK_ID, "--remove-worktree"]) == 1
+    assert worktree.is_dir()
+    assert TASK_ID in golem.load_tasks()
+
+
 def test_delete_prints_session_and_worktree(capsys, owned_worktree, ledger_path):
     worktree = owned_worktree()
     task = read_task(ledger_path)
@@ -1879,10 +1894,15 @@ def test_delete_with_no_worktree_keeps_task(ledger_path):
     assert TASK_ID in golem.load_tasks()
 
 
-def test_delete_removes_worktree_and_preserves_branch(owned_worktree):
-    worktree = owned_worktree()
+@pytest.mark.parametrize(
+    "status",
+    [golem.STATUS_NEEDS_REVIEW, golem.STATUS_DONE, golem.STATUS_FAILED],
+)
+def test_delete_removes_task_and_worktree_and_preserves_branch(owned_worktree, status):
+    worktree = owned_worktree(status)
 
     assert golem.main(["delete", TASK_ID, "--remove-worktree"]) == 0
+    assert TASK_ID not in golem.load_tasks()
     assert not worktree.exists()
     assert golem.load_worktrees()[str(worktree.resolve())]["removed_at"]
     assert git_output(worktree.parent, "show-ref", "--verify", "refs/heads/worktree")
@@ -1976,18 +1996,6 @@ def test_delete_retains_nested_worktree(owned_worktree):
     assert golem.main(["delete", TASK_ID, "--remove-worktree"]) == 1
 
     assert changed_file.read_text(encoding="utf-8") == "keep"
-
-
-@pytest.mark.parametrize(
-    "status",
-    [golem.STATUS_NEEDS_REVIEW, golem.STATUS_DONE, golem.STATUS_FAILED],
-)
-def test_delete_removes_non_running_tasks_and_worktrees(owned_worktree, status):
-    worktree = owned_worktree(status)
-
-    assert golem.main(["delete", TASK_ID, "--remove-worktree"]) == 0
-    assert not worktree.exists()
-    assert TASK_ID not in golem.load_tasks()
 
 
 def test_removed_worktree_is_reported_by_pickup_and_retry(
