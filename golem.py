@@ -48,6 +48,7 @@ PERMISSION_ARGUMENTS = {
 VERBOSE_ARGUMENT = "--verbose"
 WORKTREE_OWNER_GOLEM = "golem"
 WORKTREE_OWNER_EXTERNAL = "external"
+WORKTREE_OWNER_MARKER = "golem-owner"
 CLAUDE_LOCK_PATTERN = re.compile(r"claude session (\S+) \(pid (\d+) start .+\)")
 
 
@@ -372,10 +373,12 @@ def worktree_resource(worktrees: dict[str, Any], worktree: str | None) -> dict[s
     return cast("dict[str, Any]", resource) if isinstance(resource, dict) else None
 
 
-def clear_worktree_release(worktrees: dict[str, Any], worktree: str | None) -> None:
-    resource = worktree_resource(worktrees, worktree)
-    if resource is not None:
-        resource.pop("released_at", None)
+def clear_worktree_release(
+    tasks: dict[str, Any], worktrees: dict[str, Any], task: dict[str, Any]
+) -> None:
+    for worktree, resource in worktrees.items():
+        if task_uses_worktree(tasks, task, worktree):
+            resource.pop("released_at", None)
 
 
 def new_worktree_resource(
@@ -411,6 +414,51 @@ def record_external_worktree(worktrees: dict[str, Any], worktree: str, session_i
             session_id,
         ),
     )
+
+
+def worktree_owner_marker_path(worktree: str) -> Path | None:
+    result = subprocess.run(
+        ["git", "-C", worktree, "rev-parse", "--absolute-git-dir"],
+        capture_output=True,
+        encoding="utf-8",
+        check=False,
+    )
+    if result.returncode:
+        return None
+    return Path(result.stdout.strip()) / WORKTREE_OWNER_MARKER
+
+
+def is_worktree_owner_verified(worktree: str, session_id: str) -> bool:
+    marker_path = worktree_owner_marker_path(worktree)
+    if marker_path is None:
+        return False
+    try:
+        return marker_path.read_text(encoding="utf-8") == session_id
+    except OSError:
+        return False
+
+
+def record_created_worktree_owner(task: dict[str, Any]) -> None:
+    worktree = cast("str", task["worktree"])
+    with locked_ledger() as (_, worktrees):
+        resource = worktree_resource(worktrees, worktree)
+        if (
+            resource is None
+            or resource.get("owner") != WORKTREE_OWNER_GOLEM
+            or resource.get("session_id") != task["session_id"]
+            or git_common_directory(worktree) != resource.get("repository")
+        ):
+            return
+        marker_path = worktree_owner_marker_path(worktree)
+        if marker_path is None:
+            return
+        try:
+            with marker_path.open("x", encoding="utf-8") as marker_file:
+                marker_file.write(cast("str", resource["session_id"]))
+        except FileExistsError:
+            return
+        except OSError as error:
+            print(f"golem: could not record worktree ownership: {error}", file=sys.stderr)
 
 
 def resolved_worktree(tasks: dict[str, Any], task: dict[str, Any]) -> tuple[str | None, bool]:
@@ -494,8 +542,9 @@ def run_claude(
     if not has_agent_argument(agent_args, NAME_ARGUMENTS):
         default_args += ["--name", task_id]
     worktree = task.get("worktree")
-    if worktree is not None and not Path(worktree).is_dir():
-        default_args += ["--worktree", Path(worktree).name]
+    is_creating_worktree = worktree is not None and not Path(worktree).is_dir()
+    if is_creating_worktree:
+        default_args += ["--worktree", Path(cast("str", worktree)).name]
     if not has_agent_argument(agent_args, PERMISSION_ARGUMENTS):
         default_args.append("--dangerously-skip-permissions")
     claude_process = subprocess.run(
@@ -513,6 +562,8 @@ def run_claude(
         pass_fds=lock_file_descriptors,
         check=False,
     )
+    if is_creating_worktree:
+        record_created_worktree_owner(task)
     return claude_process.returncode, claude_process.stdout
 
 
@@ -551,7 +602,7 @@ def pickup(task_id: str, *agent_args: str, is_app: bool) -> int:
         directory_lock_file = acquire_lock(directory_lock_path(directory))
         if directory_lock_file is None:
             raise SystemExit(f"golem: directory is busy: {directory}")
-        clear_worktree_release(worktrees, task.get("worktree"))
+        clear_worktree_release(tasks, worktrees, task)
         if task.get("status") == STATUS_NEEDS_REVIEW:
             task["status"] = STATUS_DONE
         cwd = task_directory(task)
@@ -887,8 +938,11 @@ def claim_task(
     if recorded is None and worktree is not None:
         repository = git_common_directory(task["cwd"])
         if repository is not None:
-            record_golem_worktree(worktrees, worktree, repository, session_id)
-    clear_worktree_release(worktrees, worktree)
+            if task.get("worktree_pending") is True:
+                record_golem_worktree(worktrees, worktree, repository, session_id)
+            else:
+                record_external_worktree(worktrees, worktree, session_id)
+    clear_worktree_release(tasks, worktrees, task)
     task["status"] = STATUS_RUNNING
     return task.copy(), run_lock_file, directory_lock_file
 
@@ -1098,6 +1152,8 @@ def git_worktree_retention_reasons(
         return ["not a registered worktree"]
     if entries[0] == matching_entry:
         return ["original checkout"]
+    if not is_worktree_owner_verified(worktree, cast("str", resource["session_id"])):
+        return ["ownership cannot be verified"]
     reasons: list[str] = []
     lock_reason = git_worktree_lock_reason(matching_entry)
     if lock_reason is not None and not is_verified_stale_worktree_lock(
@@ -1105,13 +1161,23 @@ def git_worktree_retention_reasons(
     ):
         reasons.append("worktree lock is active")
     status_result = subprocess.run(
-        ["git", "-C", worktree, "status", "--porcelain"],
+        ["git", "-C", worktree, "status", "--porcelain", "--untracked-files=all"],
         capture_output=True,
         encoding="utf-8",
         check=False,
     )
     if status_result.returncode or status_result.stdout:
         reasons.append("local changes")
+    index_result = subprocess.run(
+        ["git", "-C", worktree, "ls-files", "-v", "-z"],
+        capture_output=True,
+        encoding="utf-8",
+        check=False,
+    )
+    if index_result.returncode or any(
+        entry[:1].islower() or entry.startswith("S ") for entry in index_result.stdout.split("\0")
+    ):
+        reasons.append("index flags may hide local changes")
     branch_result = subprocess.run(
         ["git", "-C", worktree, "symbolic-ref", "-q", "HEAD"],
         capture_output=True,
@@ -1170,12 +1236,20 @@ def worktree_retention_reasons(
     if resource.get("owner") != WORKTREE_OWNER_GOLEM:
         return ["ownership unknown"]
     reasons: list[str] = []
+    directories = {
+        resolved_path(directory_to_lock(tasks[task_id], tasks[task_id].get("worktree")))
+        for task_id in worktree_task_ids(tasks, worktree)
+    }
     if is_checking_directory_lock:
-        directory_lock_file = acquire_lock(directory_lock_path(worktree))
+        directories.add(resolved_path(worktree))
+    else:
+        directories.discard(resolved_path(worktree))
+    for directory in directories:
+        directory_lock_file = acquire_lock(directory_lock_path(directory))
         if directory_lock_file is None:
             reasons.append("in use")
-        else:
-            release_lock(directory_lock_file)
+            break
+        release_lock(directory_lock_file)
     reasons.extend(
         task_worktree_retention_reasons(
             tasks,
@@ -1199,7 +1273,16 @@ def git_worktree_command_result(
     repository: str, command: str, worktree: str
 ) -> tuple[bool, str | None]:
     result = subprocess.run(
-        ["git", "-C", repository, "worktree", command, worktree],
+        [
+            "git",
+            "-c",
+            "status.showUntrackedFiles=all",
+            "-C",
+            repository,
+            "worktree",
+            command,
+            worktree,
+        ],
         capture_output=True,
         encoding="utf-8",
         check=False,
@@ -1494,7 +1577,7 @@ def retry_task(task_id: str, *, is_now: bool, at_text: str | None) -> int:
             if name in task:
                 record[name] = task[name]
         tasks[task_id] = record
-        clear_worktree_release(worktrees, record.get("worktree"))
+        clear_worktree_release(tasks, worktrees, record)
     return wake_launch_agent_and_report(task_id, when)
 
 
