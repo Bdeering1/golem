@@ -691,26 +691,21 @@ def cancel_task(task_id: str) -> int:
 
 
 def display_directory(directory: str) -> str:
-    home_directory = Path.home()
     try:
-        relative_directory = Path(directory).relative_to(home_directory)
+        return str(Path("~") / Path(directory).relative_to(Path.home()))
     except ValueError:
         return directory
-    if relative_directory == Path():
-        return "~"
-    if ".." in relative_directory.parts:
-        return directory
-    return str(Path("~") / relative_directory)
 
 
 def display_due_at(due_at: str, today: date) -> str:
     local_due_at = datetime.fromisoformat(due_at).astimezone()
-    time_text = local_due_at.strftime("%I:%M%p").lstrip("0").lower()
+    day_text = f"{local_due_at:%b} {local_due_at.day}, {local_due_at:%Y}"
     if local_due_at.date() == today:
-        return f"today {time_text} {local_due_at:%Z}"
-    if local_due_at.date() == today + timedelta(days=1):
-        return f"tomorrow {time_text} {local_due_at:%Z}"
-    return f"{local_due_at:%b} {local_due_at.day}, {local_due_at:%Y} {time_text} {local_due_at:%Z}"
+        day_text = "today"
+    elif local_due_at.date() == today + timedelta(days=1):
+        day_text = "tomorrow"
+    time_text = local_due_at.strftime("%I:%M%p").lstrip("0").lower()
+    return f"{day_text} {time_text} {local_due_at:%Z}"
 
 
 def is_color_enabled() -> bool:

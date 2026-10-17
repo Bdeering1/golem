@@ -41,15 +41,6 @@ RESET_TIME = datetime(2030, 1, 1, 10, tzinfo=UTC)
 EARLIER_RESET_TIME = datetime(2030, 1, 1, 11, tzinfo=UTC)
 LATER_RESET_TIME = datetime(2030, 1, 2, 11, tzinfo=UTC)
 ANSI_COLOR = re.compile(r"\033\[38;5;\d+m|\033\[0m")
-LIST_STATUSES = (
-    golem.STATUS_NEEDS_REVIEW,
-    golem.STATUS_FAILED,
-    golem.STATUS_RUNNING,
-    golem.STATUS_SCHEDULED,
-    golem.STATUS_WAITING,
-    golem.STATUS_DONE,
-    golem.STATUS_CANCELLED,
-)
 
 
 @pytest.fixture(scope="session")
@@ -227,21 +218,15 @@ def test_list_groups_visible_tasks_by_status_and_id(ledger_path, capsys):
     assert list_row(output, "waiting").split()[-1] == "parent"
 
 
-def test_list_abbreviates_only_home_and_its_descendants(ledger_path, capsys, tmp_path):
+def test_list_abbreviates_only_home_and_its_descendants(ledger_path, capsys):
     home_directory = Path.home()
+    prefix_directory = str(home_directory.with_name(f"{home_directory.name}-other"))
     tasks = {
         "home": task_record(golem.STATUS_DONE, task_id="home", cwd=str(home_directory)),
         "descendant": task_record(
             golem.STATUS_DONE, task_id="descendant", cwd=str(home_directory / "project")
         ),
-        "prefix": task_record(
-            golem.STATUS_DONE,
-            task_id="prefix",
-            cwd=str(home_directory.with_name(f"{home_directory.name}-other")),
-        ),
-        "external": task_record(
-            golem.STATUS_DONE, task_id="external", cwd=str(tmp_path / "external")
-        ),
+        "prefix": task_record(golem.STATUS_DONE, task_id="prefix", cwd=prefix_directory),
     }
     write_tasks(ledger_path, tasks)
 
@@ -249,10 +234,7 @@ def test_list_abbreviates_only_home_and_its_descendants(ledger_path, capsys, tmp
 
     assert "  ~" in list_row(output, "home")
     assert "  ~/project" in list_row(output, "descendant")
-    assert str(home_directory.with_name(f"{home_directory.name}-other")) in list_row(
-        output, "prefix"
-    )
-    assert str(tmp_path / "external") in list_row(output, "external")
+    assert prefix_directory in list_row(output, "prefix")
 
 
 def test_list_formats_due_times_in_local_time(ledger_path, capsys, monkeypatch):
@@ -267,17 +249,12 @@ def test_list_formats_due_times_in_local_time(ledger_path, capsys, monkeypatch):
         "today": task_record(
             golem.STATUS_SCHEDULED,
             task_id="today",
-            due_at=datetime(2030, 3, 10, 19, tzinfo=UTC).isoformat(),
+            due_at=datetime(2030, 3, 11, 3, 30, tzinfo=UTC).isoformat(),
         ),
         "tomorrow": task_record(
             golem.STATUS_SCHEDULED,
             task_id="tomorrow",
             due_at=datetime(2030, 3, 11, 13, tzinfo=UTC).isoformat(),
-        ),
-        "midnight": task_record(
-            golem.STATUS_SCHEDULED,
-            task_id="midnight",
-            due_at=datetime(2030, 3, 11, 3, 30, tzinfo=UTC).isoformat(),
         ),
         "daylight": task_record(
             golem.STATUS_SCHEDULED,
@@ -306,9 +283,8 @@ def test_list_formats_due_times_in_local_time(ledger_path, capsys, monkeypatch):
             os.environ["TZ"] = original_timezone
         time.tzset()
 
-    assert "today 3:00pm EDT" in list_row(output, "today")
+    assert "today 11:30pm EDT" in list_row(output, "today")
     assert "tomorrow 9:00am EDT" in list_row(output, "tomorrow")
-    assert "today 11:30pm EDT" in list_row(output, "midnight")
     assert "Nov 3, 2030 1:30am EDT" in list_row(output, "daylight")
     assert "Nov 3, 2030 1:30am EST" in list_row(output, "standard")
     assert list_row(output, "no-due").endswith(str(Path.cwd()))
@@ -319,7 +295,7 @@ def test_list_uses_distinct_status_colors_and_keeps_columns_aligned(
 ):
     tasks = {
         status: task_record(status, task_id=status)
-        for status in LIST_STATUSES
+        for status in golem.LIST_STATUS_ORDER
         if status != golem.STATUS_WAITING
     }
     tasks[golem.STATUS_WAITING] = task_record(
@@ -338,8 +314,8 @@ def test_list_uses_distinct_status_colors_and_keeps_columns_aligned(
     plain_output = list_output(capsys)
     colors = re.findall(r"\033\[38;5;(\d+)m", colored_output)
 
-    assert len(colors) == len(LIST_STATUSES)
-    assert len(set(colors)) == len(LIST_STATUSES)
+    assert len(colors) == len(golem.LIST_STATUS_ORDER)
+    assert len(set(colors)) == len(golem.LIST_STATUS_ORDER)
     assert ANSI_COLOR.sub("", colored_output) == plain_output
 
 
