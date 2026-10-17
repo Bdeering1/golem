@@ -5,6 +5,7 @@ import json
 import os
 import plistlib
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -27,6 +28,7 @@ STATUS_FAILED = "failed"
 STATUS_DONE = "done"
 STATUS_CANCELLED = "cancelled"
 SUCCEEDED_STATUSES = {STATUS_NEEDS_REVIEW, STATUS_DONE}
+AGENT_LOG_MAX_BYTES = 1024 * 1024
 USAGE_ERROR = "golem: usage lookup unavailable"
 USAGE_TIMEOUT_SECONDS = 30
 USAGE_LIMIT_HTTP_STATUS = 429
@@ -81,6 +83,10 @@ def load_json(path: Path) -> dict[str, Any]:
     return cast("dict[str, Any]", json.loads(path.read_text(encoding="utf-8")))
 
 
+def ledger_temporary_prefix(task_ledger_path: Path) -> str:
+    return f".{task_ledger_path.name}."
+
+
 def load_tasks() -> dict[str, Any]:
     return load_json(ledger_path())
 
@@ -92,7 +98,7 @@ def load_worktrees() -> dict[str, Any]:
 def save_json(path: Path, value: dict[str, Any]) -> None:
     file_descriptor, temporary_name = tempfile.mkstemp(
         dir=path.parent,
-        prefix=f".{path.name}.",
+        prefix=ledger_temporary_prefix(path),
         text=True,
     )
     temporary_path = Path(temporary_name)
@@ -137,10 +143,29 @@ def locked_tasks() -> Generator[dict[str, Any]]:
         yield tasks
 
 
-def run_lock_path(session_id: str) -> Path:
+def run_lock_directory() -> Path:
     lock_directory = ledger_path().parent / "running"
     lock_directory.mkdir(exist_ok=True)
-    return lock_directory / f"{session_id}.lock"
+    return lock_directory
+
+
+def run_lock_path(session_id: str) -> Path:
+    return run_lock_directory() / f"{session_id}.lock"
+
+
+def remove_orphan_run_locks() -> None:
+    for lock_path in run_lock_directory().glob("*.lock"):
+        run_lock_file = acquire_run_lock(lock_path.stem)
+        if run_lock_file is not None:
+            release_run_lock(run_lock_file, lock_path.stem)
+
+
+def remove_interrupted_ledger_writes() -> None:
+    task_ledger_path = ledger_path()
+    for temporary_path in task_ledger_path.parent.glob(
+        f"{ledger_temporary_prefix(task_ledger_path)}*"
+    ):
+        temporary_path.unlink(missing_ok=True)
 
 
 def acquire_lock(lock_path: Path) -> io.TextIOWrapper | None:
@@ -224,8 +249,19 @@ def golem_command() -> list[str]:
     return [str(Path(sys.executable).absolute()), str(Path(__file__).resolve())]
 
 
+def agent_log_path() -> Path:
+    return ledger_path().parent / "agent.log"
+
+
+def rotate_agent_log() -> None:
+    log_path = agent_log_path()
+    if log_path.exists() and log_path.stat().st_size > AGENT_LOG_MAX_BYTES:
+        shutil.copyfile(log_path, log_path.with_name(f"{log_path.name}.1"))
+        log_path.write_text("", encoding="utf-8")
+
+
 def launch_agent_plist_data() -> bytes:
-    log_path = str(ledger_path().parent / "agent.log")
+    log_path = str(agent_log_path())
     plist: dict[str, object] = {
         "Label": LAUNCH_AGENT_LABEL,
         "ProgramArguments": ["/usr/bin/caffeinate", "-is", *golem_command(), "_agent"],
@@ -1359,9 +1395,12 @@ def is_known_directory_busy(tasks: dict[str, Any], task: dict[str, Any]) -> bool
 
 
 def run_launch_agent_pass() -> list[subprocess.Popen[bytes]]:
+    rotate_agent_log()
     now = datetime.now(UTC)
     due_tasks: list[tuple[str, dict[str, Any]]] = []
     with locked_tasks() as tasks:
+        remove_orphan_run_locks()
+        remove_interrupted_ledger_writes()
         for task_id, task in tasks.items():
             if task["status"] == STATUS_RUNNING:
                 if is_run_lock_free(task["session_id"]):
@@ -1692,7 +1731,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     set_command_handler(commands.add_parser("list"), lambda _: list_tasks())
     add_worktree_commands(commands.add_parser)
-    launch_agent_command = commands.add_parser("agent")
+    launch_agent_command = commands.add_parser(
+        "agent",
+        description=(
+            "Agent logs are written to agent.log in the state directory; when it exceeds "
+            f"{AGENT_LOG_MAX_BYTES // 1024**2} MiB it is copied to agent.log.1, replacing "
+            "the previous copy, and truncated."
+        ),
+    )
     launch_agent_command.add_argument("action", choices=("install", "uninstall"))
     set_command_handler(
         launch_agent_command,
