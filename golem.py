@@ -358,35 +358,24 @@ def resolved_path(path: str) -> str:
     return str(Path(path).resolve())
 
 
-def git_common_directory(directory: str) -> str | None:
-    result = subprocess.run(
-        [
-            "git",
-            "-C",
-            directory,
-            "rev-parse",
-            "--path-format=absolute",
-            "--git-common-dir",
-        ],
+def run_git(directory: str, *arguments: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "-C", directory, *arguments],
         capture_output=True,
         encoding="utf-8",
         check=False,
     )
+
+
+def git_common_directory(directory: str) -> str | None:
+    result = run_git(directory, "rev-parse", "--path-format=absolute", "--git-common-dir")
     if result.returncode:
         return None
     return result.stdout.strip()
 
 
 def git_has_head(directory: str) -> bool:
-    return (
-        subprocess.run(
-            ["git", "-C", directory, "rev-parse", "--verify", "HEAD"],
-            capture_output=True,
-            encoding="utf-8",
-            check=False,
-        ).returncode
-        == 0
-    )
+    return run_git(directory, "rev-parse", "--verify", "HEAD").returncode == 0
 
 
 def recorded_worktree(tasks: dict[str, Any], task: dict[str, Any]) -> tuple[str, bool] | None:
@@ -417,11 +406,16 @@ def clear_worktree_release(
             resource.pop("released_at", None)
 
 
-def new_worktree_resource(
-    owner: str,
-    repository: str | None,
+def record_worktree_resource(
+    worktrees: dict[str, Any],
+    worktree: str,
     session_id: str,
-) -> dict[str, Any]:
+    *,
+    owner: str = WORKTREE_OWNER_EXTERNAL,
+    repository: str | None = None,
+) -> None:
+    if owner == WORKTREE_OWNER_EXTERNAL:
+        repository = git_common_directory(worktree)
     resource: dict[str, Any] = {
         "owner": owner,
         "session_id": session_id,
@@ -429,36 +423,11 @@ def new_worktree_resource(
     }
     if repository is not None:
         resource["repository"] = repository
-    return resource
-
-
-def record_golem_worktree(
-    worktrees: dict[str, Any], worktree: str, repository: str, session_id: str
-) -> None:
-    worktrees.setdefault(
-        resolved_path(worktree),
-        new_worktree_resource(WORKTREE_OWNER_GOLEM, repository, session_id),
-    )
-
-
-def record_external_worktree(worktrees: dict[str, Any], worktree: str, session_id: str) -> None:
-    worktrees.setdefault(
-        resolved_path(worktree),
-        new_worktree_resource(
-            WORKTREE_OWNER_EXTERNAL,
-            git_common_directory(worktree),
-            session_id,
-        ),
-    )
+    worktrees.setdefault(resolved_path(worktree), resource)
 
 
 def worktree_owner_marker_path(worktree: str) -> Path | None:
-    result = subprocess.run(
-        ["git", "-C", worktree, "rev-parse", "--absolute-git-dir"],
-        capture_output=True,
-        encoding="utf-8",
-        check=False,
-    )
+    result = run_git(worktree, "rev-parse", "--absolute-git-dir")
     if result.returncode:
         return None
     return Path(result.stdout.strip()) / WORKTREE_OWNER_MARKER
@@ -890,7 +859,7 @@ def record_worktree(task_id: str, worktree: str) -> None:
         tasks[task_id]["worktree"] = worktree
         tasks[task_id].pop("worktree_pending", None)
         task = cast("dict[str, Any]", tasks[task_id])
-        record_external_worktree(worktrees, worktree, cast("str", task["session_id"]))
+        record_worktree_resource(worktrees, worktree, cast("str", task["session_id"]))
 
 
 def clear_recorded_worktree_pending(task_id: str) -> None:
@@ -975,9 +944,15 @@ def claim_task(
         repository = git_common_directory(task["cwd"])
         if repository is not None:
             if task.get("worktree_pending") is True:
-                record_golem_worktree(worktrees, worktree, repository, session_id)
+                record_worktree_resource(
+                    worktrees,
+                    worktree,
+                    session_id,
+                    owner=WORKTREE_OWNER_GOLEM,
+                    repository=repository,
+                )
             else:
-                record_external_worktree(worktrees, worktree, session_id)
+                record_worktree_resource(worktrees, worktree, session_id)
     clear_worktree_release(tasks, worktrees, task)
     task["status"] = STATUS_RUNNING
     return task.copy(), run_lock_file, directory_lock_file
@@ -1122,12 +1097,7 @@ def worktree_task_ids(tasks: dict[str, Any], worktree: str) -> list[str]:
 
 
 def git_worktree_entries(repository: str) -> list[list[str]] | None:
-    result = subprocess.run(
-        ["git", "-C", repository, "worktree", "list", "--porcelain"],
-        capture_output=True,
-        encoding="utf-8",
-        check=False,
-    )
+    result = run_git(repository, "worktree", "list", "--porcelain")
     if result.returncode:
         return None
     return [entry.splitlines() for entry in result.stdout.strip().split("\n\n") if entry]
@@ -1196,37 +1166,17 @@ def git_worktree_retention_reasons(
         resource, tasks, worktree, lock_reason
     ):
         reasons.append("worktree lock is active")
-    status_result = subprocess.run(
-        ["git", "-C", worktree, "status", "--porcelain", "--untracked-files=all"],
-        capture_output=True,
-        encoding="utf-8",
-        check=False,
-    )
+    status_result = run_git(worktree, "status", "--porcelain", "--untracked-files=all")
     if status_result.returncode or status_result.stdout:
         reasons.append("local changes")
-    index_result = subprocess.run(
-        ["git", "-C", worktree, "ls-files", "-v", "-z"],
-        capture_output=True,
-        encoding="utf-8",
-        check=False,
-    )
+    index_result = run_git(worktree, "ls-files", "-v", "-z")
     if index_result.returncode or any(
         entry[:1].islower() or entry.startswith("S ") for entry in index_result.stdout.split("\0")
     ):
         reasons.append("index flags may hide local changes")
-    branch_result = subprocess.run(
-        ["git", "-C", worktree, "symbolic-ref", "-q", "HEAD"],
-        capture_output=True,
-        encoding="utf-8",
-        check=False,
-    )
+    branch_result = run_git(worktree, "symbolic-ref", "-q", "HEAD")
     if branch_result.returncode:
-        ref_result = subprocess.run(
-            ["git", "-C", worktree, "for-each-ref", "--contains", "HEAD"],
-            capture_output=True,
-            encoding="utf-8",
-            check=False,
-        )
+        ref_result = run_git(worktree, "for-each-ref", "--contains", "HEAD")
         if ref_result.returncode or not ref_result.stdout.strip():
             reasons.append("unpublished commits")
     return reasons
@@ -1254,15 +1204,12 @@ def task_worktree_retention_reasons(
 
 def worktree_retention_reasons(
     tasks: dict[str, Any],
-    worktrees: dict[str, Any],
+    resource: dict[str, Any] | None,
     worktree: str,
+    entries: list[list[str]] | None,
     *,
-    is_checking_directory_lock: bool = True,
     is_released: bool = False,
-    worktree_entries: list[list[str]] | None = None,
-    is_worktree_entries_loaded: bool = False,
 ) -> list[str]:
-    resource = worktree_resource(worktrees, worktree)
     if resource is None:
         return ["ownership unknown"]
     if resource.get("owner") == WORKTREE_OWNER_EXTERNAL:
@@ -1275,11 +1222,7 @@ def worktree_retention_reasons(
     directories = {
         resolved_path(directory_to_lock(tasks[task_id], tasks[task_id].get("worktree")))
         for task_id in worktree_task_ids(tasks, worktree)
-    }
-    if is_checking_directory_lock:
-        directories.add(resolved_path(worktree))
-    else:
-        directories.discard(resolved_path(worktree))
+    } - {resolved_path(worktree)}
     for directory in directories:
         directory_lock_file = acquire_lock(directory_lock_path(directory))
         if directory_lock_file is None:
@@ -1293,10 +1236,7 @@ def worktree_retention_reasons(
             is_released=resource.get("released_at") is not None or is_released,
         )
     )
-    if not is_worktree_entries_loaded:
-        repository = resource.get("repository")
-        worktree_entries = git_worktree_entries(repository) if isinstance(repository, str) else None
-    reasons.extend(git_worktree_retention_reasons(resource, tasks, worktree, worktree_entries))
+    reasons.extend(git_worktree_retention_reasons(resource, tasks, worktree, entries))
     return list(dict.fromkeys(reasons))
 
 
@@ -1305,78 +1245,61 @@ def record_worktree_removal_error(resource: dict[str, Any], error: str) -> tuple
     return False, [error]
 
 
-def git_worktree_command_result(
-    repository: str, command: str, worktree: str
-) -> tuple[bool, str | None]:
-    result = subprocess.run(
-        [
-            "git",
-            "-c",
-            "status.showUntrackedFiles=all",
-            "-C",
-            repository,
-            "worktree",
-            command,
-            worktree,
-        ],
-        capture_output=True,
-        encoding="utf-8",
-        check=False,
-    )
-    if result.returncode:
-        return (
-            False,
-            result.stderr.strip() or result.stdout.strip() or "git worktree command failed",
+@contextmanager
+def locked_worktree_inspection(
+    tasks: dict[str, Any], worktrees: dict[str, Any], worktree: str, *, is_released: bool = False
+) -> Generator[tuple[dict[str, Any] | None, list[str] | None, list[str]]]:
+    resource = worktree_resource(worktrees, worktree)
+    if resource is None:
+        yield None, None, ["ownership unknown"]
+        return
+    directory_lock_file = acquire_lock(directory_lock_path(worktree))
+    if directory_lock_file is None:
+        yield resource, None, ["in use"]
+        return
+    try:
+        repository = resource.get("repository")
+        entries = git_worktree_entries(repository) if isinstance(repository, str) else None
+        reasons = worktree_retention_reasons(
+            tasks, resource, worktree, entries, is_released=is_released
         )
-    return True, None
-
-
-def remove_locked_worktree(
-    resource: dict[str, Any],
-    worktree: str,
-    entries: list[list[str]],
-) -> tuple[bool, list[str]]:
-    repository = cast("str", resource["repository"])
-    entry = cast("list[str]", git_worktree_entry(entries, worktree))
-    lock_reason = git_worktree_lock_reason(entry)
-    if lock_reason is not None:
-        is_unlocked, unlock_error = git_worktree_command_result(repository, "unlock", worktree)
-        if not is_unlocked:
-            return record_worktree_removal_error(resource, cast("str", unlock_error))
-    is_removed, removal_error = git_worktree_command_result(repository, "remove", worktree)
-    if not is_removed:
-        return record_worktree_removal_error(resource, cast("str", removal_error))
-    resource["removed_at"] = datetime.now(UTC).isoformat()
-    resource.pop("removal_error", None)
-    return True, []
+        entry = git_worktree_entry(entries, worktree) if entries else None
+        yield resource, entry, reasons
+    finally:
+        release_lock(directory_lock_file)
 
 
 def remove_worktree_resource(
     tasks: dict[str, Any], worktrees: dict[str, Any], worktree: str, *, is_released: bool = False
 ) -> tuple[bool, list[str]]:
-    resource = worktree_resource(worktrees, worktree)
-    if resource is None:
-        return False, worktree_retention_reasons(tasks, worktrees, worktree)
-    directory_lock_file = acquire_lock(directory_lock_path(worktree))
-    if directory_lock_file is None:
-        return False, ["in use"]
-    try:
-        repository = resource.get("repository")
-        entries = git_worktree_entries(repository) if isinstance(repository, str) else None
-        reasons = worktree_retention_reasons(
-            tasks,
-            worktrees,
-            worktree,
-            is_checking_directory_lock=False,
-            is_released=is_released,
-            worktree_entries=entries,
-            is_worktree_entries_loaded=True,
-        )
+    with locked_worktree_inspection(tasks, worktrees, worktree, is_released=is_released) as (
+        resource,
+        entry,
+        reasons,
+    ):
         if reasons:
             return False, reasons
-        return remove_locked_worktree(resource, worktree, cast("list[list[str]]", entries))
-    finally:
-        release_lock(directory_lock_file)
+        resource = cast("dict[str, Any]", resource)
+        commands = ["remove"]
+        if git_worktree_lock_reason(cast("list[str]", entry)) is not None:
+            commands.insert(0, "unlock")
+        for command in commands:
+            result = run_git(
+                resource["repository"],
+                "-c",
+                "status.showUntrackedFiles=all",
+                "worktree",
+                command,
+                worktree,
+            )
+            if result.returncode:
+                error = (
+                    result.stderr.strip() or result.stdout.strip() or "git worktree command failed"
+                )
+                return record_worktree_removal_error(resource, error)
+        resource["removed_at"] = datetime.now(UTC).isoformat()
+        resource.pop("removal_error", None)
+        return True, []
 
 
 def is_known_directory_busy(tasks: dict[str, Any], task: dict[str, Any]) -> bool:
@@ -1448,9 +1371,8 @@ def list_worktrees() -> int:
         return 0
     rows: list[tuple[str, str, str, str]] = []
     for worktree in sorted(worktree_paths):
-        resource = worktree_resource(worktrees, worktree)
-        reasons = worktree_retention_reasons(tasks, worktrees, worktree)
-        state = "eligible" if not reasons else "retained"
+        with locked_worktree_inspection(tasks, worktrees, worktree) as (resource, _, reasons):
+            state = "eligible" if not reasons else "retained"
         if resource is not None and resource.get("removed_at") is not None:
             state = "removed"
             reasons = []

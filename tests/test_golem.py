@@ -180,14 +180,20 @@ def write_worktrees(worktrees):
     golem.worktree_ledger_path().write_text(json.dumps(worktrees), encoding="utf-8")
 
 
-def git_worktree(repository_path):
-    worktree_path = repository_path / "worktree"
-    subprocess.run(
-        ["/usr/bin/git", "worktree", "add", "-qb", "worktree", "worktree"],
+def git_output(repository_path, *arguments: str):
+    result = golem.subprocess.run(
+        ["/usr/bin/git", *arguments],
         cwd=repository_path,
+        capture_output=True,
+        encoding="utf-8",
         check=True,
     )
-    return worktree_path
+    return result.stdout.strip()
+
+
+def git_worktree(repository_path):
+    git_output(repository_path, "worktree", "add", "-qb", "worktree", "worktree")
+    return repository_path / "worktree"
 
 
 def golem_worktree_resource(repository_path, worktree_path, *, released_at=None):
@@ -203,6 +209,17 @@ def golem_worktree_resource(repository_path, worktree_path, *, released_at=None)
     assert marker_path is not None
     marker_path.write_text("fix-thing-session", encoding="utf-8")
     return {str(worktree_path.resolve()): resource}
+
+
+@pytest.fixture
+def owned_worktree(git_repository, ledger_path):
+    def create_worktree(status: str = golem.STATUS_DONE, *, released_at: str | None = None) -> Path:
+        worktree = git_worktree(git_repository)
+        write_task(ledger_path, status, worktree=str(worktree))
+        write_worktrees(golem_worktree_resource(git_repository, worktree, released_at=released_at))
+        return worktree
+
+    return create_worktree
 
 
 def read_tasks(ledger_path):
@@ -1715,10 +1732,8 @@ def test_worktree_list_retains_non_golem_worktrees(
         golem.main(["worktree", "release", TASK_ID])
 
 
-def test_worktree_remove_records_removal_and_preserves_branch(capsys, git_repository, ledger_path):
-    worktree = git_worktree(git_repository)
-    write_task(ledger_path, golem.STATUS_DONE, worktree=str(worktree))
-    write_worktrees(golem_worktree_resource(git_repository, worktree))
+def test_worktree_remove_records_removal_and_preserves_branch(capsys, owned_worktree):
+    worktree = owned_worktree()
 
     assert golem.main(["worktree", "remove", TASK_ID]) == 0
     assert not worktree.exists()
@@ -1726,37 +1741,20 @@ def test_worktree_remove_records_removal_and_preserves_branch(capsys, git_reposi
     assert golem.main(["worktree", "remove", TASK_ID]) == 0
 
     assert "already removed" in capsys.readouterr().out
-    assert (
-        subprocess.run(
-            ["/usr/bin/git", "show-ref", "--verify", "--quiet", "refs/heads/worktree"],
-            cwd=git_repository,
-            check=False,
-        ).returncode
-        == 0
-    )
+    assert git_output(worktree.parent, "show-ref", "--verify", "refs/heads/worktree")
 
 
 @pytest.mark.parametrize("hidden_by", [None, "config", "assume-unchanged", "skip-worktree"])
-def test_worktree_remove_retains_local_changes(git_repository, ledger_path, hidden_by):
-    worktree = git_worktree(git_repository)
+def test_worktree_remove_retains_local_changes(owned_worktree, hidden_by):
+    worktree = owned_worktree()
     changed_file = worktree / "changed"
     if hidden_by == "config":
-        subprocess.run(
-            ["/usr/bin/git", "config", "status.showUntrackedFiles", "no"],
-            cwd=worktree,
-            check=True,
-        )
+        git_output(worktree, "config", "status.showUntrackedFiles", "no")
     elif hidden_by is not None:
         changed_file = worktree / "README"
         index_flag = f"--{hidden_by}"
-        golem.subprocess.run(
-            ["/usr/bin/git", "update-index", index_flag, "README"],
-            cwd=worktree,
-            check=True,
-        )
+        git_output(worktree, "update-index", index_flag, "README")
     changed_file.write_text("keep", encoding="utf-8")
-    write_task(ledger_path, golem.STATUS_DONE, worktree=str(worktree))
-    write_worktrees(golem_worktree_resource(git_repository, worktree))
 
     assert golem.main(["worktree", "remove", TASK_ID]) == 1
 
@@ -1764,53 +1762,31 @@ def test_worktree_remove_retains_local_changes(git_repository, ledger_path, hidd
     assert "removal_error" not in golem.load_worktrees()[str(worktree.resolve())]
 
 
-def test_worktree_remove_retains_detached_worktree_with_unpublished_commit(
-    git_repository, ledger_path
-):
-    worktree = git_worktree(git_repository)
-    subprocess.run(["/usr/bin/git", "switch", "--detach"], cwd=worktree, check=True)
+def test_worktree_remove_retains_detached_worktree_with_unpublished_commit(owned_worktree):
+    worktree = owned_worktree()
+    git_output(worktree, "switch", "--detach")
     (worktree / "commit").write_text("keep", encoding="utf-8")
-    subprocess.run(["/usr/bin/git", "add", "commit"], cwd=worktree, check=True)
-    subprocess.run(
-        [
-            "/usr/bin/git",
-            "-c",
-            "user.email=test@example.com",
-            "-c",
-            "user.name=Test",
-            "commit",
-            "-qm",
-            "unpublished",
-        ],
-        cwd=worktree,
-        check=True,
+    git_output(worktree, "add", "commit")
+    git_output(
+        worktree,
+        "-c",
+        "user.email=test@example.com",
+        "-c",
+        "user.name=Test",
+        "commit",
+        "--no-gpg-sign",
+        "-qm",
+        "unpublished",
     )
-    commit_id = subprocess.run(
-        ["/usr/bin/git", "rev-parse", "HEAD"],
-        cwd=worktree,
-        capture_output=True,
-        encoding="utf-8",
-        check=True,
-    ).stdout.strip()
-    write_task(ledger_path, golem.STATUS_DONE, worktree=str(worktree))
-    write_worktrees(golem_worktree_resource(git_repository, worktree))
+    commit_id = git_output(worktree, "rev-parse", "HEAD")
 
     assert golem.main(["worktree", "remove", TASK_ID]) == 1
     assert worktree.is_dir()
-    assert (
-        subprocess.run(
-            ["/usr/bin/git", "log", "-1", "--format=%H"],
-            cwd=worktree,
-            capture_output=True,
-            encoding="utf-8",
-            check=True,
-        ).stdout.strip()
-        == commit_id
-    )
+    assert git_output(worktree, "log", "-1", "--format=%H") == commit_id
 
 
-def test_worktree_remove_retains_task_using_worktree_as_its_directory(git_repository, ledger_path):
-    worktree = git_worktree(git_repository)
+def test_worktree_remove_retains_task_using_worktree_as_its_directory(owned_worktree, ledger_path):
+    worktree = owned_worktree()
     write_tasks(
         ledger_path,
         {
@@ -1822,16 +1798,13 @@ def test_worktree_remove_retains_task_using_worktree_as_its_directory(git_reposi
             ),
         },
     )
-    write_worktrees(golem_worktree_resource(git_repository, worktree))
 
     assert golem.main(["worktree", "remove", TASK_ID]) == 1
     assert worktree.is_dir()
 
 
-def test_worktree_remove_does_not_release_a_refused_resource(git_repository, ledger_path):
-    worktree = git_worktree(git_repository)
-    write_task(ledger_path, golem.STATUS_NEEDS_REVIEW, worktree=str(worktree))
-    write_worktrees(golem_worktree_resource(git_repository, worktree))
+def test_worktree_remove_does_not_release_a_refused_resource(owned_worktree):
+    worktree = owned_worktree(golem.STATUS_NEEDS_REVIEW)
 
     assert golem.main(["worktree", "remove", TASK_ID]) == 1
     assert "released_at" not in golem.load_worktrees()[str(worktree.resolve())]
@@ -1841,23 +1814,17 @@ def test_worktree_remove_does_not_release_a_refused_resource(git_repository, led
     "status",
     [golem.STATUS_SCHEDULED, golem.STATUS_WAITING, golem.STATUS_NEEDS_REVIEW],
 )
-def test_worktree_removal_retains_tasks_that_still_require_it(git_repository, ledger_path, status):
-    worktree = git_worktree(git_repository)
-    write_task(ledger_path, status, worktree=str(worktree))
-    write_worktrees(
-        golem_worktree_resource(git_repository, worktree, released_at=RESET_TIME.isoformat())
-    )
+def test_worktree_removal_retains_tasks_that_still_require_it(owned_worktree, status):
+    worktree = owned_worktree(status, released_at=RESET_TIME.isoformat())
 
     assert golem.main(["worktree", "remove", TASK_ID]) == 1
     assert worktree.is_dir()
 
 
 def test_removed_worktree_is_reported_by_pickup_and_retry(
-    installed_launch_agent, git_repository, ledger_path
+    installed_launch_agent, owned_worktree, ledger_path
 ):
-    worktree = git_worktree(git_repository)
-    write_worktrees(golem_worktree_resource(git_repository, worktree))
-    write_task(ledger_path, golem.STATUS_DONE, worktree=str(worktree))
+    worktree = owned_worktree()
     assert golem.main(["worktree", "remove", TASK_ID]) == 0
     write_task(ledger_path, golem.STATUS_NEEDS_REVIEW, worktree=str(worktree))
 
@@ -1878,14 +1845,12 @@ def test_removed_worktree_is_reported_by_pickup_and_retry(
     ],
 )
 def test_auto_remove_requires_release_and_retention(
-    git_repository, ledger_path, retention_days, released_ago, expected_exists
+    owned_worktree, retention_days, released_ago, expected_exists
 ):
-    worktree = git_worktree(git_repository)
-    write_task(ledger_path, golem.STATUS_DONE, worktree=str(worktree))
     released_at = (
         (datetime.now(UTC) - released_ago).isoformat() if released_ago is not None else None
     )
-    write_worktrees(golem_worktree_resource(git_repository, worktree, released_at=released_at))
+    worktree = owned_worktree(released_at=released_at)
     if retention_days is not None:
         golem.set_worktree_auto_remove(retention_days)
 
@@ -1894,10 +1859,8 @@ def test_auto_remove_requires_release_and_retention(
 
 
 @pytest.mark.parametrize("status", [golem.STATUS_FAILED, golem.STATUS_CANCELLED])
-def test_launch_agent_removes_released_retryable_worktree(git_repository, ledger_path, status):
-    worktree = git_worktree(git_repository)
-    write_task(ledger_path, status, worktree=str(worktree))
-    write_worktrees(golem_worktree_resource(git_repository, worktree))
+def test_launch_agent_removes_released_retryable_worktree(owned_worktree, status):
+    worktree = owned_worktree(status)
     assert golem.main(["worktree", "auto-remove", "--after", "0"]) == 0
     assert golem.main(["worktree", "release", TASK_ID]) == 0
 
@@ -1907,18 +1870,16 @@ def test_launch_agent_removes_released_retryable_worktree(git_repository, ledger
 
 
 @pytest.mark.parametrize("status", [golem.STATUS_FAILED, golem.STATUS_CANCELLED])
-def test_worktree_remove_overrides_unreleased_retryable_task(git_repository, ledger_path, status):
-    worktree = git_worktree(git_repository)
-    write_task(ledger_path, status, worktree=str(worktree))
-    write_worktrees(golem_worktree_resource(git_repository, worktree))
+def test_worktree_remove_overrides_unreleased_retryable_task(owned_worktree, status):
+    worktree = owned_worktree(status)
 
     assert golem.main(["worktree", "remove", TASK_ID]) == 0
     assert not worktree.exists()
 
 
 @pytest.mark.parametrize("status", [golem.STATUS_SCHEDULED, golem.STATUS_WAITING])
-def test_worktree_removal_retains_inheriting_dependent(git_repository, ledger_path, status):
-    worktree = git_worktree(git_repository)
+def test_worktree_removal_retains_inheriting_dependent(owned_worktree, ledger_path, status):
+    worktree = owned_worktree()
     write_tasks(
         ledger_path,
         {
@@ -1926,16 +1887,13 @@ def test_worktree_removal_retains_inheriting_dependent(git_repository, ledger_pa
             CHILD_ID: task_record(status, task_id=CHILD_ID, after=PARENT_ID),
         },
     )
-    write_worktrees(golem_worktree_resource(git_repository, worktree))
 
     assert golem.main(["worktree", "remove", PARENT_ID]) == 1
     assert worktree.is_dir()
 
 
-def test_worktree_list_retains_unreleased_retryable_task(capsys, git_repository, ledger_path):
-    worktree = git_worktree(git_repository)
-    write_task(ledger_path, golem.STATUS_FAILED, worktree=str(worktree))
-    write_worktrees(golem_worktree_resource(git_repository, worktree))
+def test_worktree_list_retains_unreleased_retryable_task(capsys, owned_worktree):
+    owned_worktree(golem.STATUS_FAILED)
 
     assert golem.main(["worktree", "list"]) == 0
 
@@ -1944,9 +1902,9 @@ def test_worktree_list_retains_unreleased_retryable_task(capsys, git_repository,
 
 @pytest.mark.parametrize("is_nested_pickup", [False, True])
 def test_worktree_remove_retains_directory_in_use(
-    git_repository, ledger_path, monkeypatch, tmp_path, is_nested_pickup
+    owned_worktree, ledger_path, monkeypatch, tmp_path, is_nested_pickup
 ):
-    worktree = git_worktree(git_repository)
+    worktree = owned_worktree()
     tasks = {TASK_ID: task_record(golem.STATUS_DONE, worktree=str(worktree))}
     pickup_id = TASK_ID
     if is_nested_pickup:
@@ -1955,7 +1913,6 @@ def test_worktree_remove_retains_directory_in_use(
         tasks[CHILD_ID] = task_record(golem.STATUS_DONE, task_id=CHILD_ID, cwd=str(nested))
         pickup_id = CHILD_ID
     write_tasks(ledger_path, tasks)
-    write_worktrees(golem_worktree_resource(git_repository, worktree))
     hold_path = tmp_path / "hold"
     started_path = tmp_path / "started"
     hold_path.touch()
@@ -1996,22 +1953,15 @@ def test_worktree_remove_retains_directory_in_use(
     ],
 )
 def test_worktree_remove_respects_locks(
-    git_repository, ledger_path, monkeypatch, reason, is_process_missing, is_removed
+    owned_worktree, monkeypatch, reason, is_process_missing, is_removed
 ):
-    worktree = git_worktree(git_repository)
-    write_task(ledger_path, golem.STATUS_DONE, worktree=str(worktree))
-    write_worktrees(golem_worktree_resource(git_repository, worktree))
-    golem.subprocess.run(
-        [
-            "git",
-            "-C",
-            str(git_repository),
-            "worktree",
-            "lock",
-            *(["--reason", reason] if reason is not None else []),
-            str(worktree),
-        ],
-        check=True,
+    worktree = owned_worktree()
+    git_output(
+        worktree.parent,
+        "worktree",
+        "lock",
+        *(["--reason", reason] if reason is not None else []),
+        str(worktree),
     )
 
     def report_process(_: int, __: int) -> None:
@@ -2024,19 +1974,16 @@ def test_worktree_remove_respects_locks(
     assert worktree.is_dir() is not is_removed
 
 
-def test_worktree_remove_records_git_removal_failure(
-    capsys, git_repository, ledger_path, monkeypatch
-):
-    worktree = git_worktree(git_repository)
-    write_task(ledger_path, golem.STATUS_DONE, worktree=str(worktree))
-    write_worktrees(golem_worktree_resource(git_repository, worktree))
+def test_worktree_remove_records_git_removal_failure(capsys, owned_worktree, monkeypatch):
+    worktree = owned_worktree()
+    run_git = golem.run_git
 
-    def fail_removal(_: str, command: str, __: str) -> tuple[bool, str | None]:
-        if command == "remove":
-            return False, "could not remove"
-        return True, None
+    def fail_removal(directory: str, *arguments: str) -> subprocess.CompletedProcess[str]:
+        if "remove" in arguments:
+            return subprocess.CompletedProcess(arguments, 1, stdout="", stderr="could not remove")
+        return run_git(directory, *arguments)
 
-    monkeypatch.setattr(golem, "git_worktree_command_result", fail_removal)
+    monkeypatch.setattr(golem, "run_git", fail_removal)
 
     assert golem.main(["worktree", "remove", TASK_ID]) == 1
     resource = golem.load_worktrees()[str(worktree.resolve())]
@@ -2057,18 +2004,13 @@ def test_worktree_remove_records_git_removal_failure(
     ],
 )
 def test_task_reuse_revokes_worktree_release(
-    installed_launch_agent, git_repository, ledger_path, status, command, is_nested
+    installed_launch_agent, owned_worktree, ledger_path, status, command, is_nested
 ):
-    worktree = git_worktree(git_repository)
-    fields = {"worktree": str(worktree)}
+    worktree = owned_worktree(status, released_at=RESET_TIME.isoformat())
     if is_nested:
         nested = worktree / "nested"
         nested.mkdir()
-        fields = {"cwd": str(nested)}
-    write_task(ledger_path, status, **fields)
-    write_worktrees(
-        golem_worktree_resource(git_repository, worktree, released_at=RESET_TIME.isoformat())
-    )
+        write_task(ledger_path, status, cwd=str(nested))
 
     assert golem.main(command) == 0
 
@@ -2100,41 +2042,21 @@ printf '%s' '{"result":"done"}'
     task = read_task(ledger_path)
     worktree = git_repository / ".claude" / "worktrees" / task["session_id"]
 
-    def add_worktree(branch: str) -> None:
-        golem.subprocess.run(
-            [
-                "/usr/bin/git",
-                "-C",
-                str(git_repository),
-                "worktree",
-                "add",
-                "-qb",
-                branch,
-                str(worktree),
-            ],
-            check=True,
-        )
-
     if state == "preexisting":
-        add_worktree("external")
+        git_output(git_repository, "worktree", "add", "-qb", "external", str(worktree))
 
     assert golem.main(["_execute", TASK_ID, task["session_id"]]) == 0
     assert golem.main(["close", TASK_ID]) == 0
     if state == "replaced":
-        golem.subprocess.run(
-            ["/usr/bin/git", "-C", str(git_repository), "worktree", "remove", str(worktree)],
-            check=True,
-        )
-        add_worktree("external")
+        git_output(git_repository, "worktree", "remove", str(worktree))
+        git_output(git_repository, "worktree", "add", "-qb", "external", str(worktree))
 
     assert golem.main(["worktree", "remove", TASK_ID]) == int(state != "created")
     assert worktree.is_dir() is (state != "created")
 
 
-def test_close_does_not_release_worktree(git_repository, ledger_path):
-    worktree = git_worktree(git_repository)
-    write_task(ledger_path, golem.STATUS_NEEDS_REVIEW, worktree=str(worktree))
-    write_worktrees(golem_worktree_resource(git_repository, worktree))
+def test_close_does_not_release_worktree(owned_worktree):
+    worktree = owned_worktree(golem.STATUS_NEEDS_REVIEW)
 
     assert golem.main(["close", TASK_ID]) == 0
 
