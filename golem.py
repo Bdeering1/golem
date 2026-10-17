@@ -28,7 +28,6 @@ STATUS_FAILED = "failed"
 STATUS_DONE = "done"
 STATUS_CANCELLED = "cancelled"
 SUCCEEDED_STATUSES = {STATUS_NEEDS_REVIEW, STATUS_DONE}
-ARCHIVABLE_STATUSES = {STATUS_DONE, STATUS_FAILED, STATUS_CANCELLED}
 AGENT_LOG_MAX_BYTES = 1024 * 1024
 USAGE_ERROR = "golem: usage lookup unavailable"
 USAGE_TIMEOUT_SECONDS = 30
@@ -499,22 +498,6 @@ def close(task_id: str) -> int:
     return 0
 
 
-def archive_tasks(task_ids: list[str] | None) -> int:
-    with locked_tasks() as tasks:
-        if task_ids is None:
-            task_ids = [
-                task_id for task_id, task in tasks.items() if task["status"] in ARCHIVABLE_STATUSES
-            ]
-        for task_id in task_ids:
-            if task_id not in tasks:
-                raise SystemExit(f"golem: task not found: {task_id}")
-            if tasks[task_id]["status"] not in ARCHIVABLE_STATUSES:
-                raise SystemExit(f"golem: task cannot be archived: {task_id}")
-        for task_id in task_ids:
-            tasks[task_id]["archived"] = True
-    return 0
-
-
 def show_task_result(task_id: str) -> int:
     tasks = load_tasks()
     if task_id not in tasks:
@@ -545,14 +528,9 @@ def cancel_task(task_id: str) -> int:
     return 0
 
 
-def list_tasks(*, is_archived_included: bool = False) -> int:
+def list_tasks() -> int:
     tasks = load_tasks()
-    visible_tasks = {
-        task_id: task
-        for task_id, task in tasks.items()
-        if is_archived_included or not task.get("archived")
-    }
-    if not visible_tasks:
+    if not tasks:
         print("golem: no tasks")
         return 0
     rows = [
@@ -565,7 +543,7 @@ def list_tasks(*, is_archived_included: bool = False) -> int:
             if task["status"] == STATUS_WAITING
             else "",
         )
-        for task_id, task in visible_tasks.items()
+        for task_id, task in tasks.items()
     ]
     rows.sort(key=lambda row: (row[1] != STATUS_NEEDS_REVIEW, row[0]))
     headers = ("ID", "STATUS", "DIRECTORY", "DUE AT", "AFTER")
@@ -1134,21 +1112,7 @@ def build_parser() -> argparse.ArgumentParser:
         retry_command,
         lambda arguments: retry_task(arguments.id, is_now=arguments.now, at_text=arguments.at),
     )
-    list_command = commands.add_parser("list")
-    list_command.add_argument("--all", action="store_true", help="include archived tasks")
-    set_command_handler(
-        list_command, lambda arguments: list_tasks(is_archived_included=arguments.all)
-    )
-    archive_command = commands.add_parser("archive")
-    archive_target_group = archive_command.add_mutually_exclusive_group(required=True)
-    archive_target_group.add_argument("ids", metavar="ID", nargs="*", default=None)
-    archive_target_group.add_argument(
-        "--all", action="store_true", help="archive every done, failed, or cancelled task"
-    )
-    set_command_handler(
-        archive_command,
-        lambda arguments: archive_tasks(None if arguments.all else arguments.ids),
-    )
+    set_command_handler(commands.add_parser("list"), lambda _: list_tasks())
     launch_agent_command = commands.add_parser(
         "agent",
         description=(
