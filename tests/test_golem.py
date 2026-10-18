@@ -1483,11 +1483,15 @@ def test_reschedule_refuses_unknown_and_non_scheduled_tasks(
         golem.main(["reschedule", TASK_ID])
 
 
-def test_reschedule_rejects_agent_arguments():
+def test_reschedule_rejects_agent_arguments(ledger_path):
+    write_task(ledger_path, golem.STATUS_SCHEDULED)
+    task = read_task(ledger_path)
+
     with pytest.raises(SystemExit) as exit_info:
         golem.main(["reschedule", TASK_ID, "--now", "--", *AGENT_ARGS])
 
     assert exit_info.value.code == 2
+    assert read_task(ledger_path) == task
 
 
 def test_reschedule_preserves_usage_limit_resume_state(
