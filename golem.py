@@ -1432,7 +1432,7 @@ def delete_task(task_id: str, *, is_removing_worktree: bool) -> int:
             raise SystemExit(f"golem: task has dependents: {task_id}: {', '.join(dependent_ids)}")
         remaining_tasks = {id_: record for id_, record in tasks.items() if id_ != task_id}
         recorded = recorded_worktree(tasks, task)
-        worktree = recorded[0] if recorded is not None else None
+        worktree = resolved_path(recorded[0]) if recorded is not None else None
         is_removed = False
         if is_removing_worktree:
             if worktree is None:
