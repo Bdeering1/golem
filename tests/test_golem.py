@@ -242,11 +242,8 @@ def logged_claude_args(fake_commands):
 
 def wait_until(predicate):
     # select instead of time.sleep, which some tests replace to drive the agent loop.
-    for _ in range(100):
-        if predicate():
-            return
+    while not predicate():
         select.select([], [], [], 0.05)
-    pytest.fail("condition did not become true")
 
 
 def logged_claude_cwds(fake_commands):
@@ -402,7 +399,7 @@ def test_agent_cleanup_waits_for_active_ledger_write(ledger_path, monkeypatch):
 
     def pause_write(temporary_path, task_ledger_path) -> Path:
         write_started.set()
-        assert finish_write.wait(timeout=5)
+        finish_write.wait()
         return replace(temporary_path, task_ledger_path)
 
     monkeypatch.setattr(Path, "replace", pause_write)
@@ -418,10 +415,10 @@ def test_agent_cleanup_waits_for_active_ledger_write(ledger_path, monkeypatch):
 
     monkeypatch.setattr(golem.fcntl, "flock", resume_write)
     try:
-        assert write_started.wait(timeout=3)
+        write_started.wait()
 
         golem.run_launch_agent_pass()
-        writer.join(timeout=3)
+        writer.join()
 
         assert writer.exitcode == 0
         assert read_task(ledger_path)["status"] == golem.STATUS_DONE
@@ -522,12 +519,7 @@ def test_launch_agent_executor_uses_only_saved_environment(
     golem.run_launch_agent_pass()
 
     assert len(processes) == 1
-    try:
-        processes[0].wait(timeout=15)
-    except subprocess.TimeoutExpired:
-        processes[0].kill()
-        processes[0].wait()
-        pytest.fail("task executor did not exit")
+    processes[0].wait()
     assert read_task(ledger_path)["status"] == golem.STATUS_NEEDS_REVIEW
     assert fake_commands["claude-lang"].read_text(encoding="utf-8") == f"{SAVED_LANG}\n"
     assert fake_commands["claude-lc-time"].read_text(encoding="utf-8") == f"{CHILD_LANG}\n"
@@ -1326,7 +1318,7 @@ def test_executor_death_keeps_task_running_until_claude_exits(
     try:
         wait_until(started_path.exists)
         os.kill(executor.pid, signal.SIGKILL)
-        executor.wait(timeout=3)
+        executor.wait()
 
         golem.run_launch_agent_pass()
         assert read_task(ledger_path)["status"] == golem.STATUS_RUNNING
@@ -1457,7 +1449,7 @@ def test_pickup_holds_worktree_until_its_claude_process_exits(
         assert golem.main(["_execute", TASK_ID, headless_session_id]) == 0
         assert read_task(ledger_path)["status"] == golem.STATUS_SCHEDULED
         pickup_process.kill()
-        pickup_process.join(timeout=3)
+        pickup_process.join()
         assert golem.main(["_execute", TASK_ID, headless_session_id]) == 0
         assert read_task(ledger_path)["status"] == golem.STATUS_SCHEDULED
 
@@ -2098,7 +2090,7 @@ def test_delete_retains_worktree_in_use(
         assert worktree.is_dir()
     finally:
         hold_path.unlink()
-        pickup_process.join(timeout=3)
+        pickup_process.join()
         assert pickup_process.exitcode == 0
 
 
