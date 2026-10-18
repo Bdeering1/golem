@@ -1018,15 +1018,21 @@ def claim_task(
 
 
 def claim_next_dependent(
-    task_id: str,
+    task_id: str, parent_session_id: str
 ) -> tuple[str, dict[str, Any], io.TextIOWrapper, io.TextIOWrapper] | None:
     with locked_ledger() as (tasks, worktrees):
-        parent_record = cast("dict[str, Any]", tasks[task_id])
-        if parent_record.get("status") not in SUCCEEDED_STATUSES:
+        parent_record = tasks.get(task_id)
+        if not isinstance(parent_record, dict):
+            return None
+        parent = cast("dict[str, Any]", parent_record)
+        if (
+            parent.get("session_id") != parent_session_id
+            or parent.get("status") not in SUCCEEDED_STATUSES
+        ):
             return None
         for dependent_id in waiting_dependent_ids(tasks, task_id):
-            session_id = tasks[dependent_id]["session_id"]
-            claim = claim_task(tasks, worktrees, dependent_id, session_id, STATUS_WAITING)
+            dependent_session_id = tasks[dependent_id]["session_id"]
+            claim = claim_task(tasks, worktrees, dependent_id, dependent_session_id, STATUS_WAITING)
             if claim is not None:
                 return dependent_id, *claim
             if tasks[dependent_id]["status"] == STATUS_WAITING:
@@ -1038,8 +1044,8 @@ def print_task_result(result: str) -> None:
     print(result, end="" if result.endswith("\n") else "\n")
 
 
-def drain_dependents(task_id: str) -> None:
-    while next_dependent := claim_next_dependent(task_id):
+def drain_dependents(task_id: str, session_id: str) -> None:
+    while next_dependent := claim_next_dependent(task_id, session_id):
         execute_claimed_task(*next_dependent)
 
 
@@ -1086,7 +1092,7 @@ def execute_claimed_task(
             )
         finally:
             release_lock(directory_lock_file)
-        drain_dependents(task_id)
+        drain_dependents(task_id, task["session_id"])
         return returncode
     finally:
         release_run_lock(run_lock_file, task["session_id"])
@@ -1106,7 +1112,7 @@ def drain_succeeded_task(task_id: str, session_id: str) -> None:
     if run_lock_file is None:
         return
     try:
-        drain_dependents(task_id)
+        drain_dependents(task_id, session_id)
     finally:
         release_run_lock(run_lock_file, session_id)
 
@@ -1259,7 +1265,7 @@ def task_worktree_retention_reasons(
         elif status == STATUS_NEEDS_REVIEW:
             reasons.append("task needs review")
         elif status in {STATUS_FAILED, STATUS_CANCELLED} and not is_released:
-            reasons.append("task can be retried (release or remove to override)")
+            reasons.append("task can be retried (delete the task to override)")
     return reasons
 
 
@@ -1465,43 +1471,54 @@ def list_worktrees() -> int:
     return 0
 
 
-def task_worktree(tasks: dict[str, Any], task_id: str) -> str:
-    task = tasks.get(task_id)
-    if not isinstance(task, dict):
-        raise SystemExit(f"golem: task not found: {task_id}")
-    recorded = recorded_worktree(tasks, cast("dict[str, Any]", task))
-    if recorded is None:
-        raise SystemExit(f"golem: task has no worktree: {task_id}")
-    return recorded[0]
-
-
-def release_worktree(task_id: str) -> int:
+def delete_task(task_id: str, *, is_removing_worktree: bool) -> int:
     with locked_ledger() as (tasks, worktrees):
-        worktree = task_worktree(tasks, task_id)
-        resource = worktree_resource(worktrees, worktree)
-        if resource is None:
-            raise SystemExit(f"golem: worktree ownership is unknown: {worktree}")
-        if resource.get("owner") != WORKTREE_OWNER_GOLEM:
-            raise SystemExit(f"golem: worktree was not created by Golem: {worktree}")
-        if resource.get("removed_at") is not None:
-            raise SystemExit(f"golem: worktree already removed: {worktree}")
-        resource["released_at"] = datetime.now(UTC).isoformat()
-    return 0
-
-
-def remove_worktree(task_id: str) -> int:
-    with locked_ledger() as (tasks, worktrees):
-        worktree = task_worktree(tasks, task_id)
-        resource = worktree_resource(worktrees, worktree)
-        if resource is not None and resource.get("removed_at") is not None:
-            print(f"golem: worktree already removed: {worktree}")
-            return 0
-        is_removed, reasons = remove_worktree_resource(tasks, worktrees, worktree, is_released=True)
+        stored_task = tasks.get(task_id)
+        if not isinstance(stored_task, dict):
+            raise SystemExit(f"golem: task not found: {task_id}")
+        task = cast("dict[str, Any]", stored_task)
+        if task.get("status") == STATUS_RUNNING:
+            raise SystemExit(f"golem: task is running: {task_id}")
+        dependent_ids = sorted(
+            dependent_id
+            for dependent_id, dependent in tasks.items()
+            if isinstance(dependent, dict)
+            and cast("dict[str, Any]", dependent).get("after") == task_id
+        )
+        if dependent_ids:
+            raise SystemExit(f"golem: task has dependents: {task_id}: {', '.join(dependent_ids)}")
+        remaining_tasks = {id_: record for id_, record in tasks.items() if id_ != task_id}
+        recorded = recorded_worktree(tasks, task)
+        worktree = resolved_path(recorded[0]) if recorded is not None else None
+        is_removed = False
+        if is_removing_worktree:
+            if worktree is None:
+                raise SystemExit(f"golem: task has no worktree: {task_id}")
+            resource = worktree_resource(worktrees, worktree)
+            if resource is None or resource.get("removed_at") is None:
+                is_removed, reasons = remove_worktree_resource(remaining_tasks, worktrees, worktree)
+                if not is_removed:
+                    print(
+                        f"golem: retained worktree: {worktree}: {'; '.join(reasons)}",
+                        file=sys.stderr,
+                    )
+                    return 1
+        del tasks[task_id]
+        for path, resource in worktrees.items():
+            if (
+                task_uses_worktree(tasks, task, path)
+                and resource.get("owner") == WORKTREE_OWNER_GOLEM
+                and resource.get("removed_at") is None
+                and not worktree_task_ids(tasks, path)
+            ):
+                resource.setdefault("released_at", datetime.now(UTC).isoformat())
+        print(f"golem: deleted task: {task_id}")
+        print(f"golem: session: {task['session_id']}")
+        if worktree is not None:
+            print(f"golem: worktree: {worktree}")
         if is_removed:
             print(f"golem: removed worktree: {worktree}")
-            return 0
-        print(f"golem: retained worktree: {worktree}: {'; '.join(reasons)}", file=sys.stderr)
-        return 1
+    return 0
 
 
 def set_worktree_auto_remove(retention_days: int | None) -> int:
@@ -1656,12 +1673,6 @@ def add_worktree_commands(add_parser: Callable[..., argparse.ArgumentParser]) ->
     worktree_command = add_parser("worktree")
     worktree_commands = worktree_command.add_subparsers(dest="worktree_command", required=True)
     set_command_handler(worktree_commands.add_parser("list"), lambda _: list_worktrees())
-    remove_worktree_command = worktree_commands.add_parser("remove")
-    remove_worktree_command.add_argument("id")
-    set_command_handler(remove_worktree_command, lambda arguments: remove_worktree(arguments.id))
-    release_worktree_command = worktree_commands.add_parser("release")
-    release_worktree_command.add_argument("id")
-    set_command_handler(release_worktree_command, lambda arguments: release_worktree(arguments.id))
     auto_remove_worktree_command = worktree_commands.add_parser("auto-remove")
     auto_remove_group = auto_remove_worktree_command.add_mutually_exclusive_group(required=True)
     auto_remove_group.add_argument("--after", type=int, metavar="DAYS")
@@ -1716,6 +1727,13 @@ def build_parser() -> argparse.ArgumentParser:
     set_command_handler(
         retry_command,
         lambda arguments: retry_task(arguments.id, is_now=arguments.now, at_text=arguments.at),
+    )
+    delete_command = commands.add_parser("delete")
+    delete_command.add_argument("id")
+    delete_command.add_argument("--remove-worktree", action="store_true")
+    set_command_handler(
+        delete_command,
+        lambda arguments: delete_task(arguments.id, is_removing_worktree=arguments.remove_worktree),
     )
     set_command_handler(commands.add_parser("list"), lambda _: list_tasks())
     add_worktree_commands(commands.add_parser)
