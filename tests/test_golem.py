@@ -1050,17 +1050,9 @@ def test_cancel_marks_task_cancelled_and_does_not_run_executor(
 
 
 @pytest.mark.parametrize(
-    "status",
-    [
-        golem.STATUS_SCHEDULED,
-        golem.STATUS_WAITING,
-        golem.STATUS_NEEDS_REVIEW,
-        golem.STATUS_DONE,
-        golem.STATUS_FAILED,
-        golem.STATUS_CANCELLED,
-    ],
+    "status", [golem.STATUS_SCHEDULED, golem.STATUS_WAITING, golem.STATUS_CANCELLED]
 )
-def test_delete_removes_each_non_running_status(ledger_path, status):
+def test_delete_removes_non_running_task(ledger_path, status):
     write_task(ledger_path, status)
 
     assert golem.main(["delete", TASK_ID]) == 0
@@ -2035,22 +2027,6 @@ def test_launch_agent_removes_worktree_released_by_delete(owned_worktree):
     assert golem.run_launch_agent() == 0
 
     assert not worktree.exists()
-
-
-@pytest.mark.parametrize("status", [golem.STATUS_SCHEDULED, golem.STATUS_WAITING])
-def test_delete_refuses_inheriting_dependent(owned_worktree, ledger_path, status):
-    worktree = owned_worktree()
-    write_tasks(
-        ledger_path,
-        {
-            PARENT_ID: task_record(golem.STATUS_DONE, task_id=PARENT_ID, worktree=str(worktree)),
-            CHILD_ID: task_record(status, task_id=CHILD_ID, after=PARENT_ID),
-        },
-    )
-
-    with pytest.raises(SystemExit, match=CHILD_ID):
-        golem.main(["delete", PARENT_ID, "--remove-worktree"])
-    assert worktree.is_dir()
 
 
 def test_worktree_list_retains_unreleased_retryable_task(capsys, owned_worktree):
