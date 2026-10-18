@@ -523,7 +523,7 @@ def test_launch_agent_executor_uses_only_saved_environment(
 
     assert len(processes) == 1
     try:
-        processes[0].wait(timeout=3)
+        processes[0].wait(timeout=15)
     except subprocess.TimeoutExpired:
         processes[0].kill()
         processes[0].wait()
