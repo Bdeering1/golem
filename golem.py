@@ -47,6 +47,7 @@ STATUS_COLORS = {
 }
 ANSI_RESET = "\033[0m"
 SUCCEEDED_STATUSES = {STATUS_NEEDS_REVIEW, STATUS_DONE}
+UNREVIEWED_STATUSES = {STATUS_SCHEDULED, STATUS_RUNNING, STATUS_WAITING, STATUS_NEEDS_REVIEW}
 AGENT_LOG_MAX_BYTES = 1024 * 1024
 USAGE_ERROR = "golem: usage lookup unavailable"
 USAGE_TIMEOUT_SECONDS = 30
@@ -239,6 +240,22 @@ def has_running_dependent(tasks: dict[str, Any], parent_id: str) -> bool:
         dependent["status"] == STATUS_RUNNING and dependent.get("after") == parent_id
         for dependent in tasks.values()
     )
+
+
+def has_unreviewed_dependent(tasks: dict[str, Any], parent_id: str) -> bool:
+    return any(
+        dependent["status"] in UNREVIEWED_STATUSES and dependent.get("after") == parent_id
+        for dependent in tasks.values()
+    )
+
+
+def mark_ancestors_done(tasks: dict[str, Any], task: dict[str, Any]) -> None:
+    ancestor = tasks.get(task.get("after", ""))
+    while isinstance(ancestor, dict):
+        parent = cast("dict[str, Any]", ancestor)
+        if parent.get("status") == STATUS_NEEDS_REVIEW:
+            parent["status"] = STATUS_DONE
+        ancestor = tasks.get(parent.get("after", ""))
 
 
 def reserve_dependent_task(
@@ -633,6 +650,7 @@ def pickup(task_id: str, *agent_args: str, is_app: bool, is_review_required: boo
         clear_worktree_release(tasks, worktrees, task)
         if task.get("status") == STATUS_NEEDS_REVIEW:
             task["status"] = STATUS_DONE
+            mark_ancestors_done(tasks, task)
         cwd = task_directory(task)
         session_id = cast("str", task["session_id"])
     if is_app:
@@ -652,10 +670,12 @@ def pickup(task_id: str, *agent_args: str, is_app: bool, is_review_required: boo
 
 
 def pickup_all() -> int:
+    tasks = load_tasks()
     task_ids = [
         task_id
-        for task_id, task in load_tasks().items()
+        for task_id, task in tasks.items()
         if task.get("status") == STATUS_NEEDS_REVIEW
+        and not has_unreviewed_dependent(tasks, task_id)
     ]
     if not task_ids:
         print("golem: no tasks need review")

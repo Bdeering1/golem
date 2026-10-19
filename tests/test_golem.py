@@ -953,6 +953,45 @@ def test_pickup_all_opens_review_tasks_and_leaves_others_unchanged(fake_commands
     assert read_task(ledger_path, "scheduled")["status"] == golem.STATUS_SCHEDULED
 
 
+def test_pickup_marks_ancestors_that_need_review_done(fake_commands, ledger_path):
+    write_tasks(
+        ledger_path,
+        {
+            PARENT_ID: task_record(golem.STATUS_NEEDS_REVIEW, task_id=PARENT_ID),
+            CHILD_ID: task_record(golem.STATUS_NEEDS_REVIEW, task_id=CHILD_ID, after=PARENT_ID),
+            GRANDCHILD_ID: task_record(
+                golem.STATUS_NEEDS_REVIEW, task_id=GRANDCHILD_ID, after=CHILD_ID
+            ),
+        },
+    )
+
+    assert golem.main(["pickup", GRANDCHILD_ID, "--app"]) == 0
+    assert {task["status"] for task in read_tasks(ledger_path).values()} == {golem.STATUS_DONE}
+
+
+@pytest.mark.parametrize(
+    ("child_status", "opened_ids"),
+    [
+        pytest.param(golem.STATUS_NEEDS_REVIEW, [CHILD_ID], id="child-needs-review"),
+        pytest.param(golem.STATUS_RUNNING, [], id="child-running"),
+        pytest.param(golem.STATUS_FAILED, [PARENT_ID], id="child-failed"),
+    ],
+)
+def test_pickup_all_opens_only_latest_reviewable_task_in_chain(
+    fake_commands, ledger_path, child_status, opened_ids
+):
+    tasks = {
+        PARENT_ID: task_record(golem.STATUS_NEEDS_REVIEW, task_id=PARENT_ID),
+        CHILD_ID: task_record(child_status, task_id=CHILD_ID, after=PARENT_ID),
+    }
+    write_tasks(ledger_path, tasks)
+
+    assert golem.main(["pickup", "--all", "--app"]) == 0
+    assert fake_commands["open-args"].read_text(encoding="utf-8").splitlines() == [
+        f"claude://resume?session={tasks[task_id]['session_id']}" for task_id in opened_ids
+    ]
+
+
 def test_pickup_all_continues_after_busy_directory(fake_commands, ledger_path, capsys, tmp_path):
     busy_directory = tmp_path / "busy"
     other_directory = tmp_path / "other"
