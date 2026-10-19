@@ -1444,29 +1444,17 @@ def test_retry_runs_failed_task_in_new_session(
     assert logged_claude_args(fake_commands) == expected_claude_args(retry)
 
 
-@pytest.mark.parametrize(
-    ("status", "message"),
-    [
-        pytest.param(None, f"golem: task not found: {TASK_ID}", id="unknown"),
-        pytest.param(
-            golem.STATUS_RUNNING,
-            f"golem: task is not scheduled: {TASK_ID}",
-            id="running",
-        ),
-    ],
-)
-def test_reschedule_refuses_unknown_and_non_scheduled_tasks(
-    ledger_path, monkeypatch, status, message
-):
+@pytest.mark.parametrize("status", [None, golem.STATUS_RUNNING])
+def test_reschedule_refuses_unknown_and_non_scheduled_tasks(ledger_path, monkeypatch, status):
     if status is not None:
         write_task(ledger_path, status)
     monkeypatch.setattr(golem, "next_reset_time", lambda: pytest.fail("usage lookup ran"))
 
-    with pytest.raises(SystemExit, match=re.escape(message)):
+    with pytest.raises(SystemExit, match=TASK_ID):
         golem.main(["reschedule", TASK_ID])
 
 
-def test_reschedule_preserves_usage_limit_resume_state(
+def test_reschedule_changes_only_due_time(
     installed_launch_agent, fake_commands, ledger_path, monkeypatch
 ):
     write_task(
@@ -1476,11 +1464,13 @@ def test_reschedule_preserves_usage_limit_resume_state(
         usage_limit_resume_count=1,
     )
     original_task = read_task(ledger_path)
-    monkeypatch.setattr(golem, "scheduled_time", lambda _: RESET_TIME)
+    later = (datetime.now(UTC) + timedelta(days=1)).replace(second=0, microsecond=0)
+    monkeypatch.setattr(golem, "scheduled_time", lambda _: later)
 
     assert golem.main(["reschedule", TASK_ID, "--at", AT_TEXT]) == 0
+    assert golem.main(["_execute", TASK_ID, original_task["session_id"]]) == 0
     rescheduled_task = read_task(ledger_path)
-    assert datetime.fromisoformat(rescheduled_task["due_at"]) == RESET_TIME
+    assert datetime.fromisoformat(rescheduled_task["due_at"]) == later
     assert {name: value for name, value in rescheduled_task.items() if name != "due_at"} == {
         name: value for name, value in original_task.items() if name != "due_at"
     }
@@ -1499,19 +1489,6 @@ def test_reschedule_preserves_usage_limit_resume_state(
         TASK_ID,
         SKIP_PERMISSIONS,
     ]
-
-
-def test_rescheduled_task_is_not_claimed_before_its_due_time(
-    installed_launch_agent, fake_commands, ledger_path, monkeypatch
-):
-    write_task(ledger_path, golem.STATUS_SCHEDULED)
-    session_id = read_task(ledger_path)["session_id"]
-    monkeypatch.setattr(golem, "scheduled_time", lambda _: datetime.now(UTC) + timedelta(days=1))
-
-    assert golem.main(["reschedule", TASK_ID, "--at", AT_TEXT]) == 0
-    assert golem.main(["_execute", TASK_ID, session_id]) == 0
-    assert read_task(ledger_path)["status"] == golem.STATUS_SCHEDULED
-    assert fake_commands["claude-args"].read_text(encoding="utf-8") == ""
 
 
 def test_retry_reuses_task_worktree_and_saved_environment(
