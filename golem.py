@@ -678,7 +678,7 @@ def pickup_all() -> int:
         and not has_unreviewed_dependent(tasks, task_id)
     ]
     if not task_ids:
-        print("golem: no tasks need review")
+        print("golem: no tasks ready for review")
         return 0
 
     has_failure = False
