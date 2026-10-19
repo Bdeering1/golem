@@ -1,7 +1,7 @@
 [project]
 name = "golem"
 version = "0.1.0"
-description = "Run and review Claude tasks"
+description = "Run and review Claude and Codex tasks"
 requires-python = ">=3.14"
 dependencies = []
 
