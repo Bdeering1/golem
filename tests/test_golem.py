@@ -141,6 +141,9 @@ if sys.argv[1:2] == ["app-server"]:
         print(json.dumps(response), flush=True)
     sys.exit(0)
 
+if sys.argv[1:2] == ["resume"]:
+    sys.exit(0)
+
 standard_input = sys.stdin.read()
 record("stdin", standard_input + "\\x1e\\n")
 events_path = os.environ.get("GOLEM_CODEX_EVENTS")
@@ -2667,8 +2670,6 @@ def test_codex_run_records_result_and_thread(
 ):
     write_codex_events(monkeypatch, tmp_path, events)
     monkeypatch.setenv("GOLEM_CODEX_EXIT", str(exit_code))
-    monkeypatch.setenv("OPENAI_API_KEY", "forbidden")
-    monkeypatch.setenv("CODEX_API_KEY", "forbidden")
 
     assert golem.main(["run", TASK_ID, PROMPT, "--backend", "codex", "--now", "--", "-m", "x"]) == 0
     task = read_task(ledger_path)
@@ -2691,7 +2692,6 @@ def test_codex_run_records_result_and_thread(
         "-",
     ]
     assert fake_commands["codex-stdin"].read_text(encoding="utf-8").endswith(f"{PROMPT}\x1e\n")
-    assert fake_commands["codex-api-keys"].read_text(encoding="utf-8").splitlines()[-1] == "0 0"
     if status == golem.STATUS_NEEDS_REVIEW:
         assert golem.main(["show", TASK_ID]) == 0
         assert capsys.readouterr().out.endswith(f"{result}\n")
@@ -2736,9 +2736,12 @@ def test_next_codex_reset_time(
     fake_commands, monkeypatch, tmp_path, primary, secondary, expected_offset
 ):
     now = datetime.now(UTC)
-    for limit in (primary, secondary):
-        if limit is not None:
-            limit["resetsAt"] = int((now + timedelta(seconds=limit["resetsAt"])).timestamp())
+    primary, secondary = (
+        None
+        if limit is None
+        else {**limit, "resetsAt": int((now + timedelta(seconds=limit["resetsAt"])).timestamp())}
+        for limit in (primary, secondary)
+    )
     write_codex_rate_limits(monkeypatch, tmp_path, primary, secondary)
 
     reset_time = golem.next_codex_reset_time()
@@ -2892,6 +2895,12 @@ def test_codex_processes_remove_api_keys_from_every_child(
     task = read_task(ledger_path)
 
     assert golem.main(["_execute", TASK_ID, task["session_id"]]) == 0
+    assert golem.main(["pickup", TASK_ID]) == 0
+    assert {call[0] for call in logged_codex_calls(fake_commands)} == {
+        "app-server",
+        "exec",
+        "resume",
+    }
     assert set(fake_commands["codex-api-keys"].read_text(encoding="utf-8").splitlines()) == {"0 0"}
 
 
@@ -3064,9 +3073,17 @@ def test_mixed_backend_chain_shares_worktree_and_uses_fresh_conversations(
     assert tasks["child"]["worktree"] == tasks["parent"]["worktree"]
     assert tasks["grandchild"]["worktree"] == tasks["parent"]["worktree"]
     assert len({tasks[task_id]["session_id"] for task_id in tasks}) == 3
+    assert {task["status"] for task in tasks.values()} == {golem.STATUS_NEEDS_REVIEW}
     assert tasks["child"]["thread_id"] == "thread"
-    child_call = next(call for call in logged_codex_calls(fake_commands) if call[0] == "exec")
+    codex_cwds = fake_commands["codex-cwd"].read_text(encoding="utf-8").splitlines()
+    child_call, child_cwd = next(
+        (call, cwd)
+        for call, cwd in zip(logged_codex_calls(fake_commands), codex_cwds, strict=True)
+        if call[0] == "exec"
+    )
     assert "resume" not in child_call
+    assert child_cwd == tasks["parent"]["worktree"]
+    assert logged_claude_cwds(fake_commands)[-1] == tasks["parent"]["worktree"]
 
 
 def test_codex_home_reaches_launch_agent_executor(

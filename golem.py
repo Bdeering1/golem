@@ -94,6 +94,7 @@ CODEX_UNSUPPORTED_ARGUMENTS = {
     "--remote-auth-token-env",
 }
 CODEX_PROVIDER_OVERRIDE = 'model_provider="openai"'
+CODEX_PROVIDER_ARGUMENTS = ("-c", CODEX_PROVIDER_OVERRIDE)
 VERBOSE_ARGUMENT = "--verbose"
 WORKTREE_OWNER_GOLEM = "golem"
 WORKTREE_OWNER_EXTERNAL = "external"
@@ -642,11 +643,15 @@ def record_resolved_worktree(
     clear_worktree_pending_if_created(task)
 
 
+def is_usage_limit_resume(task: dict[str, Any]) -> bool:
+    return cast("int", task.get("usage_limit_resume_count", 0)) > 0
+
+
 def run_claude(
     task_id: str, task: dict[str, Any], lock_file_descriptors: tuple[int, ...]
 ) -> tuple[int, str]:
     session_id = cast("str", task["session_id"])
-    is_resuming = cast("int", task.get("usage_limit_resume_count", 0)) > 0
+    is_resuming = is_usage_limit_resume(task)
     command = (
         ["claude", "--resume", session_id, "--print", USAGE_LIMIT_RESUME_PROMPT]
         if is_resuming
@@ -741,11 +746,10 @@ def codex_command(task: dict[str, Any]) -> tuple[list[str], str]:
         "--skip-git-repo-check",
         *agent_args,
         *default_args,
-        "-c",
-        CODEX_PROVIDER_OVERRIDE,
+        *CODEX_PROVIDER_ARGUMENTS,
     ]
     prompt = cast("str", task["prompt"])
-    if cast("int", task.get("usage_limit_resume_count", 0)) > 0:
+    if is_usage_limit_resume(task):
         command += ["resume", cast("str", task["thread_id"]), "-"]
         return command, USAGE_LIMIT_RESUME_PROMPT
     command.append("-")
@@ -790,9 +794,7 @@ def read_codex_events(
     process: subprocess.Popen[str], task_id: str, session_id: str
 ) -> CodexEventState:
     state = CodexEventState()
-    output = process.stdout
-    if output is None:
-        return state
+    output = cast("io.TextIOWrapper", process.stdout)
     try:
         for line in output:
             try:
@@ -821,9 +823,7 @@ def run_codex(
             return 1, f"golem: worktree is missing: {worktree}", False
         if error := create_codex_worktree(task_id, task):
             return 1, error, False
-    if cast("int", task.get("usage_limit_resume_count", 0)) > 0 and not isinstance(
-        task.get("thread_id"), str
-    ):
+    if is_usage_limit_resume(task) and not isinstance(task.get("thread_id"), str):
         return 1, "golem: task has no Codex conversation", False
     command, prompt = codex_command(task)
     process = subprocess.Popen(
@@ -832,17 +832,16 @@ def run_codex(
         env=codex_environment(task_environment(task)),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
-        stderr=None,
         encoding="utf-8",
         pass_fds=lock_file_descriptors,
     )
-    if process.stdin is not None:
-        try:
-            with suppress(BrokenPipeError):
-                process.stdin.write(prompt)
-        finally:
-            with suppress(BrokenPipeError):
-                process.stdin.close()
+    standard_input = cast("io.TextIOWrapper", process.stdin)
+    try:
+        with suppress(BrokenPipeError):
+            standard_input.write(prompt)
+    finally:
+        with suppress(BrokenPipeError):
+            standard_input.close()
     event_state = read_codex_events(process, task_id, cast("str", task["session_id"]))
     returncode = process.wait()
     result = (
@@ -931,11 +930,10 @@ def pickup(task_id: str, *agent_args: str, is_app: bool, is_review_required: boo
                     "resume",
                     cast("str", thread_id),
                     *agent_args,
-                    "-c",
-                    CODEX_PROVIDER_OVERRIDE,
+                    *CODEX_PROVIDER_ARGUMENTS,
                 ],
                 cwd=cwd,
-                env=codex_environment(task_environment(task)),
+                env=codex_environment(os.environ.copy()),
                 pass_fds=(directory_lock_file.fileno(),),
                 check=False,
             ).returncode
@@ -1230,7 +1228,7 @@ def codex_app_server_responses(*, has_rate_limits: bool) -> dict[int, dict[str, 
     standard_output: io.TextIOWrapper | None = None
     try:
         process = subprocess.Popen(
-            ["codex", "app-server", "-c", CODEX_PROVIDER_OVERRIDE],
+            ["codex", "app-server", *CODEX_PROVIDER_ARGUMENTS],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -1271,13 +1269,16 @@ def codex_app_server_responses(*, has_rate_limits: bool) -> dict[int, dict[str, 
     else:
         return responses
     finally:
-        if process is not None and process.poll() is None:
-            process.kill()
-            process.wait()
-        if standard_output is not None:
-            standard_output.close()
+        if process is not None:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+            with suppress(BrokenPipeError):
+                cast("io.TextIOWrapper", process.stdin).close()
         if response_reader is not None:
             response_reader.join()
+        if standard_output is not None:
+            standard_output.close()
 
 
 def validate_codex_subscription(responses: dict[int, dict[str, Any]]) -> None:
@@ -1320,8 +1321,8 @@ def codex_reset_time_from_limit(limit: dict[str, Any]) -> datetime:
     return validated_reset_time(datetime.fromtimestamp(resets_at, UTC))
 
 
-def required_codex_primary_limit(rate_limits: dict[str, Any] | None) -> dict[str, Any] | None:
-    if rate_limits is None or "primary" not in rate_limits:
+def required_codex_primary_limit(rate_limits: dict[str, Any]) -> dict[str, Any] | None:
+    if "primary" not in rate_limits:
         raise SystemExit(USAGE_ERROR)
     primary = rate_limits["primary"]
     return cast("dict[str, Any]", primary) if isinstance(primary, dict) else None
