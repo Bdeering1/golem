@@ -47,6 +47,7 @@ STATUS_COLORS = {
 }
 ANSI_RESET = "\033[0m"
 SUCCEEDED_STATUSES = {STATUS_NEEDS_REVIEW, STATUS_DONE}
+UNREVIEWED_STATUSES = {STATUS_SCHEDULED, STATUS_RUNNING, STATUS_WAITING, STATUS_NEEDS_REVIEW}
 AGENT_LOG_MAX_BYTES = 1024 * 1024
 USAGE_ERROR = "golem: usage lookup unavailable"
 USAGE_TIMEOUT_SECONDS = 30
@@ -239,6 +240,22 @@ def has_running_dependent(tasks: dict[str, Any], parent_id: str) -> bool:
         dependent["status"] == STATUS_RUNNING and dependent.get("after") == parent_id
         for dependent in tasks.values()
     )
+
+
+def has_unreviewed_dependent(tasks: dict[str, Any], parent_id: str) -> bool:
+    return any(
+        dependent["status"] in UNREVIEWED_STATUSES and dependent.get("after") == parent_id
+        for dependent in tasks.values()
+    )
+
+
+def mark_ancestors_done(tasks: dict[str, Any], task: dict[str, Any]) -> None:
+    ancestor = tasks.get(task.get("after", ""))
+    while isinstance(ancestor, dict):
+        parent = cast("dict[str, Any]", ancestor)
+        if parent.get("status") == STATUS_NEEDS_REVIEW:
+            parent["status"] = STATUS_DONE
+        ancestor = tasks.get(parent.get("after", ""))
 
 
 def reserve_dependent_task(
@@ -616,11 +633,13 @@ def new_task_record(
     return record
 
 
-def pickup(task_id: str, *agent_args: str, is_app: bool) -> int:
+def pickup(task_id: str, *agent_args: str, is_app: bool, is_review_required: bool = False) -> int:
     with locked_ledger() as (tasks, worktrees):
         if task_id not in tasks:
             raise SystemExit(f"golem: task not found: {task_id}")
         task = cast("dict[str, Any]", tasks[task_id])
+        if is_review_required and task.get("status") != STATUS_NEEDS_REVIEW:
+            return 0
         if task.get("status") in {STATUS_SCHEDULED, STATUS_WAITING, STATUS_CANCELLED}:
             raise SystemExit(f"golem: task has not started: {task_id}")
         reject_missing_worktree(task, worktrees)
@@ -631,6 +650,7 @@ def pickup(task_id: str, *agent_args: str, is_app: bool) -> int:
         clear_worktree_release(tasks, worktrees, task)
         if task.get("status") == STATUS_NEEDS_REVIEW:
             task["status"] = STATUS_DONE
+            mark_ancestors_done(tasks, task)
         cwd = task_directory(task)
         session_id = cast("str", task["session_id"])
     if is_app:
@@ -647,6 +667,28 @@ def pickup(task_id: str, *agent_args: str, is_app: bool) -> int:
         ).returncode
     finally:
         release_lock(directory_lock_file)
+
+
+def pickup_all() -> int:
+    tasks = load_tasks()
+    task_ids = [
+        task_id
+        for task_id, task in tasks.items()
+        if task.get("status") == STATUS_NEEDS_REVIEW
+        and not has_unreviewed_dependent(tasks, task_id)
+    ]
+    if not task_ids:
+        print("golem: no tasks ready for review")
+        return 0
+
+    has_failure = False
+    for task_id in task_ids:
+        try:
+            has_failure |= pickup(task_id, is_app=True, is_review_required=True) != 0
+        except SystemExit as error:
+            print(error, file=sys.stderr)
+            has_failure = True
+    return int(has_failure)
 
 
 def close(task_id: str) -> int:
@@ -980,6 +1022,10 @@ def claim_task(
 ) -> tuple[dict[str, Any], io.TextIOWrapper, io.TextIOWrapper] | None:
     task = tasks.get(task_id)
     if task is None or task["status"] != expected_status or task["session_id"] != session_id:
+        return None
+    if expected_status == STATUS_SCHEDULED and datetime.fromisoformat(
+        task["due_at"]
+    ) > datetime.now(UTC):
         return None
     run_lock_file = acquire_run_lock(session_id)
     if run_lock_file is None:
@@ -1591,10 +1637,14 @@ def run_launch_agent() -> int:
     return 0
 
 
-def retryable_task(tasks: dict[str, Any], task_id: str) -> dict[str, Any]:
+def existing_task(tasks: dict[str, Any], task_id: str) -> dict[str, Any]:
     if task_id not in tasks:
         raise SystemExit(f"golem: task not found: {task_id}")
-    task = cast("dict[str, Any]", tasks[task_id])
+    return cast("dict[str, Any]", tasks[task_id])
+
+
+def retryable_task(tasks: dict[str, Any], task_id: str) -> dict[str, Any]:
+    task = existing_task(tasks, task_id)
     if task.get("status") not in {STATUS_FAILED, STATUS_CANCELLED}:
         raise SystemExit(f"golem: task cannot be retried: {task_id}")
     return task
@@ -1622,6 +1672,24 @@ def retry_task(task_id: str, *, is_now: bool, at_text: str | None) -> int:
                 record[name] = task[name]
         tasks[task_id] = record
         clear_worktree_release(tasks, worktrees, record)
+    return wake_launch_agent_and_report(task_id, when)
+
+
+def scheduled_task(tasks: dict[str, Any], task_id: str) -> dict[str, Any]:
+    task = existing_task(tasks, task_id)
+    if task.get("status") != STATUS_SCHEDULED:
+        raise SystemExit(f"golem: task is not scheduled: {task_id}")
+    return task
+
+
+def reschedule_task(task_id: str, *, is_now: bool, at_text: str | None) -> int:
+    scheduled_task(load_tasks(), task_id)
+    require_launch_agent()
+    when = planned_execution_time(is_now=is_now, at_text=at_text) or datetime.now(UTC).astimezone()
+
+    with locked_tasks() as tasks:
+        task = scheduled_task(tasks, task_id)
+        task["due_at"] = when.isoformat()
     return wake_launch_agent_and_report(task_id, when)
 
 
@@ -1698,7 +1766,10 @@ def build_parser() -> argparse.ArgumentParser:
     set_command_handler(run_command, run_task_from_arguments)
 
     pickup_command = commands.add_parser("pickup")
-    pickup_command.add_argument("id")
+    pickup_command.add_argument("id", nargs="?")
+    pickup_command.add_argument(
+        "--all", action="store_true", help="open every task that needs review"
+    )
     pickup_command.add_argument(
         "--app",
         action="store_true",
@@ -1706,7 +1777,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     set_command_handler(
         pickup_command,
-        lambda arguments: pickup(arguments.id, *arguments.agent_args, is_app=arguments.app),
+        lambda arguments: (
+            pickup_all()
+            if arguments.all
+            else pickup(arguments.id, *arguments.agent_args, is_app=arguments.app)
+        ),
     )
     close_command = commands.add_parser("close")
     close_command.add_argument("id")
@@ -1727,6 +1802,17 @@ def build_parser() -> argparse.ArgumentParser:
     set_command_handler(
         retry_command,
         lambda arguments: retry_task(arguments.id, is_now=arguments.now, at_text=arguments.at),
+    )
+    reschedule_command = commands.add_parser(
+        "reschedule",
+        description=SCHEDULE_DESCRIPTION,
+    )
+    reschedule_command.add_argument("id")
+    reschedule_schedule_group = reschedule_command.add_mutually_exclusive_group()
+    add_scheduling_arguments(reschedule_schedule_group.add_argument)
+    set_command_handler(
+        reschedule_command,
+        lambda arguments: reschedule_task(arguments.id, is_now=arguments.now, at_text=arguments.at),
     )
     delete_command = commands.add_parser("delete")
     delete_command.add_argument("id")
@@ -1776,8 +1862,17 @@ def main(argv: list[str] | None = None) -> int:
     arguments = parser.parse_args(golem_args, argparse.Namespace(agent_args=agent_args))
     if agent_args and arguments.command == "retry":
         parser.error("retry does not accept agent arguments")
+    if agent_args and arguments.command == "reschedule":
+        parser.error("reschedule does not accept agent arguments")
     if agent_args and arguments.command == "pickup" and arguments.app:
         parser.error("pickup --app does not accept agent arguments")
+    if arguments.command == "pickup":
+        if arguments.all and not arguments.app:
+            parser.error("pickup --all requires --app")
+        if arguments.all and arguments.id is not None:
+            parser.error("pickup --all does not accept an ID")
+        if arguments.id is None and not arguments.all:
+            parser.error("pickup requires an ID or --all")
     return arguments.handler(arguments)
 
 

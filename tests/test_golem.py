@@ -391,6 +391,12 @@ def read_tasks(ledger_path):
     return json.loads(ledger_path.read_text(encoding="utf-8"))
 
 
+def set_task_due_now(ledger_path, task_id=TASK_ID):
+    tasks = read_tasks(ledger_path)
+    tasks[task_id]["due_at"] = datetime.now(UTC).isoformat()
+    write_tasks(ledger_path, tasks)
+
+
 def logged_claude_calls(fake_commands):
     calls: list[list[str]] = []
     for call in fake_commands["claude-args"].read_text(encoding="utf-8").split("\x1e\n"):
@@ -914,6 +920,89 @@ def test_pickup_app_rejects_agent_arguments(fake_commands, ledger_path):
     assert fake_commands["open-args"].read_text(encoding="utf-8") == ""
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param(["pickup", "--all"], id="all-needs-app"),
+        pytest.param(["pickup", TASK_ID, "--all", "--app"], id="all-rejects-id"),
+        pytest.param(["pickup", "--app"], id="needs-id-or-all"),
+        pytest.param(
+            ["reschedule", TASK_ID, "--now", "--", *AGENT_ARGS], id="reschedule-agent-args"
+        ),
+    ],
+)
+def test_pickup_all_and_reschedule_validate_arguments(command):
+    with pytest.raises(SystemExit) as exit_info:
+        golem.main(command)
+
+    assert exit_info.value.code == 2
+
+
+def test_pickup_marks_ancestors_that_need_review_done(fake_commands, ledger_path):
+    write_tasks(
+        ledger_path,
+        {
+            PARENT_ID: task_record(golem.STATUS_NEEDS_REVIEW, task_id=PARENT_ID),
+            CHILD_ID: task_record(golem.STATUS_NEEDS_REVIEW, task_id=CHILD_ID, after=PARENT_ID),
+            GRANDCHILD_ID: task_record(
+                golem.STATUS_NEEDS_REVIEW, task_id=GRANDCHILD_ID, after=CHILD_ID
+            ),
+        },
+    )
+
+    assert golem.main(["pickup", GRANDCHILD_ID, "--app"]) == 0
+    assert {task["status"] for task in read_tasks(ledger_path).values()} == {golem.STATUS_DONE}
+
+
+@pytest.mark.parametrize(
+    ("child_status", "opened_ids"),
+    [
+        pytest.param(golem.STATUS_NEEDS_REVIEW, [CHILD_ID], id="child-needs-review"),
+        pytest.param(golem.STATUS_RUNNING, [], id="child-running"),
+        pytest.param(golem.STATUS_FAILED, [PARENT_ID], id="child-failed"),
+    ],
+)
+def test_pickup_all_opens_only_latest_reviewable_task_in_chain(
+    fake_commands, ledger_path, child_status, opened_ids
+):
+    tasks = {
+        PARENT_ID: task_record(golem.STATUS_NEEDS_REVIEW, task_id=PARENT_ID),
+        CHILD_ID: task_record(child_status, task_id=CHILD_ID, after=PARENT_ID),
+    }
+    write_tasks(ledger_path, tasks)
+
+    assert golem.main(["pickup", "--all", "--app"]) == 0
+    assert fake_commands["open-args"].read_text(encoding="utf-8").splitlines() == [
+        f"claude://resume?session={tasks[task_id]['session_id']}" for task_id in opened_ids
+    ]
+
+
+def test_pickup_all_continues_after_busy_directory(fake_commands, ledger_path, capsys, tmp_path):
+    busy_directory = tmp_path / "busy"
+    other_directory = tmp_path / "other"
+    busy_directory.mkdir()
+    other_directory.mkdir()
+    tasks = {
+        "busy": task_record(golem.STATUS_NEEDS_REVIEW, task_id="busy", cwd=str(busy_directory)),
+        "other": task_record(golem.STATUS_NEEDS_REVIEW, task_id="other", cwd=str(other_directory)),
+    }
+    write_tasks(ledger_path, tasks)
+    directory_lock_file = golem.acquire_lock(golem.directory_lock_path(str(busy_directory)))
+    assert directory_lock_file is not None
+
+    try:
+        assert golem.main(["pickup", "--all", "--app"]) == 1
+    finally:
+        golem.release_lock(directory_lock_file)
+
+    assert f"golem: directory is busy: {busy_directory}" in capsys.readouterr().err
+    assert read_task(ledger_path, "busy")["status"] == golem.STATUS_NEEDS_REVIEW
+    assert read_task(ledger_path, "other")["status"] == golem.STATUS_DONE
+    assert fake_commands["open-args"].read_text(encoding="utf-8") == (
+        f"claude://resume?session={tasks['other']['session_id']}\n"
+    )
+
+
 def test_after_pending_parent_skips_usage_lookup(installed_launch_agent, ledger_path, monkeypatch):
     write_task(ledger_path, golem.STATUS_SCHEDULED, task_id=PARENT_ID)
     monkeypatch.setattr(golem, "next_reset_time", lambda: pytest.fail("usage lookup ran"))
@@ -1029,6 +1118,7 @@ def test_usage_limited_task_resumes_at_reset_in_same_session(
     assert datetime.fromisoformat(task["due_at"]) == RESET_TIME
     write_claude_output(fake_commands, CLAUDE_RESULT, is_verbose=is_verbose)
     monkeypatch.delenv("GOLEM_CLAUDE_EXIT")
+    set_task_due_now(ledger_path)
 
     assert golem.main(["_execute", TASK_ID, session_id]) == 0
 
@@ -1064,6 +1154,7 @@ def test_usage_limited_task_fails_once_resumes_run_out(
     for _ in range(golem.MAX_USAGE_LIMIT_RESUMES):
         task = read_task(ledger_path)
         assert task["status"] == golem.STATUS_SCHEDULED
+        set_task_due_now(ledger_path)
         golem.main(["_execute", TASK_ID, task["session_id"]])
 
     assert read_task(ledger_path)["status"] == golem.STATUS_FAILED
@@ -1098,6 +1189,7 @@ def test_scheduled_task_runs_when_executed(
     golem.main(["run", TASK_ID, PROMPT, "--at", AT_TEXT])
     task = read_task(ledger_path)
     assert datetime.fromisoformat(task["due_at"]) == RESET_TIME
+    set_task_due_now(ledger_path)
 
     assert golem.main(["_execute", TASK_ID, task["session_id"]]) == 0
     assert read_task(ledger_path)["status"] == golem.STATUS_NEEDS_REVIEW
@@ -1113,6 +1205,7 @@ def create_waiting_chain():
 def test_scheduled_task_runs_waiting_chain(installed_launch_agent, fake_commands, ledger_path):
     create_waiting_chain()
     tasks = json.loads(ledger_path.read_text(encoding="utf-8"))
+    set_task_due_now(ledger_path, PARENT_ID)
 
     golem.main(["_execute", PARENT_ID, tasks[PARENT_ID]["session_id"]])
 
@@ -1132,6 +1225,7 @@ def test_retrying_failed_parent_runs_waiting_dependent(
     create_waiting_chain()
     parent = read_task(ledger_path, PARENT_ID)
     monkeypatch.setenv("GOLEM_CLAUDE_EXIT", "1")
+    set_task_due_now(ledger_path, PARENT_ID)
     golem.main(["_execute", PARENT_ID, parent["session_id"]])
     monkeypatch.delenv("GOLEM_CLAUDE_EXIT")
 
@@ -1344,9 +1438,57 @@ def test_retry_runs_failed_task_in_new_session(
         assert due_at <= datetime.now(UTC)
     else:
         assert due_at == expected_due_at
+    set_task_due_now(ledger_path)
     assert golem.main(["_execute", TASK_ID, retry["session_id"]]) == 0
     assert read_task(ledger_path)["status"] == golem.STATUS_NEEDS_REVIEW
     assert logged_claude_args(fake_commands) == expected_claude_args(retry)
+
+
+@pytest.mark.parametrize("status", [None, golem.STATUS_RUNNING])
+def test_reschedule_refuses_unknown_and_non_scheduled_tasks(ledger_path, monkeypatch, status):
+    if status is not None:
+        write_task(ledger_path, status)
+    monkeypatch.setattr(golem, "next_reset_time", lambda: pytest.fail("usage lookup ran"))
+
+    with pytest.raises(SystemExit, match=TASK_ID):
+        golem.main(["reschedule", TASK_ID])
+
+
+def test_reschedule_changes_only_due_time(
+    installed_launch_agent, fake_commands, ledger_path, monkeypatch
+):
+    write_task(
+        ledger_path,
+        golem.STATUS_SCHEDULED,
+        result=USAGE_LIMIT_RESULT,
+        usage_limit_resume_count=1,
+    )
+    original_task = read_task(ledger_path)
+    later = (datetime.now(UTC) + timedelta(days=1)).replace(second=0, microsecond=0)
+    monkeypatch.setattr(golem, "scheduled_time", lambda _: later)
+
+    assert golem.main(["reschedule", TASK_ID, "--at", AT_TEXT]) == 0
+    assert golem.main(["_execute", TASK_ID, original_task["session_id"]]) == 0
+    rescheduled_task = read_task(ledger_path)
+    assert datetime.fromisoformat(rescheduled_task["due_at"]) == later
+    assert {name: value for name, value in rescheduled_task.items() if name != "due_at"} == {
+        name: value for name, value in original_task.items() if name != "due_at"
+    }
+
+    assert golem.main(["reschedule", TASK_ID, "--now"]) == 0
+    assert golem.main(["_execute", TASK_ID, original_task["session_id"]]) == 0
+    assert logged_claude_args(fake_commands) == [
+        "--resume",
+        original_task["session_id"],
+        "--print",
+        golem.USAGE_LIMIT_RESUME_PROMPT,
+        "--output-format",
+        "json",
+        golem.VERBOSE_ARGUMENT,
+        "--name",
+        TASK_ID,
+        SKIP_PERMISSIONS,
+    ]
 
 
 def test_retry_reuses_task_worktree_and_saved_environment(
@@ -1433,6 +1575,7 @@ def test_failed_dependent_does_not_block_later_sibling(
 
     monkeypatch.setattr(golem, "run_claude", run_claude)
     parent = read_task(ledger_path, PARENT_ID)
+    set_task_due_now(ledger_path, PARENT_ID)
     golem.main(["_execute", PARENT_ID, parent["session_id"]])
 
     tasks = json.loads(ledger_path.read_text(encoding="utf-8"))
@@ -1454,6 +1597,7 @@ def test_usage_limit_resume_and_pickup_use_task_worktree(
     golem.main(["_execute", TASK_ID, task["session_id"]])
     worktree = read_task(ledger_path)["worktree"]
     write_claude_output(fake_commands, CLAUDE_RESULT)
+    set_task_due_now(ledger_path)
     golem.main(["_execute", TASK_ID, task["session_id"]])
     golem.main(["pickup", TASK_ID])
 
