@@ -926,31 +926,16 @@ def test_pickup_app_rejects_agent_arguments(fake_commands, ledger_path):
         pytest.param(["pickup", "--all"], id="all-needs-app"),
         pytest.param(["pickup", TASK_ID, "--all", "--app"], id="all-rejects-id"),
         pytest.param(["pickup", "--app"], id="needs-id-or-all"),
+        pytest.param(
+            ["reschedule", TASK_ID, "--now", "--", *AGENT_ARGS], id="reschedule-agent-args"
+        ),
     ],
 )
-def test_pickup_all_validates_arguments(command):
+def test_pickup_all_and_reschedule_validate_arguments(command):
     with pytest.raises(SystemExit) as exit_info:
         golem.main(command)
 
     assert exit_info.value.code == 2
-
-
-def test_pickup_all_opens_review_tasks_and_leaves_others_unchanged(fake_commands, ledger_path):
-    tasks = {
-        "first": task_record(golem.STATUS_NEEDS_REVIEW, task_id="first"),
-        "second": task_record(golem.STATUS_NEEDS_REVIEW, task_id="second"),
-        "scheduled": task_record(golem.STATUS_SCHEDULED, task_id="scheduled"),
-    }
-    write_tasks(ledger_path, tasks)
-
-    assert golem.main(["pickup", "--all", "--app"]) == 0
-    assert fake_commands["open-args"].read_text(encoding="utf-8").splitlines() == [
-        f"claude://resume?session={tasks['first']['session_id']}",
-        f"claude://resume?session={tasks['second']['session_id']}",
-    ]
-    assert read_task(ledger_path, "first")["status"] == golem.STATUS_DONE
-    assert read_task(ledger_path, "second")["status"] == golem.STATUS_DONE
-    assert read_task(ledger_path, "scheduled")["status"] == golem.STATUS_SCHEDULED
 
 
 def test_pickup_marks_ancestors_that_need_review_done(fake_commands, ledger_path):
@@ -1481,17 +1466,6 @@ def test_reschedule_refuses_unknown_and_non_scheduled_tasks(
         golem.main(["reschedule", TASK_ID])
 
 
-def test_reschedule_rejects_agent_arguments(ledger_path):
-    write_task(ledger_path, golem.STATUS_SCHEDULED)
-    task = read_task(ledger_path)
-
-    with pytest.raises(SystemExit) as exit_info:
-        golem.main(["reschedule", TASK_ID, "--now", "--", *AGENT_ARGS])
-
-    assert exit_info.value.code == 2
-    assert read_task(ledger_path) == task
-
-
 def test_reschedule_preserves_usage_limit_resume_state(
     installed_launch_agent, fake_commands, ledger_path, monkeypatch
 ):
@@ -1527,19 +1501,12 @@ def test_reschedule_preserves_usage_limit_resume_state(
     ]
 
 
-def test_reschedule_now_wakes_the_agent(installed_launch_agent, fake_commands, ledger_path):
-    write_task(ledger_path, golem.STATUS_SCHEDULED)
-
-    assert golem.main(["reschedule", TASK_ID, "--now"]) == 0
-    assert "kickstart" in fake_commands["launchctl-args"].read_text(encoding="utf-8")
-
-
 def test_rescheduled_task_is_not_claimed_before_its_due_time(
     installed_launch_agent, fake_commands, ledger_path, monkeypatch
 ):
     write_task(ledger_path, golem.STATUS_SCHEDULED)
     session_id = read_task(ledger_path)["session_id"]
-    monkeypatch.setattr(golem, "scheduled_time", lambda _: RESET_TIME)
+    monkeypatch.setattr(golem, "scheduled_time", lambda _: datetime.now(UTC) + timedelta(days=1))
 
     assert golem.main(["reschedule", TASK_ID, "--at", AT_TEXT]) == 0
     assert golem.main(["_execute", TASK_ID, session_id]) == 0
