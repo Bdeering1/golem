@@ -108,18 +108,16 @@ printf '%s\\n' "$*" >> "$GOLEM_OPEN_ARGS"
 """,
         "gh": """#!/bin/sh
 head=''
-next=0
-for argument in "$@"; do
-    if [ "$next" = 1 ]; then
-        head="$argument"
-    fi
-    next=0
-    if [ "$argument" = '--head' ]; then
-        next=1
-    fi
+state=''
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --head) head="$2"; shift ;;
+        --state) state="$2"; shift ;;
+    esac
+    shift
 done
 pull_requests_file="$GOLEM_GH_PULL_REQUESTS/$head.json"
-if [ -n "$GOLEM_GH_PULL_REQUESTS" ] && [ -f "$pull_requests_file" ]; then
+if [ "$state" = all ] && [ -f "$pull_requests_file" ]; then
     cat "$pull_requests_file"
 else
     printf '[]'
@@ -2707,6 +2705,25 @@ def test_prune_applies_each_answer_in_turn(ledger_path, monkeypatch, answers, re
     assert golem.main(["prune"]) == 0
 
     assert set(golem.load_tasks()) == set(task_ids) - removed_ids
+
+
+def interrupt():
+    raise KeyboardInterrupt
+
+
+def test_prune_interrupted_at_prompt_deletes_nothing(ledger_path, monkeypatch):
+    write_tasks(
+        ledger_path,
+        {
+            TASK_ID: task_record(golem.STATUS_CANCELLED),
+            SIBLING_ID: task_record(golem.STATUS_DONE, task_id=SIBLING_ID),
+        },
+    )
+    monkeypatch.setattr(sys, "stdin", TerminalInput("y\n", interrupt))
+
+    assert golem.main(["prune"]) == 130
+
+    assert set(golem.load_tasks()) == {TASK_ID, SIBLING_ID}
 
 
 def test_prune_offers_parent_only_after_its_dependents_are_removed(ledger_path, monkeypatch):

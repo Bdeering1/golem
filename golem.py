@@ -1742,9 +1742,13 @@ def delete_pruned_tasks(
 def prune_tasks(*, is_confirmed: bool) -> int:
     can_prompt = sys.stdin.isatty()
     pull_requests: PullRequestCache = {}
-    selected_tasks, candidate_count = selected_prune_tasks(
-        load_tasks(), pull_requests, is_confirmed=is_confirmed, can_prompt=can_prompt
-    )
+    try:
+        selected_tasks, candidate_count = selected_prune_tasks(
+            load_tasks(), pull_requests, is_confirmed=is_confirmed, can_prompt=can_prompt
+        )
+    except KeyboardInterrupt:
+        print()
+        return 130
     if not candidate_count:
         print("golem: no tasks to prune")
         return 0
