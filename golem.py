@@ -72,6 +72,16 @@ WORKTREE_OWNER_GOLEM = "golem"
 WORKTREE_OWNER_EXTERNAL = "external"
 WORKTREE_OWNER_MARKER = "golem-owner"
 CLAUDE_LOCK_PATTERN = re.compile(r"claude session (\S+) \(pid (\d+) start .+\)")
+PRUNE_IDLE_DAYS = 7
+PULL_REQUEST_TIMEOUT_SECONDS = 30
+PULL_REQUEST_STATE_OPEN = "OPEN"
+PRUNE_ANSWER_YES = "y"
+PRUNE_ANSWER_NO = "n"
+PRUNE_ANSWER_ALL = "a"
+PRUNE_ANSWER_QUIT = "q"
+PRUNE_ANSWERS = (PRUNE_ANSWER_YES, PRUNE_ANSWER_NO, PRUNE_ANSWER_ALL, PRUNE_ANSWER_QUIT)
+
+type PullRequestCache = dict[str | None, dict[str, Any] | None]
 
 
 def state_directory() -> Path:
@@ -233,6 +243,15 @@ def waiting_dependent_ids(tasks: dict[str, Any], parent_id: str) -> list[str]:
         for dependent_id, dependent in tasks.items()
         if dependent["status"] == STATUS_WAITING and dependent.get("after") == parent_id
     ]
+
+
+def dependent_task_ids(tasks: dict[str, Any], parent_id: str) -> list[str]:
+    return sorted(
+        dependent_id
+        for dependent_id, dependent in tasks.items()
+        if isinstance(dependent, dict)
+        and cast("dict[str, Any]", dependent).get("after") == parent_id
+    )
 
 
 def has_running_dependent(tasks: dict[str, Any], parent_id: str) -> bool:
@@ -1428,6 +1447,10 @@ def is_known_directory_busy(tasks: dict[str, Any], task: dict[str, Any]) -> bool
         directory = task["cwd"]
     else:
         return False
+    return is_directory_busy(directory)
+
+
+def is_directory_busy(directory: str) -> bool:
     directory_lock_file = acquire_lock(directory_lock_path(directory))
     if directory_lock_file is None:
         return True
@@ -1517,6 +1540,20 @@ def list_worktrees() -> int:
     return 0
 
 
+def delete_task_and_release_worktrees(
+    tasks: dict[str, Any], worktrees: dict[str, Any], task_id: str
+) -> None:
+    task = cast("dict[str, Any]", tasks.pop(task_id))
+    for path, resource in worktrees.items():
+        if (
+            task_uses_worktree(tasks, task, path)
+            and resource.get("owner") == WORKTREE_OWNER_GOLEM
+            and resource.get("removed_at") is None
+            and not worktree_task_ids(tasks, path)
+        ):
+            resource.setdefault("released_at", datetime.now(UTC).isoformat())
+
+
 def delete_task(task_id: str, *, is_removing_worktree: bool) -> int:
     with locked_ledger() as (tasks, worktrees):
         stored_task = tasks.get(task_id)
@@ -1525,12 +1562,7 @@ def delete_task(task_id: str, *, is_removing_worktree: bool) -> int:
         task = cast("dict[str, Any]", stored_task)
         if task.get("status") == STATUS_RUNNING:
             raise SystemExit(f"golem: task is running: {task_id}")
-        dependent_ids = sorted(
-            dependent_id
-            for dependent_id, dependent in tasks.items()
-            if isinstance(dependent, dict)
-            and cast("dict[str, Any]", dependent).get("after") == task_id
-        )
+        dependent_ids = dependent_task_ids(tasks, task_id)
         if dependent_ids:
             raise SystemExit(f"golem: task has dependents: {task_id}: {', '.join(dependent_ids)}")
         remaining_tasks = {id_: record for id_, record in tasks.items() if id_ != task_id}
@@ -1549,21 +1581,178 @@ def delete_task(task_id: str, *, is_removing_worktree: bool) -> int:
                         file=sys.stderr,
                     )
                     return 1
-        del tasks[task_id]
-        for path, resource in worktrees.items():
-            if (
-                task_uses_worktree(tasks, task, path)
-                and resource.get("owner") == WORKTREE_OWNER_GOLEM
-                and resource.get("removed_at") is None
-                and not worktree_task_ids(tasks, path)
-            ):
-                resource.setdefault("released_at", datetime.now(UTC).isoformat())
+        delete_task_and_release_worktrees(tasks, worktrees, task_id)
         print(f"golem: deleted task: {task_id}")
         print(f"golem: session: {task['session_id']}")
         if worktree is not None:
             print(f"golem: worktree: {worktree}")
         if is_removed:
             print(f"golem: removed worktree: {worktree}")
+    return 0
+
+
+def dependents_first_task_ids(tasks: dict[str, Any], task_ids: list[str]) -> list[str]:
+    ordered_task_ids: list[str] = []
+    for task_id in task_ids:
+        ordered_task_ids += dependents_first_task_ids(tasks, dependent_task_ids(tasks, task_id))
+        ordered_task_ids.append(task_id)
+    return ordered_task_ids
+
+
+def branch_pull_request(worktree: str | None) -> dict[str, Any] | None:
+    if worktree is None:
+        return None
+    branch = run_git(worktree, "symbolic-ref", "--short", "HEAD")
+    if branch.returncode:
+        return None
+    try:
+        result = subprocess.run(
+            [
+                "gh",
+                "pr",
+                "list",
+                "--head",
+                branch.stdout.strip(),
+                "--state",
+                "all",
+                "--json",
+                "number,state",
+            ],
+            cwd=worktree,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            encoding="utf-8",
+            timeout=PULL_REQUEST_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except OSError, subprocess.TimeoutExpired:
+        return None
+    if result.returncode:
+        return None
+    pull_requests = cast("list[dict[str, Any]]", json.loads(result.stdout))
+    open_pull_request = next(
+        (
+            pull_request
+            for pull_request in pull_requests
+            if pull_request["state"] == PULL_REQUEST_STATE_OPEN
+        ),
+        None,
+    )
+    if open_pull_request is not None:
+        return open_pull_request
+    return max(pull_requests, key=lambda pull_request: pull_request["number"], default=None)
+
+
+def session_idle_reason(session_id: str) -> str | None:
+    transcript_paths = (Path.home() / ".claude" / "projects").glob(f"*/{session_id}.jsonl")
+    transcript_modified_time = max(
+        (transcript_path.stat().st_mtime for transcript_path in transcript_paths), default=None
+    )
+    if transcript_modified_time is None:
+        return "no transcript"
+    idle_days = timedelta(seconds=time.time() - transcript_modified_time).days
+    if idle_days < PRUNE_IDLE_DAYS:
+        return None
+    return f"idle {idle_days}d"
+
+
+def done_task_prune_reason(task: dict[str, Any], pull_requests: PullRequestCache) -> str | None:
+    worktree = task.get("worktree")
+    if is_directory_busy(directory_to_lock(task, worktree)):
+        return None
+    if worktree not in pull_requests:
+        pull_requests[worktree] = branch_pull_request(worktree)
+    pull_request = pull_requests[worktree]
+    if pull_request is None:
+        return session_idle_reason(task["session_id"])
+    if pull_request["state"] == PULL_REQUEST_STATE_OPEN:
+        return None
+    return f"PR #{pull_request['number']} {pull_request['state'].lower()}"
+
+
+def prune_answer(task_id: str, reason: str) -> str:
+    prompt = f"Remove {task_id} ({STATUS_DONE}, {reason})? [{','.join(PRUNE_ANSWERS)}] "
+    while True:
+        try:
+            answer = input(prompt).strip().lower()
+        except EOFError:
+            print()
+            return PRUNE_ANSWER_QUIT
+        if answer in PRUNE_ANSWERS:
+            return answer
+
+
+def selected_prune_tasks(
+    tasks: dict[str, Any],
+    pull_requests: PullRequestCache,
+    *,
+    is_confirmed: bool,
+    can_prompt: bool,
+) -> tuple[dict[str, dict[str, Any]], int]:
+    selected_tasks: dict[str, dict[str, Any]] = {}
+    candidate_count = 0
+    answer = PRUNE_ANSWER_ALL if is_confirmed else None
+    root_task_ids = sorted(
+        task_id for task_id, task in tasks.items() if task.get("after") not in tasks
+    )
+    for task_id in dependents_first_task_ids(tasks, root_task_ids):
+        task = cast("dict[str, Any]", tasks[task_id])
+        if any(
+            dependent_id not in selected_tasks
+            for dependent_id in dependent_task_ids(tasks, task_id)
+        ):
+            continue
+        if task["status"] == STATUS_CANCELLED:
+            candidate_count += 1
+            selected_tasks[task_id] = task
+            continue
+        if task["status"] != STATUS_DONE or answer == PRUNE_ANSWER_QUIT:
+            continue
+        reason = done_task_prune_reason(task, pull_requests)
+        if reason is None:
+            continue
+        candidate_count += 1
+        if answer != PRUNE_ANSWER_ALL:
+            answer = prune_answer(task_id, reason) if can_prompt else PRUNE_ANSWER_NO
+        if answer in {PRUNE_ANSWER_YES, PRUNE_ANSWER_ALL}:
+            selected_tasks[task_id] = task
+    return selected_tasks, candidate_count
+
+
+def delete_pruned_tasks(
+    selected_tasks: dict[str, dict[str, Any]],
+    pull_requests: PullRequestCache,
+) -> None:
+    with locked_ledger() as (tasks, worktrees):
+        for task_id, evaluated_task in selected_tasks.items():
+            if (
+                tasks.get(task_id) != evaluated_task
+                or dependent_task_ids(tasks, task_id)
+                or (
+                    evaluated_task["status"] == STATUS_DONE
+                    and done_task_prune_reason(evaluated_task, pull_requests) is None
+                )
+            ):
+                print(f"golem: kept {task_id}: no longer eligible", file=sys.stderr)
+                continue
+            delete_task_and_release_worktrees(tasks, worktrees, task_id)
+            print(f"golem: deleted task: {task_id}")
+
+
+def prune_tasks(*, is_confirmed: bool) -> int:
+    can_prompt = sys.stdin.isatty()
+    pull_requests: PullRequestCache = {}
+    selected_tasks, candidate_count = selected_prune_tasks(
+        load_tasks(), pull_requests, is_confirmed=is_confirmed, can_prompt=can_prompt
+    )
+    if not candidate_count:
+        print("golem: no tasks to prune")
+        return 0
+    if not can_prompt and candidate_count > len(selected_tasks):
+        print(
+            "golem: kept done tasks without a terminal; use --yes to remove them", file=sys.stderr
+        )
+    delete_pruned_tasks(selected_tasks, pull_requests)
     return 0
 
 
@@ -1748,6 +1937,20 @@ def add_worktree_commands(add_parser: Callable[..., argparse.ArgumentParser]) ->
     set_command_handler(auto_remove_worktree_command, set_worktree_auto_remove_from_arguments)
 
 
+def add_prune_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
+    prune_command = add_parser(
+        "prune",
+        description=(
+            "Delete cancelled tasks, and done tasks whose PR is merged or closed or whose "
+            f"session has been idle for {PRUNE_IDLE_DAYS} days, after asking."
+        ),
+    )
+    prune_command.add_argument(
+        "--yes", action="store_true", help="delete done tasks that qualify without asking"
+    )
+    set_command_handler(prune_command, lambda arguments: prune_tasks(is_confirmed=arguments.yes))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="golem")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -1821,6 +2024,7 @@ def build_parser() -> argparse.ArgumentParser:
         delete_command,
         lambda arguments: delete_task(arguments.id, is_removing_worktree=arguments.remove_worktree),
     )
+    add_prune_command(commands.add_parser)
     set_command_handler(commands.add_parser("list"), lambda _: list_tasks())
     add_worktree_commands(commands.add_parser)
     launch_agent_command = commands.add_parser(
