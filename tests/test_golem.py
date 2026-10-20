@@ -382,7 +382,7 @@ def git_output(repository_path, *arguments: str):
 
 
 def git_worktree(repository_path):
-    git_output(repository_path, "worktree", "add", "-qb", "worktree", "worktree")
+    git_output(repository_path, "worktree", "add", "-qb", WORKTREE_BRANCH, "worktree")
     return repository_path / "worktree"
 
 
@@ -2567,8 +2567,8 @@ class TerminalInput(io.StringIO):
         return super().readline(size)
 
 
-def write_transcript(task_id, idle_days, project="project"):
-    transcript_path = Path.home() / ".claude" / "projects" / project / f"{task_id}-session.jsonl"
+def write_transcript(session_id, idle_days, project="project"):
+    transcript_path = Path.home() / ".claude" / "projects" / project / f"{session_id}.jsonl"
     transcript_path.parent.mkdir(parents=True, exist_ok=True)
     transcript_path.touch()
     modified_time = time.time() - idle_days * DAY_SECONDS
@@ -2636,11 +2636,11 @@ def test_prune_without_terminal_deletes_done_tasks_only_when_confirmed(
     ],
 )
 def test_prune_decides_done_tasks_by_pull_request_then_idle_time(
-    done_worktree, write_pull_requests, pull_requests, idle_days, is_removed
+    done_worktree, write_pull_requests, ledger_path, pull_requests, idle_days, is_removed
 ):
     write_pull_requests(WORKTREE_BRANCH, pull_requests)
     if idle_days is not None:
-        write_transcript(TASK_ID, idle_days)
+        write_transcript(read_task(ledger_path)["session_id"], idle_days)
 
     assert golem.main(["prune", "--yes"]) == 0
 
@@ -2662,8 +2662,9 @@ def test_prune_keeps_done_task_with_attached_pickup(done_worktree, write_pull_re
 @pytest.mark.parametrize(("old_project", "fresh_project"), [("a", "b"), ("b", "a")])
 def test_prune_measures_idle_time_from_newest_transcript(ledger_path, old_project, fresh_project):
     write_task(ledger_path, golem.STATUS_DONE)
-    write_transcript(TASK_ID, golem.PRUNE_IDLE_DAYS + 1, old_project)
-    write_transcript(TASK_ID, 0, fresh_project)
+    session_id = read_task(ledger_path)["session_id"]
+    write_transcript(session_id, golem.PRUNE_IDLE_DAYS + 1, old_project)
+    write_transcript(session_id, 0, fresh_project)
 
     assert golem.main(["prune", "--yes"]) == 0
 
@@ -2672,10 +2673,10 @@ def test_prune_measures_idle_time_from_newest_transcript(ledger_path, old_projec
 
 @pytest.mark.parametrize(("idle_days", "is_removed"), [(golem.PRUNE_IDLE_DAYS, True), (0, False)])
 def test_prune_without_gh_applies_only_idle_rule(
-    done_worktree, write_pull_requests, monkeypatch, tmp_path, idle_days, is_removed
+    done_worktree, write_pull_requests, ledger_path, monkeypatch, tmp_path, idle_days, is_removed
 ):
     write_pull_requests(WORKTREE_BRANCH, [{"number": 1, "state": "MERGED"}])
-    write_transcript(TASK_ID, idle_days)
+    write_transcript(read_task(ledger_path)["session_id"], idle_days)
     git_only_path = tmp_path / "git-only-bin"
     git_only_path.mkdir()
     (git_only_path / "git").symlink_to(str(shutil.which("git")))
