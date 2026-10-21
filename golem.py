@@ -2179,6 +2179,10 @@ def delete_task_checks(
     return worktrees_by_task, messages
 
 
+def print_retained_worktree(worktree: str, reasons: list[str]) -> None:
+    print(f"golem: retained worktree: {worktree}: {'; '.join(reasons)}", file=sys.stderr)
+
+
 def remove_selected_worktrees(
     tasks: dict[str, Any],
     worktrees: dict[str, Any],
@@ -2212,10 +2216,7 @@ def remove_selected_worktrees(
         refusals = [(worktree, reasons) for worktree, _, _, reasons in inspections if reasons]
         if refusals:
             for worktree, reasons in refusals:
-                print(
-                    f"golem: retained worktree: {worktree}: {'; '.join(reasons)}",
-                    file=sys.stderr,
-                )
+                print_retained_worktree(worktree, reasons)
             return None
         removed_worktrees: set[str] = set()
         for worktree, resource, entry, _ in inspections:
@@ -2223,10 +2224,7 @@ def remove_selected_worktrees(
                 cast("dict[str, Any]", resource), cast("list[str]", entry), worktree
             )
             if not is_removed:
-                print(
-                    f"golem: retained worktree: {worktree}: {'; '.join(reasons)}",
-                    file=sys.stderr,
-                )
+                print_retained_worktree(worktree, reasons)
                 return None
             removed_worktrees.add(worktree)
     return removed_worktrees
@@ -2498,10 +2496,7 @@ def auto_remove_worktrees() -> None:
                     file=sys.stderr,
                 )
             elif resource.get("removal_error") in reasons:
-                print(
-                    f"golem: retained worktree: {worktree}: {'; '.join(reasons)}",
-                    file=sys.stderr,
-                )
+                print_retained_worktree(worktree, reasons)
 
 
 def reap_finished_executors(

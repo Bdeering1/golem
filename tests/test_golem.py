@@ -2474,6 +2474,29 @@ def test_delete_chain_removes_shared_worktree_with_waiting_dependents(owned_work
     assert not worktree.exists()
 
 
+def test_delete_checks_every_worktree_before_removing_any(git_repository, ledger_path):
+    clean_worktree = git_worktree(git_repository)
+    git_output(git_repository, "worktree", "add", "-qb", "other-branch", "other")
+    changed_worktree = git_repository / "other"
+    (changed_worktree / "changed").write_text("keep", encoding="utf-8")
+    tasks = {
+        TASK_ID: task_record(golem.STATUS_DONE, worktree=str(clean_worktree)),
+        SIBLING_ID: task_record(
+            golem.STATUS_DONE, task_id=SIBLING_ID, worktree=str(changed_worktree)
+        ),
+    }
+    write_tasks(ledger_path, tasks)
+    write_worktrees(
+        golem_worktree_resource(git_repository, clean_worktree)
+        | golem_worktree_resource(git_repository, changed_worktree)
+    )
+
+    assert golem.main(["delete", TASK_ID, SIBLING_ID, "--remove-worktree"]) == 1
+
+    assert clean_worktree.is_dir()
+    assert read_tasks(ledger_path) == tasks
+
+
 def test_delete_retains_worktree_shared_with_retryable_task(owned_worktree, ledger_path):
     worktree = owned_worktree()
     write_tasks(
