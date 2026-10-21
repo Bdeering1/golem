@@ -13,7 +13,7 @@ import sys
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Never, override
+from typing import Any, Never, cast, override
 
 import pytest
 
@@ -255,8 +255,8 @@ def read_task(ledger_path, task_id=TASK_ID):
     return json.loads(ledger_path.read_text(encoding="utf-8"))[task_id]
 
 
-def task_record(status, *, task_id=TASK_ID, **fields: object):
-    record = {
+def task_record(status: str, *, task_id=TASK_ID, **fields: object) -> golem.Task:
+    record: golem.Task = {
         "agent_args": [],
         "cwd": str(Path.cwd()),
         "due_at": datetime.now(UTC).isoformat(),
@@ -265,7 +265,7 @@ def task_record(status, *, task_id=TASK_ID, **fields: object):
         "session_id": f"{task_id}-session",
         "status": status,
     }
-    record.update(fields)
+    record.update(cast(golem.Task, fields))
     return record
 
 
@@ -813,7 +813,7 @@ def test_launch_agent_executor_uses_only_saved_environment(
     start_task_executor = golem.start_task_executor
     processes: list[subprocess.Popen[bytes]] = []
 
-    def record_executor(task_id: str, task: dict[str, Any]) -> subprocess.Popen[bytes]:
+    def record_executor(task_id: str, task: golem.Task) -> subprocess.Popen[bytes]:
         process = start_task_executor(task_id, task)
         processes.append(process)
         return process
@@ -2187,7 +2187,7 @@ def test_launch_agent_reaps_finished_executor_while_future_task_is_pending(
     start_task_executor = golem.start_task_executor
     processes: list[subprocess.Popen[bytes]] = []
 
-    def record_executor(task_id: str, task: dict[str, Any]) -> subprocess.Popen[bytes]:
+    def record_executor(task_id: str, task: golem.Task) -> subprocess.Popen[bytes]:
         process = start_task_executor(task_id, task)
         processes.append(process)
         return process
@@ -2217,7 +2217,7 @@ def test_launch_agent_reaps_finished_executor_while_future_task_is_pending(
 
 
 def test_waiting_dependent_of_succeeded_parent_keeps_launch_agent_running():
-    tasks = {
+    tasks: golem.Tasks = {
         PARENT_ID: task_record(golem.STATUS_DONE, task_id=PARENT_ID),
         TASK_ID: task_record(golem.STATUS_WAITING, after=PARENT_ID),
     }
@@ -2248,7 +2248,7 @@ def test_claim_records_golem_worktree_resource_and_dependent_reuses_it(
     worktrees = golem.load_worktrees()
     resource = worktrees[str(Path(parent_worktree).resolve())]
     assert resource["owner"] == golem.WORKTREE_OWNER_GOLEM
-    assert resource["repository"] == golem.git_common_directory(str(git_repository))
+    assert resource.get("repository") == golem.git_common_directory(str(git_repository))
     assert read_task(ledger_path, CHILD_ID)["worktree"] == parent_worktree
     tasks = read_tasks(ledger_path)
     tasks[CHILD_ID]["status"] = golem.STATUS_FAILED
@@ -2308,7 +2308,7 @@ def test_delete_releases_worktree_only_after_its_last_task(owned_worktree, ledge
     assert "released_at" not in resource
 
     assert golem.main(["delete", "other"]) == 0
-    assert golem.load_worktrees()[str(worktree.resolve())]["released_at"]
+    assert golem.load_worktrees()[str(worktree.resolve())].get("released_at")
 
 
 def test_delete_retains_worktree_shared_with_retryable_task(owned_worktree, ledger_path):
@@ -2381,7 +2381,7 @@ def test_delete_removes_task_and_worktree_and_preserves_branch(owned_worktree, s
     assert golem.main(["delete", TASK_ID, "--remove-worktree"]) == 0
     assert TASK_ID not in golem.load_tasks()
     assert not worktree.exists()
-    assert golem.load_worktrees()[str(worktree.resolve())]["removed_at"]
+    assert golem.load_worktrees()[str(worktree.resolve())].get("removed_at")
     assert git_output(worktree.parent, "show-ref", "--verify", "refs/heads/worktree")
 
 
@@ -2617,7 +2617,7 @@ def test_delete_records_git_removal_failure(capsys, owned_worktree, monkeypatch)
 
     assert golem.main(["delete", TASK_ID, "--remove-worktree"]) == 1
     resource = golem.load_worktrees()[str(worktree.resolve())]
-    assert resource["removal_error"] == "could not remove"
+    assert resource.get("removal_error") == "could not remove"
     assert "removed_at" not in resource
     assert worktree.is_dir()
     assert golem.main(["worktree", "list"]) == 0
@@ -3247,7 +3247,7 @@ def test_codex_home_reaches_launch_agent_executor(
     start_task_executor = golem.start_task_executor
     processes: list[subprocess.Popen[bytes]] = []
 
-    def record_executor(task_id: str, task: dict[str, Any]) -> subprocess.Popen[bytes]:
+    def record_executor(task_id: str, task: golem.Task) -> subprocess.Popen[bytes]:
         process = start_task_executor(task_id, task)
         processes.append(process)
         return process
@@ -3500,7 +3500,7 @@ def test_prune_releases_worktree_after_its_last_task(owned_worktree):
 
     assert TASK_ID not in golem.load_tasks()
     assert worktree.is_dir()
-    assert golem.load_worktrees()[str(worktree.resolve())]["released_at"]
+    assert golem.load_worktrees()[str(worktree.resolve())].get("released_at")
 
 
 def attach_pickup(ledger_path, exit_stack):
