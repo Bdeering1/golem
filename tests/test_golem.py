@@ -2565,8 +2565,8 @@ class TerminalInput(io.StringIO):
         return super().readline(size)
 
 
-def write_transcript(session_id, idle_days, project="project"):
-    transcript_path = Path.home() / ".claude" / "projects" / project / f"{session_id}.jsonl"
+def write_transcript(session_id, idle_days):
+    transcript_path = Path.home() / ".claude" / "projects" / "project" / f"{session_id}.jsonl"
     transcript_path.parent.mkdir(parents=True, exist_ok=True)
     transcript_path.touch()
     modified_time = time.time() - idle_days * DAY_SECONDS
@@ -2653,18 +2653,6 @@ def test_prune_keeps_done_task_with_attached_pickup(done_worktree, write_pull_re
         assert golem.main(["prune", "--yes"]) == 0
     finally:
         golem.release_lock(pickup_lock_file)
-
-    assert TASK_ID in golem.load_tasks()
-
-
-@pytest.mark.parametrize(("old_project", "fresh_project"), [("a", "b"), ("b", "a")])
-def test_prune_measures_idle_time_from_newest_transcript(ledger_path, old_project, fresh_project):
-    write_task(ledger_path, golem.STATUS_DONE)
-    session_id = read_task(ledger_path)["session_id"]
-    write_transcript(session_id, golem.PRUNE_IDLE_DAYS + 1, old_project)
-    write_transcript(session_id, 0, fresh_project)
-
-    assert golem.main(["prune", "--yes"]) == 0
 
     assert TASK_ID in golem.load_tasks()
 

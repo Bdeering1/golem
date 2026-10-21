@@ -1682,12 +1682,12 @@ def prune_answer(task_id: str, reason: str) -> str:
             return answer
 
 
-def selected_prune_tasks(
+def prune_selection(
     tasks: dict[str, Any],
     pull_requests: PullRequestCache,
     *,
     is_confirmed: bool,
-    can_prompt: bool,
+    is_keeping_done_tasks: bool,
 ) -> tuple[dict[str, dict[str, Any]], int]:
     selected_tasks: dict[str, dict[str, Any]] = {}
     candidate_count = 0
@@ -1706,14 +1706,14 @@ def selected_prune_tasks(
             candidate_count += 1
             selected_tasks[task_id] = task
             continue
-        if task["status"] != STATUS_DONE or answer == PRUNE_ANSWER_QUIT:
+        if task["status"] != STATUS_DONE or is_keeping_done_tasks or answer == PRUNE_ANSWER_QUIT:
             continue
         reason = done_task_prune_reason(task, pull_requests)
         if reason is None:
             continue
         candidate_count += 1
         if answer != PRUNE_ANSWER_ALL:
-            answer = prune_answer(task_id, reason) if can_prompt else PRUNE_ANSWER_NO
+            answer = prune_answer(task_id, reason)
         if answer in {PRUNE_ANSWER_YES, PRUNE_ANSWER_ALL}:
             selected_tasks[task_id] = task
     return selected_tasks, candidate_count
@@ -1740,22 +1740,24 @@ def delete_pruned_tasks(
 
 
 def prune_tasks(*, is_confirmed: bool) -> int:
-    can_prompt = sys.stdin.isatty()
+    tasks = load_tasks()
+    is_keeping_done_tasks = not is_confirmed and not sys.stdin.isatty()
     pull_requests: PullRequestCache = {}
     try:
-        selected_tasks, candidate_count = selected_prune_tasks(
-            load_tasks(), pull_requests, is_confirmed=is_confirmed, can_prompt=can_prompt
+        selected_tasks, candidate_count = prune_selection(
+            tasks,
+            pull_requests,
+            is_confirmed=is_confirmed,
+            is_keeping_done_tasks=is_keeping_done_tasks,
         )
     except KeyboardInterrupt:
         print()
         return 130
-    if not candidate_count:
+    if is_keeping_done_tasks and any(task["status"] == STATUS_DONE for task in tasks.values()):
+        print("golem: kept done tasks without a terminal; use --yes to prune them", file=sys.stderr)
+    elif not candidate_count:
         print("golem: no tasks to prune")
         return 0
-    if not can_prompt and candidate_count > len(selected_tasks):
-        print(
-            "golem: kept done tasks without a terminal; use --yes to remove them", file=sys.stderr
-        )
     delete_pruned_tasks(selected_tasks, pull_requests)
     return 0
 
