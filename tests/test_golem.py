@@ -3210,12 +3210,17 @@ class TerminalInput(io.StringIO):
         return super().readline(size)
 
 
-def write_transcript(session_id, idle_days):
-    transcript_path = Path.home() / ".claude" / "projects" / "project" / f"{session_id}.jsonl"
-    transcript_path.parent.mkdir(parents=True, exist_ok=True)
-    transcript_path.touch()
+def write_idle_file(path, idle_days):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.touch()
     modified_time = time.time() - idle_days * DAY_SECONDS
-    os.utime(transcript_path, (modified_time, modified_time))
+    os.utime(path, (modified_time, modified_time))
+
+
+def write_transcript(session_id, idle_days):
+    write_idle_file(
+        Path.home() / ".claude" / "projects" / "project" / f"{session_id}.jsonl", idle_days
+    )
 
 
 @pytest.fixture
@@ -3284,6 +3289,32 @@ def test_prune_decides_done_tasks_by_pull_request_then_idle_time(
     write_pull_requests(WORKTREE_BRANCH, pull_requests)
     if idle_days is not None:
         write_transcript(read_task(ledger_path)["session_id"], idle_days)
+
+    assert golem.main(["prune", "--yes"]) == 0
+
+    assert (TASK_ID not in golem.load_tasks()) is is_removed
+
+
+@pytest.mark.parametrize(
+    ("idle_days", "is_removed"),
+    [
+        pytest.param(golem.PRUNE_IDLE_DAYS, True, id="idle-conversation"),
+        pytest.param(golem.PRUNE_IDLE_DAYS - 1, False, id="active-conversation"),
+        pytest.param(None, True, id="missing-rollout"),
+    ],
+)
+def test_prune_uses_codex_conversation_idle_time(ledger_path, tmp_path, idle_days, is_removed):
+    codex_home = tmp_path / "saved-codex-home"
+    write_task(
+        ledger_path,
+        golem.STATUS_DONE,
+        backend=golem.BACKEND_CODEX,
+        thread_id="codex-thread",
+        environment={"PATH": os.environ["PATH"], "CODEX_HOME": str(codex_home)},
+    )
+    if idle_days is not None:
+        rollout_name = "rollout-2030-01-01T00-00-00-codex-thread.jsonl"
+        write_idle_file(codex_home / "sessions" / "2030" / "01" / "01" / rollout_name, idle_days)
 
     assert golem.main(["prune", "--yes"]) == 0
 

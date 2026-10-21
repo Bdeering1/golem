@@ -2175,10 +2175,20 @@ def branch_pull_request(worktree: str | None) -> dict[str, Any] | None:
     return max(pull_requests, key=lambda pull_request: pull_request["number"], default=None)
 
 
-def session_idle_reason(session_id: str) -> str | None:
-    transcript_paths = (Path.home() / ".claude" / "projects").glob(f"*/{session_id}.jsonl")
+def transcript_paths(task: dict[str, Any]) -> list[Path]:
+    if task_backend(task) == BACKEND_CLAUDE:
+        return list((Path.home() / ".claude" / "projects").glob(f"*/{task['session_id']}.jsonl"))
+    thread_id = task.get("thread_id")
+    if not isinstance(thread_id, str):
+        return []
+    codex_home = Path(task.get("environment", {}).get("CODEX_HOME", Path.home() / ".codex"))
+    return list((codex_home / "sessions").glob(f"**/rollout-*-{thread_id}.jsonl"))
+
+
+def session_idle_reason(task: dict[str, Any]) -> str | None:
     transcript_modified_time = max(
-        (transcript_path.stat().st_mtime for transcript_path in transcript_paths), default=None
+        (transcript_path.stat().st_mtime for transcript_path in transcript_paths(task)),
+        default=None,
     )
     if transcript_modified_time is None:
         return "no transcript"
@@ -2196,7 +2206,7 @@ def done_task_prune_reason(task: dict[str, Any], pull_requests: PullRequestCache
         pull_requests[worktree] = branch_pull_request(worktree)
     pull_request = pull_requests[worktree]
     if pull_request is None:
-        return session_idle_reason(task["session_id"])
+        return session_idle_reason(task)
     if pull_request["state"] == PULL_REQUEST_STATE_OPEN:
         return None
     return f"PR #{pull_request['number']} {pull_request['state'].lower()}"
