@@ -1456,7 +1456,7 @@ def require_codex_subscription(environment: dict[str, str]) -> None:
     validate_codex_subscription(codex_app_server_responses(environment, has_rate_limits=False))
 
 
-def codex_rate_limits() -> dict[str, JsonObject | None]:
+def codex_rate_limits() -> JsonObject:
     responses = codex_app_server_responses(os.environ.copy(), has_rate_limits=True)
     validate_codex_subscription(responses)
     rate_limits_result = responses[3]["result"]
@@ -1467,7 +1467,7 @@ def codex_rate_limits() -> dict[str, JsonObject | None]:
     )
     if rate_limits_fields is None or not isinstance(rate_limits_fields.get("rateLimits"), dict):
         raise SystemExit(CODEX_ACCOUNT_ERROR)
-    return cast("dict[str, JsonObject | None]", rate_limits_fields["rateLimits"])
+    return cast("JsonObject", rate_limits_fields["rateLimits"])
 
 
 def codex_reset_time_from_limit(limit: JsonObject) -> datetime:
@@ -1477,10 +1477,11 @@ def codex_reset_time_from_limit(limit: JsonObject) -> datetime:
     return validated_reset_time(datetime.fromtimestamp(resets_at, UTC))
 
 
-def required_codex_primary_limit(rate_limits: dict[str, JsonObject | None]) -> JsonObject | None:
+def required_codex_primary_limit(rate_limits: JsonObject) -> JsonObject | None:
     if "primary" not in rate_limits:
         raise SystemExit(USAGE_ERROR)
-    return rate_limits["primary"]
+    primary = rate_limits["primary"]
+    return cast("JsonObject", primary) if isinstance(primary, dict) else None
 
 
 def codex_active_reset_time(primary: JsonObject) -> datetime | None:
@@ -1497,7 +1498,9 @@ def next_codex_reset_time() -> datetime | None:
         rate_limits = codex_rate_limits()
         primary = required_codex_primary_limit(rate_limits)
         secondary = rate_limits.get("secondary")
-        limits = [limit for limit in (primary, secondary) if isinstance(limit, dict)]
+        limits = [
+            cast("JsonObject", limit) for limit in (primary, secondary) if isinstance(limit, dict)
+        ]
         exhausted_limits = [
             limit
             for limit in limits
