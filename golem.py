@@ -123,7 +123,7 @@ class Task(TypedDict):
     agent_args: list[str]
     status: str
     session_id: str
-    environment: dict[str, str]
+    environment: NotRequired[dict[str, str]]
     backend: NotRequired[str]
     after: NotRequired[str]
     due_at: NotRequired[str]
