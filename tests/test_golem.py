@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import multiprocessing
 import os
@@ -41,6 +43,8 @@ RESET_TIME = datetime(2030, 1, 1, 10, tzinfo=UTC)
 EARLIER_RESET_TIME = datetime(2030, 1, 1, 11, tzinfo=UTC)
 LATER_RESET_TIME = datetime(2030, 1, 2, 11, tzinfo=UTC)
 ANSI_COLOR = re.compile(r"\033\[38;5;\d+m|\033\[0m")
+WORKTREE_BRANCH = "worktree"
+DAY_SECONDS = 24 * 60 * 60
 
 
 @pytest.fixture(scope="session")
@@ -165,6 +169,23 @@ esac
         "open": """#!/bin/sh
 printf '%s\\n' "$*" >> "$GOLEM_OPEN_ARGS"
 """,
+        "gh": """#!/bin/sh
+head=''
+state=''
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --head) head="$2"; shift ;;
+        --state) state="$2"; shift ;;
+    esac
+    shift
+done
+pull_requests_file="$GOLEM_GH_PULL_REQUESTS/$head.json"
+if [ "$state" = all ] && [ -f "$pull_requests_file" ]; then
+    cat "$pull_requests_file"
+else
+    printf '[]'
+fi
+""",
     }.items():
         path = command_path / name
         path.write_text(script, encoding="utf-8")
@@ -194,6 +215,8 @@ def fake_commands(monkeypatch, tmp_path, fake_bin_path):
     }
     for path in paths.values():
         path.touch()
+    paths["gh-pull-requests"] = tmp_path / "gh-pull-requests"
+    paths["gh-pull-requests"].mkdir()
     home_path = tmp_path / "home"
     state_path = tmp_path / "state"
     work_path = tmp_path / "work"
@@ -426,7 +449,7 @@ def git_output(repository_path, *arguments: str):
 
 
 def git_worktree(repository_path):
-    git_output(repository_path, "worktree", "add", "-qb", "worktree", "worktree")
+    git_output(repository_path, "worktree", "add", "-qb", WORKTREE_BRANCH, "worktree")
     return repository_path / "worktree"
 
 
@@ -3171,3 +3194,249 @@ def test_codex_home_reaches_launch_agent_executor(
         for call, home in zip(logged_codex_calls(fake_commands), homes, strict=True)
         if call[0] == "exec"
     ) == str(codex_home)
+
+
+class TerminalInput(io.StringIO):
+    def __init__(self, answers, on_first_read=lambda: None):
+        super().__init__(answers)
+        self.on_first_read = on_first_read
+
+    def isatty(self):
+        return True
+
+    def readline(self, size: int = -1) -> str:
+        self.on_first_read()
+        self.on_first_read = lambda: None
+        return super().readline(size)
+
+
+def write_transcript(session_id, idle_days):
+    transcript_path = Path.home() / ".claude" / "projects" / "project" / f"{session_id}.jsonl"
+    transcript_path.parent.mkdir(parents=True, exist_ok=True)
+    transcript_path.touch()
+    modified_time = time.time() - idle_days * DAY_SECONDS
+    os.utime(transcript_path, (modified_time, modified_time))
+
+
+@pytest.fixture
+def write_pull_requests(fake_commands):
+    def write(branch: str, pull_requests: list[dict[str, object]]) -> None:
+        (fake_commands["gh-pull-requests"] / f"{branch}.json").write_text(
+            json.dumps(pull_requests), encoding="utf-8"
+        )
+
+    return write
+
+
+@pytest.fixture
+def done_worktree(git_repository, ledger_path):
+    worktree = git_worktree(git_repository)
+    write_task(ledger_path, golem.STATUS_DONE, worktree=str(worktree))
+    return worktree
+
+
+@pytest.mark.parametrize(
+    ("prune_args", "is_done_removed"), [(["prune"], False), (["prune", "--yes"], True)]
+)
+def test_prune_without_terminal_deletes_done_tasks_only_when_confirmed(
+    ledger_path, monkeypatch, prune_args, is_done_removed
+):
+    statuses = [
+        golem.STATUS_SCHEDULED,
+        golem.STATUS_WAITING,
+        golem.STATUS_RUNNING,
+        golem.STATUS_NEEDS_REVIEW,
+        golem.STATUS_FAILED,
+        golem.STATUS_CANCELLED,
+        golem.STATUS_DONE,
+    ]
+    write_tasks(ledger_path, {status: task_record(status, task_id=status) for status in statuses})
+    monkeypatch.setattr(sys, "stdin", io.StringIO("y\n"))
+
+    assert golem.main(prune_args) == 0
+
+    removed_ids = (
+        {golem.STATUS_CANCELLED, golem.STATUS_DONE} if is_done_removed else {golem.STATUS_CANCELLED}
+    )
+    assert set(golem.load_tasks()) == set(statuses) - removed_ids
+
+
+@pytest.mark.parametrize(
+    ("pull_requests", "idle_days", "is_removed"),
+    [
+        pytest.param([{"number": 1, "state": "MERGED"}], 0, True, id="merged-pr"),
+        pytest.param([{"number": 1, "state": "CLOSED"}], 0, True, id="closed-pr"),
+        pytest.param([{"number": 1, "state": "OPEN"}], None, False, id="open-pr"),
+        pytest.param(
+            [{"number": 2, "state": "MERGED"}, {"number": 1, "state": "OPEN"}],
+            None,
+            False,
+            id="open-and-merged-pr",
+        ),
+        pytest.param([], golem.PRUNE_IDLE_DAYS, True, id="idle-session"),
+        pytest.param([], golem.PRUNE_IDLE_DAYS - 1, False, id="active-session"),
+        pytest.param([], None, True, id="missing-transcript"),
+    ],
+)
+def test_prune_decides_done_tasks_by_pull_request_then_idle_time(
+    done_worktree, write_pull_requests, ledger_path, pull_requests, idle_days, is_removed
+):
+    write_pull_requests(WORKTREE_BRANCH, pull_requests)
+    if idle_days is not None:
+        write_transcript(read_task(ledger_path)["session_id"], idle_days)
+
+    assert golem.main(["prune", "--yes"]) == 0
+
+    assert (TASK_ID not in golem.load_tasks()) is is_removed
+
+
+def test_prune_keeps_done_task_with_attached_pickup(done_worktree, write_pull_requests):
+    write_pull_requests(WORKTREE_BRANCH, [{"number": 1, "state": "MERGED"}])
+    pickup_lock_file = golem.acquire_lock(golem.directory_lock_path(str(done_worktree)))
+    assert pickup_lock_file is not None
+    try:
+        assert golem.main(["prune", "--yes"]) == 0
+    finally:
+        golem.release_lock(pickup_lock_file)
+
+    assert TASK_ID in golem.load_tasks()
+
+
+@pytest.mark.parametrize(("idle_days", "is_removed"), [(golem.PRUNE_IDLE_DAYS, True), (0, False)])
+def test_prune_without_gh_applies_only_idle_rule(
+    done_worktree, write_pull_requests, ledger_path, monkeypatch, tmp_path, idle_days, is_removed
+):
+    write_pull_requests(WORKTREE_BRANCH, [{"number": 1, "state": "MERGED"}])
+    write_transcript(read_task(ledger_path)["session_id"], idle_days)
+    git_only_path = tmp_path / "git-only-bin"
+    git_only_path.mkdir()
+    (git_only_path / "git").symlink_to(str(shutil.which("git")))
+    monkeypatch.setenv("PATH", str(git_only_path))
+
+    assert golem.main(["prune", "--yes"]) == 0
+
+    assert (TASK_ID not in golem.load_tasks()) is is_removed
+
+
+@pytest.mark.parametrize(
+    ("answers", "removed_ids"),
+    [
+        pytest.param("y\nn\ny\n", {"first", "third"}, id="yes-and-no"),
+        pytest.param("n\na\n", {"second", "third"}, id="all"),
+        pytest.param("y\nq\ny\n", {"first"}, id="quit"),
+        pytest.param("y\n", {"first"}, id="end-of-input"),
+    ],
+)
+def test_prune_applies_each_answer_in_turn(ledger_path, monkeypatch, answers, removed_ids):
+    task_ids = ["first", "second", "third"]
+    write_tasks(
+        ledger_path,
+        {task_id: task_record(golem.STATUS_DONE, task_id=task_id) for task_id in task_ids},
+    )
+    monkeypatch.setattr(sys, "stdin", TerminalInput(answers))
+
+    assert golem.main(["prune"]) == 0
+
+    assert set(golem.load_tasks()) == set(task_ids) - removed_ids
+
+
+def interrupt():
+    raise KeyboardInterrupt
+
+
+def test_prune_interrupted_at_prompt_deletes_nothing(ledger_path, monkeypatch):
+    write_tasks(
+        ledger_path,
+        {
+            TASK_ID: task_record(golem.STATUS_CANCELLED),
+            SIBLING_ID: task_record(golem.STATUS_DONE, task_id=SIBLING_ID),
+        },
+    )
+    monkeypatch.setattr(sys, "stdin", TerminalInput("y\n", interrupt))
+
+    assert golem.main(["prune"]) == 130
+
+    assert set(golem.load_tasks()) == {TASK_ID, SIBLING_ID}
+
+
+def test_prune_offers_parent_only_after_its_dependents_are_removed(ledger_path, monkeypatch):
+    write_tasks(
+        ledger_path,
+        {
+            PARENT_ID: task_record(golem.STATUS_DONE, task_id=PARENT_ID),
+            CHILD_ID: task_record(golem.STATUS_DONE, task_id=CHILD_ID, after=PARENT_ID),
+            SIBLING_ID: task_record(golem.STATUS_DONE, task_id=SIBLING_ID),
+        },
+    )
+    monkeypatch.setattr(sys, "stdin", TerminalInput("n\ny\n"))
+
+    assert golem.main(["prune"]) == 0
+
+    assert set(golem.load_tasks()) == {PARENT_ID, CHILD_ID}
+
+
+def test_prune_keeps_parent_of_remaining_task(ledger_path):
+    write_tasks(
+        ledger_path,
+        {
+            PARENT_ID: task_record(golem.STATUS_DONE, task_id=PARENT_ID),
+            CHILD_ID: task_record(golem.STATUS_CANCELLED, task_id=CHILD_ID, after=PARENT_ID),
+            GRANDCHILD_ID: task_record(golem.STATUS_DONE, task_id=GRANDCHILD_ID, after=CHILD_ID),
+            SIBLING_ID: task_record(golem.STATUS_FAILED, task_id=SIBLING_ID, after=PARENT_ID),
+        },
+    )
+
+    assert golem.main(["prune", "--yes"]) == 0
+
+    assert set(golem.load_tasks()) == {PARENT_ID, SIBLING_ID}
+
+
+def test_prune_releases_worktree_after_its_last_task(owned_worktree):
+    worktree = owned_worktree()
+
+    assert golem.main(["prune", "--yes"]) == 0
+
+    assert TASK_ID not in golem.load_tasks()
+    assert worktree.is_dir()
+    assert golem.load_worktrees()[str(worktree.resolve())]["released_at"]
+
+
+def attach_pickup(ledger_path, exit_stack):
+    pickup_lock_file = golem.acquire_lock(golem.directory_lock_path(str(Path.cwd())))
+    assert pickup_lock_file is not None
+    exit_stack.callback(golem.release_lock, pickup_lock_file)
+
+
+def add_dependent_task(ledger_path, exit_stack):
+    tasks = read_tasks(ledger_path)
+    tasks[CHILD_ID] = task_record(golem.STATUS_SCHEDULED, task_id=CHILD_ID, after=TASK_ID)
+    write_tasks(ledger_path, tasks)
+
+
+def replace_task(ledger_path, exit_stack):
+    tasks = read_tasks(ledger_path)
+    tasks[TASK_ID] = task_record(golem.STATUS_DONE, session_id="replacement-session")
+    write_tasks(ledger_path, tasks)
+
+
+@pytest.mark.parametrize("change_task", [attach_pickup, add_dependent_task, replace_task])
+def test_prune_keeps_only_task_that_changes_while_prompting(
+    ledger_path, monkeypatch, tmp_path, change_task
+):
+    write_tasks(
+        ledger_path,
+        {
+            TASK_ID: task_record(golem.STATUS_DONE),
+            SIBLING_ID: task_record(golem.STATUS_DONE, task_id=SIBLING_ID, cwd=str(tmp_path)),
+        },
+    )
+
+    with contextlib.ExitStack() as exit_stack:
+        monkeypatch.setattr(
+            sys, "stdin", TerminalInput("y\ny\n", lambda: change_task(ledger_path, exit_stack))
+        )
+        assert golem.main(["prune"]) == 0
+
+    tasks = golem.load_tasks()
+    assert TASK_ID in tasks
+    assert SIBLING_ID not in tasks
