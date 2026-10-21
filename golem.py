@@ -710,9 +710,9 @@ def run_claude(
         pass_fds=lock_file_descriptors,
         check=False,
     )
+    sys.stderr.write(claude_process.stderr)
     if is_creating_worktree:
         record_created_worktree_owner(task_id, task)
-    sys.stderr.write(claude_process.stderr)
     return claude_process.returncode, claude_process.stdout, claude_process.stderr
 
 
@@ -1671,16 +1671,16 @@ def execute_task(task_id: str, task: dict[str, Any], lock_file_descriptors: tupl
     ):
         return 0
     stored_result = result if output else None
-    background_work_stopped = BACKGROUND_WORK_STOPPED_PATTERN.search(stderr)
-    if background_work_stopped is not None:
-        stop_line = background_work_stopped.group()
+    stop_line_match = BACKGROUND_WORK_STOPPED_PATTERN.search(stderr)
+    if stop_line_match is not None:
+        stop_line = stop_line_match.group()
         stored_result = f"{result}\n\n{stop_line}" if output else stop_line
     finish_task(
         task_id,
         stored_result,
         returncode,
         is_usage_limit=is_usage_limit,
-        is_background_work_stopped=background_work_stopped is not None,
+        is_background_work_stopped=stop_line_match is not None,
     )
     return returncode
 
