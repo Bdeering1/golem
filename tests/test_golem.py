@@ -38,6 +38,10 @@ SAVED_LANG = "en_CA.UTF-8"
 CHILD_LANG = "fr_CA.UTF-8"
 CURRENT_LANG = "en_US.UTF-8"
 CLAUDE_RESULT = "completed the task"
+BACKGROUND_STOP_LINE = (
+    'Background tasks still running 10m after the last turn (workflow "Implement plan"); '
+    "stopping them. Set CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 to wait indefinitely."
+)
 USAGE_LIMIT_RESULT = "You've hit your limit · resets 3pm"
 RESET_TIME = datetime(2030, 1, 1, 10, tzinfo=UTC)
 EARLIER_RESET_TIME = datetime(2030, 1, 1, 11, tzinfo=UTC)
@@ -89,6 +93,12 @@ fi
 while [ -n "$GOLEM_CLAUDE_HOLD" ] && [ -e "$GOLEM_CLAUDE_HOLD" ]; do
     sleep 0.05
 done
+if [ -n "${GOLEM_CLAUDE_BACKGROUND_STOP-}" ]; then
+    ceiling="${GOLEM_CLAUDE_SETTINGS_CEILING-${CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS-600000}}"
+    if [ "$ceiling" != 0 ]; then
+        printf '%s\\n' "$GOLEM_CLAUDE_BACKGROUND_STOP" >&2
+    fi
+fi
 if [ -f "$GOLEM_CLAUDE_STDOUT" ]; then
     cat "$GOLEM_CLAUDE_STDOUT"
 else
@@ -730,10 +740,10 @@ def test_launch_agent_pass_leaves_running_executor_alone(
 
     def run_claude(
         task_id: str, task: dict[str, Any], lock_file_descriptors: tuple[int, ...]
-    ) -> tuple[int, str]:
+    ) -> tuple[int, str, str]:
         golem.run_launch_agent_pass()
         statuses_during_run.append(read_task(ledger_path)["status"])
-        return 0, json.dumps({"result": CLAUDE_RESULT})
+        return 0, json.dumps({"result": CLAUDE_RESULT}), ""
 
     monkeypatch.setattr(golem, "run_claude", run_claude)
 
@@ -1217,6 +1227,57 @@ def test_run_now_records_claude_result(
     assert capsys.readouterr().out == f"{expected_result}\n"
 
 
+@pytest.mark.parametrize(
+    ("settings_ceiling", "parent_status", "parent_result", "dependent_status", "call_count"),
+    [
+        pytest.param(
+            None,
+            golem.STATUS_NEEDS_REVIEW,
+            CLAUDE_RESULT,
+            golem.STATUS_NEEDS_REVIEW,
+            2,
+            id="background-work-completes",
+        ),
+        pytest.param(
+            "600000",
+            golem.STATUS_FAILED,
+            f"{CLAUDE_RESULT}\n\n{BACKGROUND_STOP_LINE}",
+            golem.STATUS_WAITING,
+            1,
+            id="background-work-stopped",
+        ),
+    ],
+)
+def test_background_work_waits_or_fails_before_starting_dependents(
+    installed_launch_agent,
+    fake_commands,
+    ledger_path,
+    monkeypatch,
+    capsys,
+    settings_ceiling,
+    parent_status,
+    parent_result,
+    dependent_status,
+    call_count,
+):
+    monkeypatch.setenv("GOLEM_CLAUDE_BACKGROUND_STOP", BACKGROUND_STOP_LINE)
+    if settings_ceiling is not None:
+        monkeypatch.setenv("GOLEM_CLAUDE_SETTINGS_CEILING", settings_ceiling)
+    golem.main(["run", PARENT_ID, PARENT_PROMPT, "--now"])
+    golem.main(["run", CHILD_ID, CHILD_PROMPT, "--after", PARENT_ID])
+    parent_session_id = read_task(ledger_path, PARENT_ID)["session_id"]
+    write_claude_output(fake_commands, CLAUDE_RESULT)
+
+    assert golem.main(["_execute", PARENT_ID, parent_session_id]) == 0
+
+    parent = read_task(ledger_path, PARENT_ID)
+    assert parent["status"] == parent_status
+    assert parent["result"] == parent_result
+    assert read_task(ledger_path, CHILD_ID)["status"] == dependent_status
+    assert len(logged_claude_calls(fake_commands)) == call_count
+    assert (BACKGROUND_STOP_LINE in capsys.readouterr().err) is (settings_ceiling is not None)
+
+
 @pytest.mark.parametrize("is_verbose", [False, True])
 def test_usage_limited_task_resumes_at_reset_in_same_session(
     installed_launch_agent, fake_commands, monkeypatch, ledger_path, is_verbose
@@ -1691,9 +1752,9 @@ def test_failed_dependent_does_not_block_later_sibling(
 
     def run_claude(
         task_id: str, task: dict[str, Any], lock_file_descriptors: tuple[int, ...]
-    ) -> tuple[int, str]:
+    ) -> tuple[int, str, str]:
         prompts.append(task["prompt"])
-        return int(task["prompt"] == CHILD_PROMPT), json.dumps({"result": CLAUDE_RESULT})
+        return int(task["prompt"] == CHILD_PROMPT), json.dumps({"result": CLAUDE_RESULT}), ""
 
     monkeypatch.setattr(golem, "run_claude", run_claude)
     parent = read_task(ledger_path, PARENT_ID)
@@ -1813,13 +1874,13 @@ def test_shared_worktree_blocks_contenders_and_allows_other_worktrees(
 
     def run_claude(
         task_id: str, task: dict[str, Any], lock_file_descriptors: tuple[int, ...]
-    ) -> tuple[int, str]:
+    ) -> tuple[int, str, str]:
         run_task_ids.append(task_id)
         if task_id == TASK_ID:
             sibling = read_task(ledger_path, SIBLING_ID)
             execute_contender()
             assert golem.main(["_execute", SIBLING_ID, sibling["session_id"]]) == 0
-        return 0, json.dumps({"result": CLAUDE_RESULT})
+        return 0, json.dumps({"result": CLAUDE_RESULT}), ""
 
     monkeypatch.setattr(golem, "run_claude", run_claude)
     first = read_task(ledger_path)
@@ -1918,9 +1979,9 @@ def test_dependent_drain_stops_for_busy_worktrees_and_skips_missing_worktrees(
 
     def run_claude(
         task_id: str, task: dict[str, Any], lock_file_descriptors: tuple[int, ...]
-    ) -> tuple[int, str]:
+    ) -> tuple[int, str, str]:
         run_task_ids.append(task_id)
-        return 0, json.dumps({"result": CLAUDE_RESULT})
+        return 0, json.dumps({"result": CLAUDE_RESULT}), ""
 
     monkeypatch.setattr(golem, "run_claude", run_claude)
     directory_lock_file = None

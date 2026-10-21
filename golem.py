@@ -67,6 +67,10 @@ USAGE_LIMIT_HTTP_STATUS = 429
 FULL_UTILIZATION = 100
 MAX_USAGE_LIMIT_RESUMES = 2
 USAGE_LIMIT_RESUME_PROMPT = "The usage limit has reset. Continue the task."
+BACKGROUND_WAIT_CEILING_VARIABLE = "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS"
+BACKGROUND_WORK_STOPPED_PATTERN = re.compile(
+    r"^Background tasks still running .*; stopping them\..*$", re.MULTILINE
+)
 SCHEDULE_DESCRIPTION = "Run at the next usage reset, or immediately if no usage window is active."
 LAUNCH_AGENT_ERROR = "golem: the agent is not installed or is out of date; run golem agent install"
 LAUNCH_AGENT_LABEL = "com.github.bdeering1.golem"
@@ -671,7 +675,7 @@ def is_usage_limit_resume(task: dict[str, Any]) -> bool:
 
 def run_claude(
     task_id: str, task: dict[str, Any], lock_file_descriptors: tuple[int, ...]
-) -> tuple[int, str]:
+) -> tuple[int, str, str]:
     session_id = cast("str", task["session_id"])
     is_resuming = is_usage_limit_resume(task)
     command = (
@@ -700,15 +704,16 @@ def run_claude(
             *default_args,
         ],
         cwd=task_directory(task),
-        env=task_environment(task),
-        stdout=subprocess.PIPE,
+        env={**task_environment(task), BACKGROUND_WAIT_CEILING_VARIABLE: "0"},
+        capture_output=True,
         encoding="utf-8",
         pass_fds=lock_file_descriptors,
         check=False,
     )
+    sys.stderr.write(claude_process.stderr)
     if is_creating_worktree:
         record_created_worktree_owner(task_id, task)
-    return claude_process.returncode, claude_process.stdout
+    return claude_process.returncode, claude_process.stdout, claude_process.stderr
 
 
 def fetch_stale_default_branch(cwd: str) -> None:
@@ -1536,6 +1541,7 @@ def finish_task(
     returncode: int,
     *,
     is_usage_limit: bool,
+    is_background_work_stopped: bool,
 ) -> None:
     with locked_tasks() as tasks:
         stored_task = tasks.get(task_id)
@@ -1547,7 +1553,9 @@ def finish_task(
         if result is not None:
             task_record["result"] = result
         task_record["status"] = (
-            STATUS_NEEDS_REVIEW if returncode == 0 and not is_usage_limit else STATUS_FAILED
+            STATUS_NEEDS_REVIEW
+            if returncode == 0 and not is_usage_limit and not is_background_work_stopped
+            else STATUS_FAILED
         )
         task_record["returncode"] = returncode
 
@@ -1635,12 +1643,13 @@ def drain_dependents(task_id: str, session_id: str) -> None:
 
 
 def execute_task(task_id: str, task: dict[str, Any], lock_file_descriptors: tuple[int, ...]) -> int:
+    stderr = ""
     try:
         if task_backend(task) == BACKEND_CODEX:
             returncode, result, is_usage_limit = run_codex(task_id, task, lock_file_descriptors)
             output = "" if result is None else result
         else:
-            returncode, output = run_claude(task_id, task, lock_file_descriptors)
+            returncode, output, stderr = run_claude(task_id, task, lock_file_descriptors)
             result, is_usage_limit = claude_result_and_usage_limit(output)
     except OSError as error:
         print(f"golem: could not execute task: {error}", file=sys.stderr)
@@ -1661,11 +1670,17 @@ def execute_task(task_id: str, task: dict[str, Any], lock_file_descriptors: tupl
         and mark_task_waiting_for_reset(task_id, result)
     ):
         return 0
+    stored_result = result if output else None
+    stop_line_match = BACKGROUND_WORK_STOPPED_PATTERN.search(stderr)
+    if stop_line_match is not None:
+        stop_line = stop_line_match.group()
+        stored_result = f"{result}\n\n{stop_line}" if output else stop_line
     finish_task(
         task_id,
-        result if output else None,
+        stored_result,
         returncode,
         is_usage_limit=is_usage_limit,
+        is_background_work_stopped=stop_line_match is not None,
     )
     return returncode
 
