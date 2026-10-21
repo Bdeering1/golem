@@ -60,6 +60,9 @@ CODEX_SUBSCRIPTION_ERROR = (
     "golem: Codex must be signed in with a ChatGPT subscription; run codex login"
 )
 USAGE_TIMEOUT_SECONDS = 30
+GIT_FETCH_TIMEOUT_SECONDS = 5
+GIT_FETCH_MAX_AGE_SECONDS = 24 * 60 * 60
+ORIGIN_HEAD = "refs/remotes/origin/HEAD"
 USAGE_LIMIT_HTTP_STATUS = 429
 FULL_UTILIZATION = 100
 MAX_USAGE_LIMIT_RESUMES = 2
@@ -689,10 +692,43 @@ def run_claude(
     return claude_process.returncode, claude_process.stdout
 
 
+def fetch_stale_default_branch(cwd: str) -> None:
+    default_branch = run_git(cwd, "symbolic-ref", "--quiet", "--short", ORIGIN_HEAD)
+    fetch_head = run_git(cwd, "rev-parse", "--path-format=absolute", "--git-path", "FETCH_HEAD")
+    if default_branch.returncode or fetch_head.returncode:
+        return
+    fetch_head_path = Path(fetch_head.stdout.strip())
+    if (
+        fetch_head_path.exists()
+        and time.time() - fetch_head_path.stat().st_mtime < GIT_FETCH_MAX_AGE_SECONDS
+    ):
+        return
+    with suppress(subprocess.TimeoutExpired):
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                cwd,
+                "fetch",
+                "--quiet",
+                "--no-tags",
+                "origin",
+                default_branch.stdout.strip().removeprefix("origin/"),
+            ],
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=GIT_FETCH_TIMEOUT_SECONDS,
+            check=False,
+        )
+
+
 def create_codex_worktree(task_id: str, task: dict[str, Any]) -> str | None:
     worktree = cast("str", task["worktree"])
     cwd = cast("str", task["cwd"])
-    base = "refs/remotes/origin/HEAD"
+    fetch_stale_default_branch(cwd)
+    base = ORIGIN_HEAD
     if run_git(cwd, "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}").returncode:
         base = "HEAD"
     result = run_git(
