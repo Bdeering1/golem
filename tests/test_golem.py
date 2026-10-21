@@ -641,10 +641,10 @@ def test_launch_agent_pass_leaves_running_executor_alone(
 
     def run_claude(
         task_id: str, task: dict[str, Any], lock_file_descriptors: tuple[int, ...]
-    ) -> tuple[int, str]:
+    ) -> tuple[int, str, str]:
         golem.run_launch_agent_pass()
         statuses_during_run.append(read_task(ledger_path)["status"])
-        return 0, json.dumps({"result": CLAUDE_RESULT})
+        return 0, json.dumps({"result": CLAUDE_RESULT}), ""
 
     monkeypatch.setattr(golem, "run_claude", run_claude)
 
@@ -1171,8 +1171,9 @@ def test_background_work_waits_or_fails_before_starting_dependents(
 
     assert golem.main(["_execute", PARENT_ID, parent_session_id]) == 0
 
-    assert read_task(ledger_path, PARENT_ID)["status"] == parent_status
-    assert read_task(ledger_path, PARENT_ID)["result"] == parent_result
+    parent = read_task(ledger_path, PARENT_ID)
+    assert parent["status"] == parent_status
+    assert parent["result"] == parent_result
     assert read_task(ledger_path, CHILD_ID)["status"] == dependent_status
     assert len(logged_claude_calls(fake_commands)) == call_count
     assert (BACKGROUND_STOP_LINE in capsys.readouterr().err) is (settings_ceiling is not None)
@@ -1652,9 +1653,9 @@ def test_failed_dependent_does_not_block_later_sibling(
 
     def run_claude(
         task_id: str, task: dict[str, Any], lock_file_descriptors: tuple[int, ...]
-    ) -> tuple[int, str]:
+    ) -> tuple[int, str, str]:
         prompts.append(task["prompt"])
-        return int(task["prompt"] == CHILD_PROMPT), json.dumps({"result": CLAUDE_RESULT})
+        return int(task["prompt"] == CHILD_PROMPT), json.dumps({"result": CLAUDE_RESULT}), ""
 
     monkeypatch.setattr(golem, "run_claude", run_claude)
     parent = read_task(ledger_path, PARENT_ID)
@@ -1774,13 +1775,13 @@ def test_shared_worktree_blocks_contenders_and_allows_other_worktrees(
 
     def run_claude(
         task_id: str, task: dict[str, Any], lock_file_descriptors: tuple[int, ...]
-    ) -> tuple[int, str]:
+    ) -> tuple[int, str, str]:
         run_task_ids.append(task_id)
         if task_id == TASK_ID:
             sibling = read_task(ledger_path, SIBLING_ID)
             execute_contender()
             assert golem.main(["_execute", SIBLING_ID, sibling["session_id"]]) == 0
-        return 0, json.dumps({"result": CLAUDE_RESULT})
+        return 0, json.dumps({"result": CLAUDE_RESULT}), ""
 
     monkeypatch.setattr(golem, "run_claude", run_claude)
     first = read_task(ledger_path)
@@ -1879,9 +1880,9 @@ def test_dependent_drain_stops_for_busy_worktrees_and_skips_missing_worktrees(
 
     def run_claude(
         task_id: str, task: dict[str, Any], lock_file_descriptors: tuple[int, ...]
-    ) -> tuple[int, str]:
+    ) -> tuple[int, str, str]:
         run_task_ids.append(task_id)
-        return 0, json.dumps({"result": CLAUDE_RESULT})
+        return 0, json.dumps({"result": CLAUDE_RESULT}), ""
 
     monkeypatch.setattr(golem, "run_claude", run_claude)
     directory_lock_file = None

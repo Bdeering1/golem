@@ -1124,12 +1124,7 @@ def drain_dependents(task_id: str, session_id: str) -> None:
 
 def execute_task(task_id: str, task: dict[str, Any], lock_file_descriptors: tuple[int, ...]) -> int:
     try:
-        claude_result = cast(
-            "tuple[int, str] | tuple[int, str, str]",
-            run_claude(task_id, task, lock_file_descriptors),
-        )
-        returncode, output = claude_result[:2]
-        stderr = next(iter(claude_result[2:]), "")
+        returncode, output, stderr = run_claude(task_id, task, lock_file_descriptors)
     except OSError as error:
         print(f"golem: could not execute task: {error}", file=sys.stderr)
         returncode = 127
@@ -1147,13 +1142,14 @@ def execute_task(task_id: str, task: dict[str, Any], lock_file_descriptors: tupl
         and mark_task_waiting_for_reset(task_id, result)
     ):
         return 0
+    stored_result = result if output else None
     background_work_stopped = BACKGROUND_WORK_STOPPED_PATTERN.search(stderr)
     if background_work_stopped is not None:
         stop_line = background_work_stopped.group()
-        result = f"{result}\n\n{stop_line}" if output else stop_line
+        stored_result = f"{result}\n\n{stop_line}" if output else stop_line
     finish_task(
         task_id,
-        result if output or background_work_stopped is not None else None,
+        stored_result,
         returncode,
         is_usage_limit=is_usage_limit,
         is_background_work_stopped=background_work_stopped is not None,
