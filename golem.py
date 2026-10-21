@@ -265,11 +265,12 @@ def directory_lock_path(directory: str) -> Path:
     return lock_directory / f"{lock_name}.lock"
 
 
-def reserve_task(task_id: str, record: str | dict[str, Any]) -> None:
+def reserve_tasks(records: dict[str, Any]) -> None:
     with locked_tasks() as tasks:
-        if task_id in tasks:
-            raise SystemExit(f"golem: task already exists: {task_id}")
-        tasks[task_id] = record
+        for task_id in records:
+            if task_id in tasks:
+                raise SystemExit(f"golem: task already exists: {task_id}")
+        tasks.update(records)
 
 
 def waiting_dependent_ids(tasks: dict[str, Any], parent_id: str) -> list[str]:
@@ -312,14 +313,11 @@ def mark_ancestors_done(tasks: dict[str, Any], task: dict[str, Any]) -> None:
         ancestor = tasks.get(parent.get("after", ""))
 
 
-def reserve_dependent_task(
-    task_id: str,
-    record: dict[str, Any],
-    parent_id: str,
-) -> bool:
+def reserve_dependent_task(records: dict[str, Any], parent_id: str) -> bool:
     with locked_tasks() as tasks:
-        if task_id in tasks:
-            raise SystemExit(f"golem: task already exists: {task_id}")
+        for task_id in records:
+            if task_id in tasks:
+                raise SystemExit(f"golem: task already exists: {task_id}")
         if parent_id not in tasks:
             raise SystemExit(f"golem: task not found: {parent_id}")
         parent_status = tasks[parent_id]["status"]
@@ -327,7 +325,7 @@ def reserve_dependent_task(
             raise SystemExit(f"golem: parent task is cancelled: {parent_id}")
         if parent_status in SUCCEEDED_STATUSES:
             return False
-        tasks[task_id] = record
+        tasks.update(records)
         return True
 
 
@@ -946,6 +944,21 @@ def new_task_record(
     return record
 
 
+def new_follow_up_records(
+    run_task_id: str, follow_ups: list[list[str]], agent_args: tuple[str, ...], backend: str
+) -> dict[str, Any]:
+    records: dict[str, Any] = {}
+    previous_task_id = run_task_id
+    for task_id, prompt in follow_ups:
+        if task_id == run_task_id or task_id in records:
+            raise SystemExit(f"golem: task ID used more than once: {task_id}")
+        records[task_id] = new_task_record(
+            str(Path.cwd()), prompt, agent_args, None, backend, after=previous_task_id
+        )
+        previous_task_id = task_id
+    return records
+
+
 def pickup(task_id: str, *agent_args: str, is_app: bool, is_review_required: bool = False) -> int:
     preflight_task = load_tasks().get(task_id)
     is_codex = isinstance(preflight_task, dict) and (
@@ -1446,10 +1459,11 @@ def schedule_new_task(
     after: str | None,
     *,
     backend: str,
+    follow_up_records: dict[str, Any],
 ) -> int:
     due_time = when or datetime.now(UTC).astimezone()
     record = new_task_record(str(Path.cwd()), prompt, agent_args, due_time, backend, after=after)
-    reserve_task(task_id, record)
+    reserve_tasks({task_id: record, **follow_up_records})
     return wake_launch_agent_and_report(task_id, due_time)
 
 
@@ -2487,26 +2501,49 @@ def set_command_handler(
     command_parser.set_defaults(handler=handler)
 
 
+def schedule_run_task(
+    arguments: argparse.Namespace,
+    prompt_text: str,
+    task_args: tuple[str, ...],
+    follow_up_records: dict[str, Any],
+) -> int:
+    if arguments.after is not None:
+        dependent_record = new_task_record(
+            str(Path.cwd()), prompt_text, task_args, None, arguments.backend, after=arguments.after
+        )
+        if reserve_dependent_task(
+            {arguments.id: dependent_record, **follow_up_records}, arguments.after
+        ):
+            print(f"golem: {arguments.id} will run after {arguments.after}")
+            return 0
+    when = planned_execution_time(arguments.backend, is_now=arguments.now, at_text=arguments.at)
+    return schedule_new_task(
+        arguments.id,
+        prompt_text,
+        task_args,
+        when,
+        arguments.after,
+        backend=arguments.backend,
+        follow_up_records=follow_up_records,
+    )
+
+
 def run_task_from_arguments(arguments: argparse.Namespace) -> int:
     require_launch_agent()
     prompt_text = (
         Path(arguments.file).read_text(encoding="utf-8") if arguments.file else arguments.prompt
     )
     task_args = tuple(arguments.agent_args)
+    follow_up_records = new_follow_up_records(
+        arguments.id, arguments.then, task_args, arguments.backend
+    )
     if arguments.backend == BACKEND_CODEX:
         reject_unsupported_codex_arguments(list(task_args), is_run=True)
         require_codex_subscription(os.environ.copy())
-    if arguments.after is not None:
-        dependent_record = new_task_record(
-            str(Path.cwd()), prompt_text, task_args, None, arguments.backend, after=arguments.after
-        )
-        if reserve_dependent_task(arguments.id, dependent_record, arguments.after):
-            print(f"golem: {arguments.id} will run after {arguments.after}")
-            return 0
-    when = planned_execution_time(arguments.backend, is_now=arguments.now, at_text=arguments.at)
-    return schedule_new_task(
-        arguments.id, prompt_text, task_args, when, arguments.after, backend=arguments.backend
-    )
+    exit_code = schedule_run_task(arguments, prompt_text, task_args, follow_up_records)
+    for task_id, record in follow_up_records.items():
+        print(f"golem: {task_id} will run after {record['after']}")
+    return exit_code
 
 
 def add_worktree_commands(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
@@ -2546,6 +2583,14 @@ def add_run_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
     prompt_group = run_command.add_mutually_exclusive_group(required=True)
     prompt_group.add_argument("prompt", nargs="?")
     prompt_group.add_argument("--file")
+    run_command.add_argument(
+        "--then",
+        action="append",
+        nargs=2,
+        default=[],
+        metavar=("ID", "PROMPT"),
+        help="run PROMPT as task ID after the previous task succeeds; repeatable",
+    )
     run_schedule_group = run_command.add_mutually_exclusive_group()
     add_scheduling_arguments(run_schedule_group.add_argument)
     run_schedule_group.add_argument("--after", metavar="PARENT", help="run after PARENT succeeds")
