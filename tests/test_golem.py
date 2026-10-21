@@ -1294,6 +1294,35 @@ def test_auto_pickup_waits_for_usage_limit_resume(
     assert read_task(ledger_path)["status"] == golem.STATUS_SCHEDULED
     assert fake_commands["open-args"].read_text(encoding="utf-8") == ""
 
+    set_task_due_now(ledger_path)
+    write_claude_output(fake_commands, PROMPT)
+    assert golem.main(["_execute", TASK_ID, task["session_id"]]) == 0
+    assert read_task(ledger_path)["status"] == golem.STATUS_DONE
+    assert fake_commands["open-args"].read_text(encoding="utf-8") == (
+        f"claude://resume?session={task['session_id']}\n"
+    )
+
+
+def test_auto_pickup_opens_parent_when_resumed_follow_up_fails(
+    fake_commands, ledger_path, monkeypatch
+):
+    monkeypatch.setenv("GOLEM_CLAUDE_EXIT", "1")
+    write_tasks(
+        ledger_path,
+        {
+            PARENT_ID: task_record(golem.STATUS_NEEDS_REVIEW, task_id=PARENT_ID, auto_pickup=True),
+            TASK_ID: task_record(golem.STATUS_SCHEDULED, after=PARENT_ID, auto_pickup=True),
+        },
+    )
+
+    assert golem.main(["_execute", TASK_ID, f"{TASK_ID}-session"]) == 1
+    tasks = read_tasks(ledger_path)
+    assert tasks[TASK_ID]["status"] == golem.STATUS_FAILED
+    assert tasks[PARENT_ID]["status"] == golem.STATUS_DONE
+    assert fake_commands["open-args"].read_text(encoding="utf-8") == (
+        f"claude://resume?session={PARENT_ID}-session\n"
+    )
+
 
 def test_auto_pickup_busy_directory_leaves_task_needing_review(
     fake_commands, ledger_path, capsys, tmp_path

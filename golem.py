@@ -1057,14 +1057,15 @@ def pickup(task_id: str, *agent_args: str, is_app: bool, is_review_required: boo
         release_lock(directory_lock_file)
 
 
+def is_ready_for_review(tasks: dict[str, Any], task_id: str) -> bool:
+    return tasks[task_id].get("status") == STATUS_NEEDS_REVIEW and not has_unreviewed_dependent(
+        tasks, task_id
+    )
+
+
 def pickup_all() -> int:
     tasks = load_tasks()
-    task_ids = [
-        task_id
-        for task_id, task in tasks.items()
-        if task.get("status") == STATUS_NEEDS_REVIEW
-        and not has_unreviewed_dependent(tasks, task_id)
-    ]
+    task_ids = [task_id for task_id in tasks if is_ready_for_review(tasks, task_id)]
     if not task_ids:
         print("golem: no tasks ready for review")
         return 0
@@ -1085,11 +1086,10 @@ def auto_pickup_task(task_id: str) -> None:
     if not isinstance(task, dict):
         return
     task = cast("dict[str, Any]", task)
-    if (
-        not task.get("auto_pickup")
-        or task.get("status") != STATUS_NEEDS_REVIEW
-        or has_unreviewed_dependent(tasks, task_id)
-    ):
+    if task.get("status") == STATUS_FAILED:
+        auto_pickup_task(task.get("after", ""))
+        return
+    if not task.get("auto_pickup") or not is_ready_for_review(tasks, task_id):
         return
     try:
         returncode = pickup(task_id, is_app=True, is_review_required=True)
