@@ -2497,6 +2497,44 @@ def test_delete_checks_every_worktree_before_removing_any(git_repository, ledger
     assert read_tasks(ledger_path) == tasks
 
 
+def test_delete_keeps_tasks_when_later_worktree_removal_fails(
+    capsys, git_repository, ledger_path, monkeypatch
+):
+    first_worktree = git_worktree(git_repository)
+    git_output(git_repository, "worktree", "add", "-qb", "other-branch", "other")
+    second_worktree = git_repository / "other"
+    tasks = {
+        TASK_ID: task_record(golem.STATUS_DONE, worktree=str(first_worktree)),
+        SIBLING_ID: task_record(
+            golem.STATUS_DONE, task_id=SIBLING_ID, worktree=str(second_worktree)
+        ),
+    }
+    write_tasks(ledger_path, tasks)
+    write_worktrees(
+        golem_worktree_resource(git_repository, first_worktree)
+        | golem_worktree_resource(git_repository, second_worktree)
+    )
+    run_git = golem.run_git
+
+    def fail_second_removal(directory: str, *arguments: str) -> subprocess.CompletedProcess[str]:
+        if "remove" in arguments and str(second_worktree.resolve()) in arguments:
+            return subprocess.CompletedProcess(arguments, 1, stdout="", stderr="could not remove")
+        return run_git(directory, *arguments)
+
+    monkeypatch.setattr(golem, "run_git", fail_second_removal)
+
+    assert golem.main(["delete", TASK_ID, SIBLING_ID, "--remove-worktree"]) == 1
+    assert f"removed worktree: {first_worktree.resolve()}" in capsys.readouterr().out
+    assert not first_worktree.exists()
+    assert read_tasks(ledger_path) == tasks
+
+    monkeypatch.setattr(golem, "run_git", run_git)
+
+    assert golem.main(["delete", TASK_ID, SIBLING_ID, "--remove-worktree"]) == 0
+    assert golem.load_tasks() == {}
+    assert not second_worktree.exists()
+
+
 def test_delete_retains_worktree_shared_with_retryable_task(owned_worktree, ledger_path):
     worktree = owned_worktree()
     write_tasks(

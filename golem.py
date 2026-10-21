@@ -2154,7 +2154,7 @@ def selected_delete_task_ids(
     return [task_id for task_id in tasks if task_id in selected_ids], messages
 
 
-def delete_task_checks(
+def task_worktrees_and_refusals(
     tasks: dict[str, Any], task_ids: list[str], *, is_removing_worktree: bool
 ) -> tuple[dict[str, str | None], list[str]]:
     selected_id_set = set(task_ids)
@@ -2224,6 +2224,8 @@ def remove_selected_worktrees(
                 cast("dict[str, Any]", resource), cast("list[str]", entry), worktree
             )
             if not is_removed:
+                for removed_worktree in removed_worktrees:
+                    print(f"golem: removed worktree: {removed_worktree}")
                 print_retained_worktree(worktree, reasons)
                 return None
             removed_worktrees.add(worktree)
@@ -2233,17 +2235,16 @@ def remove_selected_worktrees(
 def delete_tasks(task_ids: list[str], *, is_chain: bool, is_removing_worktree: bool) -> int:
     with locked_ledger() as (tasks, worktrees):
         selected_task_ids, messages = selected_delete_task_ids(tasks, task_ids, is_chain=is_chain)
-        worktrees_by_task, check_messages = delete_task_checks(
+        worktrees_by_task, check_messages = task_worktrees_and_refusals(
             tasks, selected_task_ids, is_removing_worktree=is_removing_worktree
         )
         if messages or check_messages:
             raise SystemExit("\n".join([*messages, *check_messages]))
-        removed_worktrees: set[str] = set()
+        removed_worktrees: set[str] | None = set()
         if is_removing_worktree:
-            removal_result = remove_selected_worktrees(tasks, worktrees, worktrees_by_task)
-            if removal_result is None:
+            removed_worktrees = remove_selected_worktrees(tasks, worktrees, worktrees_by_task)
+            if removed_worktrees is None:
                 return 1
-            removed_worktrees = removal_result
         selected_tasks = [
             (task_id, cast("dict[str, Any]", tasks[task_id])) for task_id in selected_task_ids
         ]
