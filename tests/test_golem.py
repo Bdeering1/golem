@@ -106,6 +106,69 @@ else
 fi
 exit "${GOLEM_CLAUDE_EXIT:-0}"
 """,
+        "codex": f"""#!{sys.executable}
+import json
+import os
+import sys
+
+prefix = os.environ["GOLEM_CODEX_"]
+
+def record(name, value):
+    with open(prefix + name, "a", encoding="utf-8") as output:
+        output.write(value)
+
+record("args", "\\x1e\\n" + "\\n".join(sys.argv[1:]) + "\\n")
+record("cwd", os.getcwd() + "\\n")
+record("api-keys", f"{{int('OPENAI_API_KEY' in os.environ)}} {{int('CODEX_API_KEY' in os.environ)}}\\n")
+record("home", os.environ.get("CODEX_HOME", "") + "\\n")
+
+if sys.argv[1:2] == ["app-server"]:
+    account = {{"account": {{"type": "chatgpt"}}, "requiresOpenaiAuth": True}}
+    rate_limits = {{"rateLimits": {{"primary": {{"usedPercent": 0, "resetsAt": None}}, "secondary": None}}}}
+    account_path = os.environ.get("GOLEM_CODEX_ACCOUNT")
+    limits_path = os.environ.get("GOLEM_CODEX_RATE_LIMITS")
+    if account_path:
+        account = json.load(open(account_path, encoding="utf-8"))
+    if limits_path:
+        rate_limits = json.load(open(limits_path, encoding="utf-8"))
+    batch_responses = []
+    for line in sys.stdin:
+        record("stdin", line)
+        request = json.loads(line)
+        if "id" not in request:
+            continue
+        if os.environ.get("GOLEM_CODEX_ERROR"):
+            response = {{"id": request["id"], "error": {{"message": "unavailable"}}}}
+        elif request["method"] == "account/read":
+            response = {{"id": request["id"], "result": account}}
+        elif request["method"] == "account/rateLimits/read":
+            response = {{"id": request["id"], "result": rate_limits}}
+        else:
+            response = {{"id": request["id"], "result": {{}}}}
+        if os.environ.get("GOLEM_CODEX_BATCH_RESPONSES"):
+            batch_responses.append(json.dumps(response))
+            if request["id"] != 3:
+                continue
+            sys.stdout.write("\\n".join(batch_responses) + "\\n")
+            sys.stdout.flush()
+            continue
+        print(json.dumps(response), flush=True)
+    sys.exit(0)
+
+if sys.argv[1:2] == ["resume"]:
+    sys.exit(0)
+
+standard_input = sys.stdin.read()
+record("stdin", standard_input + "\\x1e\\n")
+events_path = os.environ.get("GOLEM_CODEX_EVENTS")
+if events_path:
+    sys.stdout.write(open(events_path, encoding="utf-8").read())
+else:
+    print(json.dumps({{"type": "thread.started", "thread_id": "thread"}}))
+    print(json.dumps({{"type": "item.completed", "item": {{"type": "agent_message", "text": "done"}}}}))
+    print(json.dumps({{"type": "turn.completed", "usage": {{}}}}))
+sys.exit(int(os.environ.get("GOLEM_CODEX_EXIT", "0")))
+""",
         "launchctl": """#!/bin/sh
 printf '%s\\n' "$*" >> "$GOLEM_LAUNCHCTL_ARGS"
 case "$1" in
@@ -151,6 +214,11 @@ def fake_commands(monkeypatch, tmp_path, fake_bin_path):
             "claude-lc-time",
             "claude-stdout",
             "claude-unrelated",
+            "codex-args",
+            "codex-cwd",
+            "codex-stdin",
+            "codex-api-keys",
+            "codex-home",
             "launchctl-args",
             "open-args",
         )
@@ -168,6 +236,7 @@ def fake_commands(monkeypatch, tmp_path, fake_bin_path):
     monkeypatch.setenv("XDG_STATE_HOME", str(state_path))
     for name, path in paths.items():
         monkeypatch.setenv(f"GOLEM_{name.upper().replace('-', '_')}", str(path))
+    monkeypatch.setenv("GOLEM_CODEX_", str(tmp_path / "codex-"))
     monkeypatch.chdir(work_path)
     return paths
 
@@ -442,6 +511,36 @@ def logged_claude_calls(fake_commands):
 def logged_claude_args(fake_commands):
     calls = logged_claude_calls(fake_commands)
     return calls[-1] if calls else []
+
+
+def logged_codex_calls(fake_commands):
+    calls: list[list[str]] = []
+    for call in fake_commands["codex-args"].read_text(encoding="utf-8").split("\x1e\n"):
+        arguments = call.splitlines()
+        if arguments:
+            calls.append(arguments)
+    return calls
+
+
+def logged_codex_args(fake_commands):
+    calls = logged_codex_calls(fake_commands)
+    return calls[-1] if calls else []
+
+
+def write_codex_events(monkeypatch, tmp_path, events):
+    events_path = tmp_path / "events.jsonl"
+    events_path.write_text("\n".join(json.dumps(event) for event in events), encoding="utf-8")
+    monkeypatch.setenv("GOLEM_CODEX_EVENTS", str(events_path))
+    return events_path
+
+
+def write_codex_rate_limits(monkeypatch, tmp_path, primary, secondary):
+    limits_path = tmp_path / "limits.json"
+    limits_path.write_text(
+        json.dumps({"rateLimits": {"primary": primary, "secondary": secondary}}), encoding="utf-8"
+    )
+    monkeypatch.setenv("GOLEM_CODEX_RATE_LIMITS", str(limits_path))
+    return limits_path
 
 
 def wait_until(predicate):
@@ -2612,6 +2711,559 @@ def test_close_does_not_release_worktree(owned_worktree):
     assert "released_at" not in golem.load_worktrees()[str(worktree.resolve())]
 
 
+@pytest.mark.parametrize(
+    ("events", "exit_code", "result", "status"),
+    [
+        pytest.param(
+            [
+                {"type": "thread.started", "thread_id": "codex-thread"},
+                {
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": "Codex completed"},
+                },
+                {"type": "turn.completed", "usage": {}},
+            ],
+            0,
+            "Codex completed",
+            golem.STATUS_NEEDS_REVIEW,
+            id="success",
+        ),
+        pytest.param(
+            [
+                {"type": "thread.started", "thread_id": "codex-thread"},
+                {"type": "turn.failed", "error": {"message": "ordinary failure"}},
+            ],
+            1,
+            "ordinary failure",
+            golem.STATUS_FAILED,
+            id="failure",
+        ),
+    ],
+)
+def test_codex_run_records_result_and_thread(
+    installed_launch_agent,
+    fake_commands,
+    ledger_path,
+    monkeypatch,
+    tmp_path,
+    capsys,
+    events,
+    exit_code,
+    result,
+    status,
+):
+    write_codex_events(monkeypatch, tmp_path, events)
+    monkeypatch.setenv("GOLEM_CODEX_EXIT", str(exit_code))
+
+    assert golem.main(["run", TASK_ID, PROMPT, "--backend", "codex", "--now", "--", "-m", "x"]) == 0
+    task = read_task(ledger_path)
+    assert task["backend"] == golem.BACKEND_CODEX
+    assert golem.main(["_execute", TASK_ID, task["session_id"]]) == exit_code
+
+    task = read_task(ledger_path)
+    assert task["thread_id"] == "codex-thread"
+    assert task["result"] == result
+    assert task["status"] == status
+    assert logged_codex_args(fake_commands) == [
+        "exec",
+        "--json",
+        "--skip-git-repo-check",
+        "-m",
+        "x",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "-c",
+        golem.CODEX_PROVIDER_OVERRIDE,
+        "-",
+    ]
+    assert fake_commands["codex-stdin"].read_text(encoding="utf-8").endswith(f"{PROMPT}\x1e\n")
+    if status == golem.STATUS_NEEDS_REVIEW:
+        assert golem.main(["show", TASK_ID]) == 0
+        assert capsys.readouterr().out.endswith(f"{result}\n")
+
+
+@pytest.mark.parametrize(
+    ("primary", "secondary", "expected_offset"),
+    [
+        pytest.param({"usedPercent": 100, "resetsAt": 7200}, None, 7200, id="exhausted-primary"),
+        pytest.param(
+            {"usedPercent": 100, "resetsAt": 3600},
+            {"usedPercent": 100, "resetsAt": 7200},
+            7200,
+            id="latest-exhausted",
+        ),
+        pytest.param({"usedPercent": 25, "resetsAt": 3600}, None, 3600, id="active"),
+        pytest.param({"usedPercent": 0, "resetsAt": 3600}, None, None, id="unused"),
+        pytest.param(None, None, None, id="null-primary"),
+    ],
+)
+def test_next_codex_reset_time(
+    fake_commands, monkeypatch, tmp_path, primary, secondary, expected_offset
+):
+    now = datetime.now(UTC)
+    primary, secondary = (
+        None
+        if limit is None
+        else {**limit, "resetsAt": int((now + timedelta(seconds=limit["resetsAt"])).timestamp())}
+        for limit in (primary, secondary)
+    )
+    write_codex_rate_limits(monkeypatch, tmp_path, primary, secondary)
+
+    reset_time = golem.next_codex_reset_time()
+
+    if expected_offset is None:
+        assert reset_time is None
+    else:
+        assert reset_time is not None
+        assert abs((reset_time - now).total_seconds() - expected_offset) < 2
+
+
+def test_codex_usage_limit_resumes_saved_conversation(
+    installed_launch_agent, fake_commands, ledger_path, monkeypatch, tmp_path
+):
+    write_codex_events(
+        monkeypatch,
+        tmp_path,
+        [
+            {"type": "thread.started", "thread_id": "codex-thread"},
+            {"type": "turn.failed", "error": {"message": "You've hit your usage limit"}},
+        ],
+    )
+    reset_time = datetime.now(UTC).replace(second=0, microsecond=0) + timedelta(hours=1)
+    monkeypatch.setattr(golem, "next_codex_reset_time", lambda: reset_time)
+
+    golem.main(["run", TASK_ID, PROMPT, "--backend", "codex", "--now"])
+    task = read_task(ledger_path)
+    assert golem.main(["_execute", TASK_ID, task["session_id"]]) == 0
+    task = read_task(ledger_path)
+    assert task["status"] == golem.STATUS_SCHEDULED
+    assert datetime.fromisoformat(task["due_at"]) == reset_time
+
+    write_codex_events(
+        monkeypatch,
+        tmp_path,
+        [
+            {"type": "item.completed", "item": {"type": "agent_message", "text": "done"}},
+            {"type": "turn.completed", "usage": {}},
+        ],
+    )
+    set_task_due_now(ledger_path)
+    assert golem.main(["_execute", TASK_ID, task["session_id"]]) == 0
+    assert logged_codex_args(fake_commands)[-3:] == ["resume", "codex-thread", "-"]
+    assert (
+        fake_commands["codex-stdin"]
+        .read_text(encoding="utf-8")
+        .endswith(f"{golem.USAGE_LIMIT_RESUME_PROMPT}\x1e\n")
+    )
+
+
+def test_codex_creates_and_uses_golem_worktree(
+    installed_launch_agent, fake_commands, git_repository, ledger_path, monkeypatch
+):
+    monkeypatch.chdir(git_repository)
+    golem.main(["run", TASK_ID, PROMPT, "--backend", "codex", "--now"])
+    task = read_task(ledger_path)
+
+    assert golem.main(["_execute", TASK_ID, task["session_id"]]) == 0
+
+    worktree = Path(read_task(ledger_path)["worktree"])
+    assert worktree.is_dir()
+    assert git_output(worktree, "branch", "--show-current") == f"worktree-{task['session_id']}"
+    assert logged_codex_args(fake_commands) == [
+        "exec",
+        "--json",
+        "--skip-git-repo-check",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "-c",
+        golem.CODEX_PROVIDER_OVERRIDE,
+        "-",
+    ]
+    assert fake_commands["codex-cwd"].read_text(encoding="utf-8").splitlines()[-1] == str(worktree)
+    assert golem.is_worktree_owner_verified(str(worktree), task["session_id"])
+    resource = golem.load_worktrees()[str(worktree.resolve())]
+    assert resource["owner"] == golem.WORKTREE_OWNER_GOLEM
+    assert resource["session_id"] == task["session_id"]
+    common_directory = golem.git_common_directory(str(git_repository))
+    assert common_directory is not None
+    exclude_path = Path(common_directory) / "info" / "exclude"
+    assert ".claude/worktrees/" in exclude_path.read_text(encoding="utf-8").splitlines()
+
+
+@pytest.mark.parametrize(
+    ("fetched_age", "is_reachable", "is_fetched"),
+    [
+        pytest.param(timedelta(days=2), True, True, id="stale"),
+        pytest.param(timedelta(hours=1), True, False, id="recent"),
+        pytest.param(timedelta(days=2), False, False, id="unreachable"),
+    ],
+)
+def test_codex_worktree_base_fetches_stale_default_branch(
+    installed_launch_agent,
+    git_repository,
+    git_repository_template,
+    ledger_path,
+    monkeypatch,
+    tmp_path,
+    fetched_age,
+    is_reachable,
+    is_fetched,
+):
+    remote_path = tmp_path / "remote"
+    shutil.copytree(git_repository_template, remote_path)
+    git_output(git_repository, "remote", "add", "origin", str(remote_path))
+    git_output(git_repository, "fetch", "-q", "origin")
+    git_output(git_repository, "remote", "set-head", "origin", "--auto")
+    cached_commit = git_output(git_repository, "rev-parse", "origin/HEAD")
+    (remote_path / "README").write_text("updated\n", encoding="utf-8")
+    git_output(
+        remote_path,
+        "-c",
+        "user.email=test@example.com",
+        "-c",
+        "user.name=Test",
+        "commit",
+        "-qam",
+        "u",
+    )
+    remote_commit = git_output(remote_path, "rev-parse", "HEAD")
+    if not is_reachable:
+        git_output(git_repository, "remote", "set-url", "origin", str(tmp_path / "missing"))
+    fetch_head_path = Path(
+        git_output(
+            git_repository, "rev-parse", "--path-format=absolute", "--git-path", "FETCH_HEAD"
+        )
+    )
+    fetched_at = (datetime.now(UTC) - fetched_age).timestamp()
+    os.utime(fetch_head_path, (fetched_at, fetched_at))
+    monkeypatch.chdir(git_repository)
+    golem.main(["run", TASK_ID, PROMPT, "--backend", "codex", "--now"])
+
+    assert golem.main(["_execute", TASK_ID, read_task(ledger_path)["session_id"]]) == 0
+
+    worktree = Path(read_task(ledger_path)["worktree"])
+    assert git_output(worktree, "rev-parse", "HEAD") == (
+        remote_commit if is_fetched else cached_commit
+    )
+    assert golem.run_git(str(worktree), "rev-parse", "--abbrev-ref", "@{upstream}").returncode
+
+
+@pytest.mark.parametrize(
+    "agent_args",
+    [
+        pytest.param(["-s", "read-only"], id="short-sandbox"),
+        pytest.param(["--sandbox=read-only"], id="sandbox"),
+        pytest.param(["--yolo"], id="yolo"),
+        pytest.param(["--approve-for-me"], id="approve"),
+        pytest.param(["-c", 'sandbox_mode="read-only"'], id="sandbox-config"),
+    ],
+)
+def test_codex_permission_arguments_suppress_unattended_default(
+    installed_launch_agent, fake_commands, ledger_path, agent_args
+):
+    assert (
+        golem.main(["run", TASK_ID, PROMPT, "--backend", "codex", "--now", "--", *agent_args]) == 0
+    )
+    task = read_task(ledger_path)
+
+    assert golem.main(["_execute", TASK_ID, task["session_id"]]) == 0
+    assert "--dangerously-bypass-approvals-and-sandbox" not in logged_codex_args(fake_commands)
+
+
+def test_codex_rejects_api_key_accounts_before_execution(
+    installed_launch_agent, fake_commands, ledger_path, monkeypatch, tmp_path
+):
+    account_path = tmp_path / "account.json"
+    account_path.write_text(
+        json.dumps({"account": {"type": "apiKey"}, "requiresOpenaiAuth": True}), encoding="utf-8"
+    )
+    monkeypatch.setenv("GOLEM_CODEX_ACCOUNT", str(account_path))
+
+    with pytest.raises(SystemExit, match="ChatGPT subscription"):
+        golem.main(["run", TASK_ID, PROMPT, "--backend", "codex", "--now"])
+
+    assert not any(call[0] == "exec" for call in logged_codex_calls(fake_commands))
+    write_task(ledger_path, golem.STATUS_SCHEDULED, backend=golem.BACKEND_CODEX)
+    task = read_task(ledger_path)
+
+    assert golem.main(["_execute", TASK_ID, task["session_id"]]) == 1
+    assert read_task(ledger_path)["result"] == golem.CODEX_SUBSCRIPTION_ERROR
+    assert not any(call[0] == "exec" for call in logged_codex_calls(fake_commands))
+
+
+@pytest.mark.parametrize(
+    ("agent_args", "argument"),
+    [
+        pytest.param(["--oss"], "--oss", id="oss"),
+        pytest.param(["--local-provider=ollama"], "--local-provider=ollama", id="local-provider"),
+        pytest.param(["-c", 'model_provider="x"'], 'model_provider="x"', id="provider-config"),
+        pytest.param(
+            ["--config=forced_login_method=api"],
+            "forced_login_method=api",
+            id="login-config",
+        ),
+        pytest.param(["--worktree"], "--worktree", id="worktree"),
+    ],
+)
+def test_codex_run_rejects_billing_bypass_arguments(installed_launch_agent, agent_args, argument):
+    with pytest.raises(SystemExit, match=re.escape(argument)):
+        golem.main(["run", TASK_ID, PROMPT, "--backend", "codex", "--now", "--", *agent_args])
+
+
+def test_codex_processes_remove_api_keys_from_every_child(
+    installed_launch_agent, fake_commands, ledger_path, monkeypatch
+):
+    monkeypatch.setenv("OPENAI_API_KEY", "forbidden")
+    monkeypatch.setenv("CODEX_API_KEY", "forbidden")
+    assert golem.main(["run", TASK_ID, PROMPT, "--backend", "codex", "--now"]) == 0
+    task = read_task(ledger_path)
+
+    assert golem.main(["_execute", TASK_ID, task["session_id"]]) == 0
+    assert golem.main(["pickup", TASK_ID]) == 0
+    assert {call[0] for call in logged_codex_calls(fake_commands)} == {
+        "app-server",
+        "exec",
+        "resume",
+    }
+    assert set(fake_commands["codex-api-keys"].read_text(encoding="utf-8").splitlines()) == {"0 0"}
+
+
+@pytest.mark.parametrize(("is_error", "reset_offset"), [(True, 3600), (False, -3600)])
+def test_next_codex_reset_time_rejects_unavailable_or_past_limits(
+    fake_commands, monkeypatch, tmp_path, is_error, reset_offset
+):
+    if is_error:
+        monkeypatch.setenv("GOLEM_CODEX_ERROR", "1")
+    else:
+        write_codex_rate_limits(
+            monkeypatch,
+            tmp_path,
+            {
+                "usedPercent": 100,
+                "resetsAt": int((datetime.now(UTC) + timedelta(seconds=reset_offset)).timestamp()),
+            },
+            None,
+        )
+
+    with pytest.raises(SystemExit, match=re.escape(golem.USAGE_ERROR)):
+        golem.next_codex_reset_time()
+
+
+def test_codex_app_server_reads_batched_responses(fake_commands, monkeypatch, tmp_path):
+    reset_time = datetime.now(UTC) + timedelta(hours=1)
+    write_codex_rate_limits(
+        monkeypatch,
+        tmp_path,
+        {"usedPercent": 100, "resetsAt": int(reset_time.timestamp())},
+        None,
+    )
+    monkeypatch.setenv("GOLEM_CODEX_BATCH_RESPONSES", "1")
+
+    assert golem.next_codex_reset_time() == reset_time.replace(microsecond=0)
+
+
+def test_codex_usage_limit_stores_result_and_stops_after_resume_limit(
+    installed_launch_agent, ledger_path, monkeypatch, tmp_path
+):
+    usage_error = "You\N{RIGHT SINGLE QUOTATION MARK}ve hit your usage limit"
+    write_codex_events(
+        monkeypatch,
+        tmp_path,
+        [
+            {"type": "thread.started", "thread_id": "codex-thread"},
+            {"type": "turn.failed", "error": {"message": usage_error}},
+        ],
+    )
+    monkeypatch.setenv("GOLEM_CODEX_EXIT", "1")
+    reset_time = datetime.now(UTC).replace(second=0, microsecond=0) + timedelta(hours=1)
+    monkeypatch.setattr(golem, "next_codex_reset_time", lambda: reset_time)
+    assert golem.main(["run", TASK_ID, PROMPT, "--backend", "codex", "--now"]) == 0
+    session_id = read_task(ledger_path)["session_id"]
+
+    for resume_count in range(golem.MAX_USAGE_LIMIT_RESUMES):
+        set_task_due_now(ledger_path)
+        assert golem.main(["_execute", TASK_ID, session_id]) == 0
+        task = read_task(ledger_path)
+        assert task["session_id"] == session_id
+        assert task["result"] == usage_error
+        assert task["usage_limit_resume_count"] == resume_count + 1
+        assert datetime.fromisoformat(task["due_at"]) == reset_time
+
+    set_task_due_now(ledger_path)
+    assert golem.main(["_execute", TASK_ID, session_id]) == 1
+    assert read_task(ledger_path)["status"] == golem.STATUS_FAILED
+
+
+@pytest.mark.parametrize(
+    ("status", "command"),
+    [
+        pytest.param(golem.STATUS_FAILED, "retry", id="retry"),
+        pytest.param(golem.STATUS_SCHEDULED, "reschedule", id="reschedule"),
+    ],
+)
+def test_codex_retry_and_reschedule_use_codex_reset_time(
+    installed_launch_agent, ledger_path, monkeypatch, status, command
+):
+    reset_time = datetime.now(UTC).replace(second=0, microsecond=0) + timedelta(hours=1)
+    write_task(ledger_path, status, backend=golem.BACKEND_CODEX)
+    monkeypatch.setattr(golem, "next_reset_time", lambda: pytest.fail("Claude lookup ran"))
+    monkeypatch.setattr(golem, "next_codex_reset_time", lambda: reset_time)
+
+    assert golem.main([command, TASK_ID]) == 0
+
+    assert datetime.fromisoformat(read_task(ledger_path)["due_at"]) == reset_time
+
+
+def test_codex_pickup_resumes_thread_in_task_worktree_and_rejects_app(
+    installed_launch_agent, fake_commands, ledger_path, tmp_path
+):
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    write_task(
+        ledger_path,
+        golem.STATUS_NEEDS_REVIEW,
+        backend=golem.BACKEND_CODEX,
+        thread_id="codex-thread",
+        worktree=str(worktree),
+    )
+
+    assert golem.main(["pickup", TASK_ID, "--", "-m", "x"]) == 0
+    assert logged_codex_args(fake_commands) == [
+        "resume",
+        "codex-thread",
+        "-m",
+        "x",
+        "-c",
+        golem.CODEX_PROVIDER_OVERRIDE,
+    ]
+    assert fake_commands["codex-cwd"].read_text(encoding="utf-8").splitlines()[-1] == str(worktree)
+    write_task(ledger_path, golem.STATUS_NEEDS_REVIEW, backend=golem.BACKEND_CODEX)
+
+    with pytest.raises(SystemExit, match="does not support Codex"):
+        golem.main(["pickup", TASK_ID, "--app"])
+    assert read_task(ledger_path)["status"] == golem.STATUS_NEEDS_REVIEW
+    with pytest.raises(SystemExit, match="--oss"):
+        golem.main(["pickup", TASK_ID, "--", "--oss"])
+
+
+def test_codex_non_git_run_and_retry_keep_worktree_and_arguments(
+    installed_launch_agent, fake_commands, git_repository, ledger_path, monkeypatch, tmp_path
+):
+    assert golem.main(["run", TASK_ID, PROMPT, "--backend", "codex", "--now"]) == 0
+    task = read_task(ledger_path)
+    assert golem.main(["_execute", TASK_ID, task["session_id"]]) == 0
+    assert fake_commands["codex-cwd"].read_text(encoding="utf-8").splitlines()[-1] == str(
+        Path.cwd()
+    )
+
+    monkeypatch.chdir(git_repository)
+    write_codex_events(
+        monkeypatch,
+        tmp_path,
+        [
+            {"type": "thread.started", "thread_id": "failed-thread"},
+            {"type": "turn.failed", "error": {"message": "ordinary failure"}},
+        ],
+    )
+    monkeypatch.setenv("GOLEM_CODEX_EXIT", "1")
+    assert golem.main(["run", "retry", PROMPT, "--backend", "codex", "--now", "--", "-m", "x"]) == 0
+    failed = read_task(ledger_path, "retry")
+    assert golem.main(["_execute", "retry", failed["session_id"]]) == 1
+    worktree = read_task(ledger_path, "retry")["worktree"]
+    monkeypatch.setenv("GOLEM_CODEX_EXIT", "0")
+    write_codex_events(
+        monkeypatch,
+        tmp_path,
+        [
+            {"type": "thread.started", "thread_id": "fresh-thread"},
+            {"type": "item.completed", "item": {"type": "agent_message", "text": "done"}},
+            {"type": "turn.completed", "usage": {}},
+        ],
+    )
+
+    assert golem.main(["retry", "retry", "--now"]) == 0
+    retried = read_task(ledger_path, "retry")
+    assert retried["backend"] == golem.BACKEND_CODEX
+    assert retried["worktree"] == worktree
+    assert retried["agent_args"] == ["-m", "x"]
+    assert golem.main(["_execute", "retry", retried["session_id"]]) == 0
+    exec_calls = [call for call in logged_codex_calls(fake_commands) if call[0] == "exec"]
+    assert "resume" not in exec_calls[-1]
+
+
+@pytest.mark.parametrize(
+    "backends",
+    [
+        pytest.param(
+            (golem.BACKEND_CLAUDE, golem.BACKEND_CODEX, golem.BACKEND_CLAUDE), id="claude-parent"
+        ),
+        pytest.param(
+            (golem.BACKEND_CODEX, golem.BACKEND_CLAUDE, golem.BACKEND_CODEX), id="codex-parent"
+        ),
+    ],
+)
+def test_mixed_backend_chain_shares_worktree_and_uses_fresh_conversations(
+    installed_launch_agent, fake_commands, git_repository, ledger_path, monkeypatch, backends
+):
+    monkeypatch.chdir(git_repository)
+    parent_backend, child_backend, grandchild_backend = backends
+    assert golem.main(["run", "parent", PROMPT, "--backend", parent_backend, "--now"]) == 0
+    assert (
+        golem.main(["run", "child", PROMPT, "--backend", child_backend, "--after", "parent"]) == 0
+    )
+    assert (
+        golem.main(
+            ["run", "grandchild", PROMPT, "--backend", grandchild_backend, "--after", "child"]
+        )
+        == 0
+    )
+    parent = read_task(ledger_path, "parent")
+
+    assert golem.main(["_execute", "parent", parent["session_id"]]) == 0
+    tasks = read_tasks(ledger_path)
+    worktree = tasks["parent"]["worktree"]
+    assert {task["worktree"] for task in tasks.values()} == {worktree}
+    assert len({task["session_id"] for task in tasks.values()}) == 3
+    assert {task["status"] for task in tasks.values()} == {golem.STATUS_NEEDS_REVIEW}
+    codex_cwds = fake_commands["codex-cwd"].read_text(encoding="utf-8").splitlines()
+    codex_executions = [
+        (call, cwd)
+        for call, cwd in zip(logged_codex_calls(fake_commands), codex_cwds, strict=True)
+        if call[0] == "exec"
+    ]
+    assert len(codex_executions) == backends.count(golem.BACKEND_CODEX)
+    assert all("resume" not in call and cwd == worktree for call, cwd in codex_executions)
+    assert logged_claude_cwds(fake_commands)[-1] == worktree
+
+
+def test_codex_home_reaches_launch_agent_executor(
+    installed_launch_agent, fake_commands, ledger_path, monkeypatch, tmp_path
+):
+    codex_home = tmp_path / "codex-home"
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    assert golem.main(["run", TASK_ID, PROMPT, "--backend", "codex", "--now"]) == 0
+    monkeypatch.delenv("CODEX_HOME")
+    fake_commands["codex-args"].write_text("", encoding="utf-8")
+    fake_commands["codex-home"].write_text("", encoding="utf-8")
+    start_task_executor = golem.start_task_executor
+    processes: list[subprocess.Popen[bytes]] = []
+
+    def record_executor(task_id: str, task: dict[str, Any]) -> subprocess.Popen[bytes]:
+        process = start_task_executor(task_id, task)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(golem, "start_task_executor", record_executor)
+    golem.run_launch_agent_pass()
+
+    assert len(processes) == 1
+    processes[0].wait()
+    homes = fake_commands["codex-home"].read_text(encoding="utf-8").splitlines()
+    assert next(
+        home
+        for call, home in zip(logged_codex_calls(fake_commands), homes, strict=True)
+        if call[0] == "exec"
+    ) == str(codex_home)
+
+
 class TerminalInput(io.StringIO):
     def __init__(self, answers, on_first_read=lambda: None):
         super().__init__(answers)
@@ -2626,12 +3278,17 @@ class TerminalInput(io.StringIO):
         return super().readline(size)
 
 
-def write_transcript(session_id, idle_days):
-    transcript_path = Path.home() / ".claude" / "projects" / "project" / f"{session_id}.jsonl"
-    transcript_path.parent.mkdir(parents=True, exist_ok=True)
-    transcript_path.touch()
+def write_idle_file(path, idle_days):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.touch()
     modified_time = time.time() - idle_days * DAY_SECONDS
-    os.utime(transcript_path, (modified_time, modified_time))
+    os.utime(path, (modified_time, modified_time))
+
+
+def write_transcript(session_id, idle_days):
+    write_idle_file(
+        Path.home() / ".claude" / "projects" / "project" / f"{session_id}.jsonl", idle_days
+    )
 
 
 @pytest.fixture
@@ -2700,6 +3357,32 @@ def test_prune_decides_done_tasks_by_pull_request_then_idle_time(
     write_pull_requests(WORKTREE_BRANCH, pull_requests)
     if idle_days is not None:
         write_transcript(read_task(ledger_path)["session_id"], idle_days)
+
+    assert golem.main(["prune", "--yes"]) == 0
+
+    assert (TASK_ID not in golem.load_tasks()) is is_removed
+
+
+@pytest.mark.parametrize(
+    ("idle_days", "is_removed"),
+    [
+        pytest.param(golem.PRUNE_IDLE_DAYS, True, id="idle-conversation"),
+        pytest.param(golem.PRUNE_IDLE_DAYS - 1, False, id="active-conversation"),
+        pytest.param(None, True, id="missing-rollout"),
+    ],
+)
+def test_prune_uses_codex_conversation_idle_time(ledger_path, tmp_path, idle_days, is_removed):
+    codex_home = tmp_path / "saved-codex-home"
+    write_task(
+        ledger_path,
+        golem.STATUS_DONE,
+        backend=golem.BACKEND_CODEX,
+        thread_id="codex-thread",
+        environment={"PATH": os.environ["PATH"], "CODEX_HOME": str(codex_home)},
+    )
+    if idle_days is not None:
+        rollout_name = "rollout-2030-01-01T00-00-00-codex-thread.jsonl"
+        write_idle_file(codex_home / "sessions" / "2030" / "01" / "01" / rollout_name, idle_days)
 
     assert golem.main(["prune", "--yes"]) == 0
 
