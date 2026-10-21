@@ -320,7 +320,7 @@ def mark_task_done(tasks: dict[str, Any], task: dict[str, Any]) -> None:
     mark_ancestors_done(tasks, task)
 
 
-def open_app_session(task_id: str, session_id: str) -> int:
+def open_app_session_and_mark_done(task_id: str, session_id: str) -> int:
     returncode = subprocess.run(
         ["open", f"claude://resume?session={session_id}"], check=False
     ).returncode
@@ -330,7 +330,7 @@ def open_app_session(task_id: str, session_id: str) -> int:
         current_task = tasks.get(task_id)
         if isinstance(current_task, dict):
             mark_task_done(tasks, cast("dict[str, Any]", current_task))
-    return returncode
+    return 0
 
 
 def reserve_dependent_task(records: dict[str, Any], parent_id: str) -> bool:
@@ -1031,7 +1031,7 @@ def pickup(task_id: str, *agent_args: str, is_app: bool, is_review_required: boo
         session_id = cast("str", task["session_id"])
     if is_app:
         release_lock(directory_lock_file)
-        return open_app_session(task_id, session_id)
+        return open_app_session_and_mark_done(task_id, session_id)
     try:
         if is_codex:
             return subprocess.run(

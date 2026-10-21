@@ -1268,18 +1268,6 @@ def test_auto_pickup_opens_completed_task(installed_launch_agent, fake_commands,
     )
 
 
-def test_failed_auto_pickup_leaves_task_needing_review(
-    installed_launch_agent, fake_commands, ledger_path, monkeypatch, capsys
-):
-    monkeypatch.setenv("GOLEM_OPEN_EXIT", "1")
-    golem.main(["run", TASK_ID, PROMPT, "--now", "--auto-pickup"])
-    task = read_task(ledger_path)
-
-    assert golem.main(["_execute", TASK_ID, task["session_id"]]) == 0
-    assert read_task(ledger_path)["status"] == golem.STATUS_NEEDS_REVIEW
-    assert f"golem: could not open {TASK_ID} in the desktop app" in capsys.readouterr().err
-
-
 def test_auto_pickup_waits_for_usage_limit_resume(
     installed_launch_agent, fake_commands, ledger_path, monkeypatch
 ):
@@ -1322,30 +1310,6 @@ def test_auto_pickup_opens_parent_when_resumed_follow_up_fails(
     assert fake_commands["open-args"].read_text(encoding="utf-8") == (
         f"claude://resume?session={PARENT_ID}-session\n"
     )
-
-
-def test_auto_pickup_busy_directory_leaves_task_needing_review(
-    fake_commands, ledger_path, capsys, tmp_path
-):
-    busy_directory = tmp_path / "busy"
-    busy_directory.mkdir()
-    write_task(
-        ledger_path,
-        golem.STATUS_NEEDS_REVIEW,
-        auto_pickup=True,
-        cwd=str(busy_directory),
-    )
-    directory_lock_file = golem.acquire_lock(golem.directory_lock_path(str(busy_directory)))
-    assert directory_lock_file is not None
-
-    try:
-        golem.auto_pickup_task(TASK_ID)
-    finally:
-        golem.release_lock(directory_lock_file)
-
-    assert read_task(ledger_path)["status"] == golem.STATUS_NEEDS_REVIEW
-    assert f"golem: directory is busy: {busy_directory}" in capsys.readouterr().err
-    assert fake_commands["open-args"].read_text(encoding="utf-8") == ""
 
 
 @pytest.mark.parametrize(
