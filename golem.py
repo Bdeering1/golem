@@ -2501,7 +2501,7 @@ def set_command_handler(
     command_parser.set_defaults(handler=handler)
 
 
-def reserve_run_task(
+def schedule_run_task(
     arguments: argparse.Namespace,
     prompt_text: str,
     task_args: tuple[str, ...],
@@ -2540,7 +2540,7 @@ def run_task_from_arguments(arguments: argparse.Namespace) -> int:
     if arguments.backend == BACKEND_CODEX:
         reject_unsupported_codex_arguments(list(task_args), is_run=True)
         require_codex_subscription(os.environ.copy())
-    exit_code = reserve_run_task(arguments, prompt_text, task_args, follow_up_records)
+    exit_code = schedule_run_task(arguments, prompt_text, task_args, follow_up_records)
     for task_id, record in follow_up_records.items():
         print(f"golem: {task_id} will run after {record['after']}")
     return exit_code
@@ -2589,7 +2589,7 @@ def add_run_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
         nargs=2,
         default=[],
         metavar=("ID", "PROMPT"),
-        help="after this task succeeds, run PROMPT as task ID; repeatable",
+        help="run PROMPT as task ID after the previous task succeeds; repeatable",
     )
     run_schedule_group = run_command.add_mutually_exclusive_group()
     add_scheduling_arguments(run_schedule_group.add_argument)
