@@ -707,7 +707,7 @@ def test_agent_cleanup_waits_for_active_ledger_write(ledger_path, monkeypatch):
 
     monkeypatch.setattr(Path, "replace", pause_write)
     writer = context.Process(
-        target=lambda: golem.reserve_task(TASK_ID, task_record(golem.STATUS_DONE))
+        target=lambda: golem.reserve_tasks({TASK_ID: task_record(golem.STATUS_DONE)})
     )
     writer.start()
 
@@ -1400,6 +1400,145 @@ def test_scheduled_task_runs_waiting_chain(installed_launch_agent, fake_commands
         expected_claude_args(tasks[GRANDCHILD_ID], GRANDCHILD_PROMPT, task_id=GRANDCHILD_ID),
         expected_claude_args(tasks[SIBLING_ID], SIBLING_PROMPT, task_id=SIBLING_ID),
     ]
+
+
+@pytest.mark.parametrize(
+    "is_after_pending_parent",
+    [
+        pytest.param(False, id="now"),
+        pytest.param(True, id="after-pending-parent"),
+    ],
+)
+def test_run_then_chain_runs_in_order_with_shared_agent_arguments(
+    installed_launch_agent, fake_commands, ledger_path, is_after_pending_parent
+):
+    expected_task_ids = [CHILD_ID, GRANDCHILD_ID, SIBLING_ID]
+    expected_prompts = [CHILD_PROMPT, GRANDCHILD_PROMPT, SIBLING_PROMPT]
+    run_arguments = [
+        "run",
+        CHILD_ID,
+        CHILD_PROMPT,
+        "--then",
+        GRANDCHILD_ID,
+        GRANDCHILD_PROMPT,
+        "--then",
+        SIBLING_ID,
+        SIBLING_PROMPT,
+        "--",
+        *AGENT_ARGS,
+    ]
+    run_task_id = CHILD_ID
+    if is_after_pending_parent:
+        golem.main(["run", PARENT_ID, PARENT_PROMPT, "--at", AT_TEXT, "--", *AGENT_ARGS])
+        run_arguments[3:3] = ["--after", PARENT_ID]
+        expected_task_ids.insert(0, PARENT_ID)
+        expected_prompts.insert(0, PARENT_PROMPT)
+        run_task_id = PARENT_ID
+    else:
+        run_arguments[3:3] = ["--now"]
+
+    assert golem.main(run_arguments) == 0
+    tasks = read_tasks(ledger_path)
+    assert {
+        task_id: {"after": tasks[task_id].get("after"), "status": tasks[task_id]["status"]}
+        for task_id in expected_task_ids[1:]
+    } == {
+        task_id: {"after": previous_task_id, "status": golem.STATUS_WAITING}
+        for task_id, previous_task_id in zip(
+            expected_task_ids[1:], expected_task_ids[:-1], strict=True
+        )
+    }
+    if is_after_pending_parent:
+        set_task_due_now(ledger_path, PARENT_ID)
+
+    assert golem.main(["_execute", run_task_id, tasks[run_task_id]["session_id"]]) == 0
+    assert {task["status"] for task in read_tasks(ledger_path).values()} == {
+        golem.STATUS_NEEDS_REVIEW
+    }
+    assert logged_claude_calls(fake_commands) == [
+        expected_claude_args(tasks[task_id], prompt, task_id=task_id)
+        for task_id, prompt in zip(expected_task_ids, expected_prompts, strict=True)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("tasks", "run_arguments", "offending_id"),
+    [
+        pytest.param(
+            {GRANDCHILD_ID: task_record(golem.STATUS_SCHEDULED, task_id=GRANDCHILD_ID)},
+            [
+                "run",
+                CHILD_ID,
+                CHILD_PROMPT,
+                "--now",
+                "--then",
+                GRANDCHILD_ID,
+                GRANDCHILD_PROMPT,
+            ],
+            GRANDCHILD_ID,
+            id="existing-follow-up-now",
+        ),
+        pytest.param(
+            {
+                PARENT_ID: task_record(golem.STATUS_SCHEDULED, task_id=PARENT_ID),
+                GRANDCHILD_ID: task_record(golem.STATUS_SCHEDULED, task_id=GRANDCHILD_ID),
+            },
+            [
+                "run",
+                CHILD_ID,
+                CHILD_PROMPT,
+                "--after",
+                PARENT_ID,
+                "--then",
+                GRANDCHILD_ID,
+                GRANDCHILD_PROMPT,
+            ],
+            GRANDCHILD_ID,
+            id="existing-follow-up-after-pending-parent",
+        ),
+        pytest.param(
+            {TASK_ID: task_record(golem.STATUS_DONE)},
+            [
+                "run",
+                CHILD_ID,
+                CHILD_PROMPT,
+                "--now",
+                "--then",
+                GRANDCHILD_ID,
+                GRANDCHILD_PROMPT,
+                "--then",
+                GRANDCHILD_ID,
+                SIBLING_PROMPT,
+            ],
+            GRANDCHILD_ID,
+            id="repeated-follow-up",
+        ),
+        pytest.param(
+            {TASK_ID: task_record(golem.STATUS_DONE)},
+            [
+                "run",
+                CHILD_ID,
+                CHILD_PROMPT,
+                "--now",
+                "--then",
+                CHILD_ID,
+                GRANDCHILD_PROMPT,
+            ],
+            CHILD_ID,
+            id="follow-up-matches-run-task",
+        ),
+    ],
+)
+def test_run_then_refuses_ids_without_changing_the_ledger(
+    installed_launch_agent, ledger_path, tasks, run_arguments, offending_id
+):
+    write_tasks(ledger_path, tasks)
+    before = read_tasks(ledger_path)
+
+    with pytest.raises(SystemExit, match=offending_id):
+        golem.main(run_arguments)
+
+    assert golem.load_tasks() == before
 
 
 def test_retrying_failed_parent_runs_waiting_dependent(
