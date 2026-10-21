@@ -1604,6 +1604,65 @@ def test_delete_refuses_and_lists_dependents(ledger_path):
     assert TASK_ID in golem.load_tasks()
 
 
+def test_delete_removes_several_tasks_including_parent_and_child(ledger_path):
+    write_tasks(
+        ledger_path,
+        {
+            PARENT_ID: task_record(golem.STATUS_DONE, task_id=PARENT_ID),
+            CHILD_ID: task_record(golem.STATUS_WAITING, task_id=CHILD_ID, after=PARENT_ID),
+            SIBLING_ID: task_record(golem.STATUS_DONE, task_id=SIBLING_ID),
+        },
+    )
+
+    assert golem.main(["delete", PARENT_ID, CHILD_ID]) == 0
+
+    assert set(golem.load_tasks()) == {SIBLING_ID}
+
+
+def test_delete_keeps_ledger_when_one_task_is_unknown(ledger_path):
+    tasks = {
+        TASK_ID: task_record(golem.STATUS_DONE),
+        SIBLING_ID: task_record(golem.STATUS_DONE, task_id=SIBLING_ID),
+    }
+    write_tasks(ledger_path, tasks)
+
+    with pytest.raises(SystemExit, match="unknown"):
+        golem.main(["delete", TASK_ID, "unknown"])
+
+    assert read_tasks(ledger_path) == tasks
+
+
+def test_delete_chain_removes_ancestors_dependents_and_branches(ledger_path):
+    write_tasks(
+        ledger_path,
+        {
+            PARENT_ID: task_record(golem.STATUS_DONE, task_id=PARENT_ID),
+            CHILD_ID: task_record(golem.STATUS_DONE, task_id=CHILD_ID, after=PARENT_ID),
+            GRANDCHILD_ID: task_record(golem.STATUS_DONE, task_id=GRANDCHILD_ID, after=CHILD_ID),
+            SIBLING_ID: task_record(golem.STATUS_DONE, task_id=SIBLING_ID, after=PARENT_ID),
+            TASK_ID: task_record(golem.STATUS_DONE),
+        },
+    )
+
+    assert golem.main(["delete", CHILD_ID, "--chain"]) == 0
+
+    assert set(golem.load_tasks()) == {TASK_ID}
+
+
+def test_delete_chain_keeps_ledger_when_any_task_is_running(ledger_path):
+    tasks = {
+        PARENT_ID: task_record(golem.STATUS_DONE, task_id=PARENT_ID),
+        CHILD_ID: task_record(golem.STATUS_DONE, task_id=CHILD_ID, after=PARENT_ID),
+        SIBLING_ID: task_record(golem.STATUS_RUNNING, task_id=SIBLING_ID, after=PARENT_ID),
+    }
+    write_tasks(ledger_path, tasks)
+
+    with pytest.raises(SystemExit, match=SIBLING_ID):
+        golem.main(["delete", CHILD_ID, "--chain"])
+
+    assert read_tasks(ledger_path) == tasks
+
+
 def test_deleted_task_id_reuse_ignores_earlier_executor(
     installed_launch_agent, fake_commands, ledger_path
 ):
@@ -2381,6 +2440,38 @@ def test_delete_releases_worktree_only_after_its_last_task(owned_worktree, ledge
 
     assert golem.main(["delete", "other"]) == 0
     assert golem.load_worktrees()[str(worktree.resolve())]["released_at"]
+
+
+def test_delete_parent_and_waiting_child_releases_shared_worktree(owned_worktree, ledger_path):
+    worktree = owned_worktree()
+    write_tasks(
+        ledger_path,
+        {
+            PARENT_ID: task_record(golem.STATUS_DONE, task_id=PARENT_ID, worktree=str(worktree)),
+            CHILD_ID: task_record(golem.STATUS_WAITING, task_id=CHILD_ID, after=PARENT_ID),
+        },
+    )
+
+    assert golem.main(["delete", PARENT_ID, CHILD_ID]) == 0
+
+    assert golem.load_worktrees()[str(worktree.resolve())]["released_at"]
+
+
+def test_delete_chain_removes_shared_worktree_with_waiting_dependents(owned_worktree, ledger_path):
+    worktree = owned_worktree()
+    write_tasks(
+        ledger_path,
+        {
+            PARENT_ID: task_record(golem.STATUS_DONE, task_id=PARENT_ID, worktree=str(worktree)),
+            CHILD_ID: task_record(golem.STATUS_WAITING, task_id=CHILD_ID, after=PARENT_ID),
+            SIBLING_ID: task_record(golem.STATUS_WAITING, task_id=SIBLING_ID, after=PARENT_ID),
+        },
+    )
+
+    assert golem.main(["delete", CHILD_ID, "--chain", "--remove-worktree"]) == 0
+
+    assert golem.load_tasks() == {}
+    assert not worktree.exists()
 
 
 def test_delete_retains_worktree_shared_with_retryable_task(owned_worktree, ledger_path):

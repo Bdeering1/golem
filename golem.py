@@ -13,7 +13,7 @@ import tempfile
 import threading
 import time
 import uuid
-from contextlib import contextmanager, suppress
+from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -1939,6 +1939,29 @@ def record_worktree_removal_error(resource: dict[str, Any], error: str) -> tuple
     return False, [error]
 
 
+def remove_inspected_worktree_resource(
+    resource: dict[str, Any], entry: list[str], worktree: str
+) -> tuple[bool, list[str]]:
+    commands = ["remove"]
+    if git_worktree_lock_reason(entry) is not None:
+        commands.insert(0, "unlock")
+    for command in commands:
+        result = run_git(
+            resource["repository"],
+            "-c",
+            "status.showUntrackedFiles=all",
+            "worktree",
+            command,
+            worktree,
+        )
+        if result.returncode:
+            error = result.stderr.strip() or result.stdout.strip() or "git worktree command failed"
+            return record_worktree_removal_error(resource, error)
+    resource["removed_at"] = datetime.now(UTC).isoformat()
+    resource.pop("removal_error", None)
+    return True, []
+
+
 @contextmanager
 def locked_worktree_inspection(
     tasks: dict[str, Any], worktrees: dict[str, Any], worktree: str, *, is_released: bool = False
@@ -1974,26 +1997,7 @@ def remove_worktree_resource(
         if reasons:
             return False, reasons
         resource = cast("dict[str, Any]", resource)
-        commands = ["remove"]
-        if git_worktree_lock_reason(cast("list[str]", entry)) is not None:
-            commands.insert(0, "unlock")
-        for command in commands:
-            result = run_git(
-                resource["repository"],
-                "-c",
-                "status.showUntrackedFiles=all",
-                "worktree",
-                command,
-                worktree,
-            )
-            if result.returncode:
-                error = (
-                    result.stderr.strip() or result.stdout.strip() or "git worktree command failed"
-                )
-                return record_worktree_removal_error(resource, error)
-        resource["removed_at"] = datetime.now(UTC).isoformat()
-        resource.pop("removal_error", None)
-        return True, []
+        return remove_inspected_worktree_resource(resource, cast("list[str]", entry), worktree)
 
 
 def is_known_directory_busy(tasks: dict[str, Any], task: dict[str, Any]) -> bool:
@@ -2098,48 +2102,157 @@ def list_worktrees() -> int:
 
 
 def delete_task_and_release_worktrees(
-    tasks: dict[str, Any], worktrees: dict[str, Any], task_id: str
+    tasks: dict[str, Any], worktrees: dict[str, Any], task_ids: list[str]
 ) -> None:
-    task = cast("dict[str, Any]", tasks.pop(task_id))
-    for path, resource in worktrees.items():
+    selected_tasks = [cast("dict[str, Any]", tasks[task_id]) for task_id in task_ids]
+    worktree_paths = [
+        path
+        for path in worktrees
+        if any(task_uses_worktree(tasks, task, path) for task in selected_tasks)
+    ]
+    for task_id in task_ids:
+        tasks.pop(task_id)
+    for path in worktree_paths:
+        resource = cast("dict[str, Any]", worktrees[path])
         if (
-            task_uses_worktree(tasks, task, path)
-            and resource.get("owner") == WORKTREE_OWNER_GOLEM
+            resource.get("owner") == WORKTREE_OWNER_GOLEM
             and resource.get("removed_at") is None
             and not worktree_task_ids(tasks, path)
         ):
             resource.setdefault("released_at", datetime.now(UTC).isoformat())
 
 
-def delete_task(task_id: str, *, is_removing_worktree: bool) -> int:
-    with locked_ledger() as (tasks, worktrees):
-        stored_task = tasks.get(task_id)
-        if not isinstance(stored_task, dict):
-            raise SystemExit(f"golem: task not found: {task_id}")
-        task = cast("dict[str, Any]", stored_task)
-        if task.get("status") == STATUS_RUNNING:
-            raise SystemExit(f"golem: task is running: {task_id}")
-        dependent_ids = dependent_task_ids(tasks, task_id)
-        if dependent_ids:
-            raise SystemExit(f"golem: task has dependents: {task_id}: {', '.join(dependent_ids)}")
-        remaining_tasks = {id_: record for id_, record in tasks.items() if id_ != task_id}
+def chain_task_ids(tasks: dict[str, Any], task_id: str) -> set[str]:
+    chain_ids = {task_id}
+    pending_ids = [task_id]
+    while pending_ids:
+        current_id = pending_ids.pop()
+        current_task = cast("dict[str, Any]", tasks[current_id])
+        adjacent_ids = dependent_task_ids(tasks, current_id)
+        parent_id = current_task.get("after")
+        if isinstance(parent_id, str) and isinstance(tasks.get(parent_id), dict):
+            adjacent_ids.append(parent_id)
+        for adjacent_id in adjacent_ids:
+            if adjacent_id not in chain_ids:
+                chain_ids.add(adjacent_id)
+                pending_ids.append(adjacent_id)
+    return chain_ids
+
+
+def selected_delete_task_ids(
+    tasks: dict[str, Any], task_ids: list[str], *, is_chain: bool
+) -> tuple[list[str], list[str]]:
+    selected_ids: set[str] = set()
+    messages: list[str] = []
+    for task_id in task_ids:
+        if not isinstance(tasks.get(task_id), dict):
+            messages.append(f"golem: task not found: {task_id}")
+        elif is_chain:
+            selected_ids.update(chain_task_ids(tasks, task_id))
+        else:
+            selected_ids.add(task_id)
+    return [task_id for task_id in tasks if task_id in selected_ids], messages
+
+
+def delete_task_checks(
+    tasks: dict[str, Any], task_ids: list[str], *, is_removing_worktree: bool
+) -> tuple[dict[str, str | None], list[str]]:
+    selected_id_set = set(task_ids)
+    worktrees_by_task: dict[str, str | None] = {}
+    messages: list[str] = []
+    for task_id in task_ids:
+        task = cast("dict[str, Any]", tasks[task_id])
         recorded = recorded_worktree(tasks, task)
         worktree = resolved_path(recorded[0]) if recorded is not None else None
-        is_removed = False
+        worktrees_by_task[task_id] = worktree
+        if task.get("status") == STATUS_RUNNING:
+            messages.append(f"golem: task is running: {task_id}")
+        dependent_ids = [
+            dependent_id
+            for dependent_id in dependent_task_ids(tasks, task_id)
+            if dependent_id not in selected_id_set
+        ]
+        if dependent_ids:
+            messages.append(f"golem: task has dependents: {task_id}: {', '.join(dependent_ids)}")
+        if is_removing_worktree and worktree is None:
+            messages.append(f"golem: task has no worktree: {task_id}")
+    return worktrees_by_task, messages
+
+
+def remove_selected_worktrees(
+    tasks: dict[str, Any],
+    worktrees: dict[str, Any],
+    worktrees_by_task: dict[str, str | None],
+) -> set[str] | None:
+    selected_worktrees = list(
+        dict.fromkeys(
+            worktree
+            for worktree in worktrees_by_task.values()
+            if worktree is not None
+            and (
+                (resource := worktree_resource(worktrees, worktree)) is None
+                or resource.get("removed_at") is None
+            )
+        )
+    )
+    selected_id_set = set(worktrees_by_task)
+    remaining_tasks = {
+        task_id: task for task_id, task in tasks.items() if task_id not in selected_id_set
+    }
+    with ExitStack() as stack:
+        inspections = [
+            (
+                worktree,
+                *stack.enter_context(
+                    locked_worktree_inspection(remaining_tasks, worktrees, worktree)
+                ),
+            )
+            for worktree in selected_worktrees
+        ]
+        refusals = [(worktree, reasons) for worktree, _, _, reasons in inspections if reasons]
+        if refusals:
+            for worktree, reasons in refusals:
+                print(
+                    f"golem: retained worktree: {worktree}: {'; '.join(reasons)}",
+                    file=sys.stderr,
+                )
+            return None
+        removed_worktrees: set[str] = set()
+        for worktree, resource, entry, _ in inspections:
+            is_removed, reasons = remove_inspected_worktree_resource(
+                cast("dict[str, Any]", resource), cast("list[str]", entry), worktree
+            )
+            if not is_removed:
+                print(
+                    f"golem: retained worktree: {worktree}: {'; '.join(reasons)}",
+                    file=sys.stderr,
+                )
+                return None
+            removed_worktrees.add(worktree)
+    return removed_worktrees
+
+
+def delete_tasks(task_ids: list[str], *, is_chain: bool, is_removing_worktree: bool) -> int:
+    with locked_ledger() as (tasks, worktrees):
+        selected_task_ids, messages = selected_delete_task_ids(tasks, task_ids, is_chain=is_chain)
+        worktrees_by_task, check_messages = delete_task_checks(
+            tasks, selected_task_ids, is_removing_worktree=is_removing_worktree
+        )
+        if messages or check_messages:
+            raise SystemExit("\n".join([*messages, *check_messages]))
+        removed_worktrees: set[str] = set()
         if is_removing_worktree:
-            if worktree is None:
-                raise SystemExit(f"golem: task has no worktree: {task_id}")
-            resource = worktree_resource(worktrees, worktree)
-            if resource is None or resource.get("removed_at") is None:
-                is_removed, reasons = remove_worktree_resource(remaining_tasks, worktrees, worktree)
-                if not is_removed:
-                    print(
-                        f"golem: retained worktree: {worktree}: {'; '.join(reasons)}",
-                        file=sys.stderr,
-                    )
-                    return 1
-        delete_task_and_release_worktrees(tasks, worktrees, task_id)
-        print_deleted_task(task_id, task, worktree, is_removed=is_removed)
+            removal_result = remove_selected_worktrees(tasks, worktrees, worktrees_by_task)
+            if removal_result is None:
+                return 1
+            removed_worktrees = removal_result
+        selected_tasks = [
+            (task_id, cast("dict[str, Any]", tasks[task_id])) for task_id in selected_task_ids
+        ]
+        delete_task_and_release_worktrees(tasks, worktrees, selected_task_ids)
+        for task_id, task in selected_tasks:
+            worktree = worktrees_by_task[task_id]
+            print_deleted_task(task_id, task, worktree, is_removed=worktree in removed_worktrees)
     return 0
 
 
@@ -2310,7 +2423,7 @@ def delete_pruned_tasks(
             ):
                 print(f"golem: kept {task_id}: no longer eligible", file=sys.stderr)
                 continue
-            delete_task_and_release_worktrees(tasks, worktrees, task_id)
+            delete_task_and_release_worktrees(tasks, worktrees, [task_id])
             print(f"golem: deleted task: {task_id}")
 
 
@@ -2652,11 +2765,16 @@ def build_parser() -> argparse.ArgumentParser:
         lambda arguments: reschedule_task(arguments.id, is_now=arguments.now, at_text=arguments.at),
     )
     delete_command = commands.add_parser("delete")
-    delete_command.add_argument("id")
+    delete_command.add_argument("ids", nargs="+")
+    delete_command.add_argument("--chain", action="store_true")
     delete_command.add_argument("--remove-worktree", action="store_true")
     set_command_handler(
         delete_command,
-        lambda arguments: delete_task(arguments.id, is_removing_worktree=arguments.remove_worktree),
+        lambda arguments: delete_tasks(
+            arguments.ids,
+            is_chain=arguments.chain,
+            is_removing_worktree=arguments.remove_worktree,
+        ),
     )
     add_prune_command(commands.add_parser)
     set_command_handler(commands.add_parser("list"), lambda _: list_tasks())
