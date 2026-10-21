@@ -754,6 +754,7 @@ def create_codex_worktree(task_id: str, task: dict[str, Any]) -> str | None:
         cwd,
         "worktree",
         "add",
+        "--no-track",
         "-b",
         f"worktree-{Path(worktree).name}",
         worktree,
@@ -765,10 +766,11 @@ def create_codex_worktree(task_id: str, task: dict[str, Any]) -> str | None:
     common_directory = cast("str", git_common_directory(cwd))
     exclude_path = Path(common_directory) / "info" / "exclude"
     exclude_path.parent.mkdir(parents=True, exist_ok=True)
-    lines = exclude_path.read_text(encoding="utf-8").splitlines() if exclude_path.exists() else []
-    if ".claude/worktrees/" not in lines:
+    exclude_text = exclude_path.read_text(encoding="utf-8") if exclude_path.exists() else ""
+    if ".claude/worktrees/" not in exclude_text.splitlines():
+        separator = "\n" if exclude_text and not exclude_text.endswith("\n") else ""
         with exclude_path.open("a", encoding="utf-8") as exclude_file:
-            exclude_file.write(".claude/worktrees/\n")
+            exclude_file.write(f"{separator}.claude/worktrees/\n")
     record_created_worktree_owner(task_id, task)
     return None
 
@@ -869,7 +871,7 @@ def run_codex(
     task_id: str, task: dict[str, Any], lock_file_descriptors: tuple[int, ...]
 ) -> tuple[int, str | None, bool]:
     try:
-        require_codex_subscription()
+        require_codex_subscription(task_environment(task))
     except SystemExit as error:
         return 1, str(error), False
     worktree = task.get("worktree")
@@ -948,7 +950,7 @@ def pickup(task_id: str, *agent_args: str, is_app: bool, is_review_required: boo
         raise SystemExit(f"golem: pickup --app does not support Codex tasks: {task_id}")
     if is_codex:
         reject_unsupported_codex_arguments(list(agent_args), is_run=False)
-        require_codex_subscription()
+        require_codex_subscription(os.environ.copy())
     with locked_ledger() as (tasks, worktrees):
         if task_id not in tasks:
             raise SystemExit(f"golem: task not found: {task_id}")
@@ -1277,7 +1279,9 @@ def validate_codex_app_server(
         raise ValueError("Codex app-server returned an error")
 
 
-def codex_app_server_responses(*, has_rate_limits: bool) -> dict[int, dict[str, Any]]:
+def codex_app_server_responses(
+    environment: dict[str, str], *, has_rate_limits: bool
+) -> dict[int, dict[str, Any]]:
     process: subprocess.Popen[str] | None = None
     response_reader: threading.Thread | None = None
     standard_output: io.TextIOWrapper | None = None
@@ -1287,7 +1291,7 @@ def codex_app_server_responses(*, has_rate_limits: bool) -> dict[int, dict[str, 
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
-            env=codex_environment(os.environ.copy()),
+            env=codex_environment(environment),
             encoding="utf-8",
         )
         standard_input = cast("io.TextIOWrapper", process.stdin)
@@ -1351,12 +1355,12 @@ def validate_codex_subscription(responses: dict[int, dict[str, Any]]) -> None:
         raise SystemExit(CODEX_SUBSCRIPTION_ERROR)
 
 
-def require_codex_subscription() -> None:
-    validate_codex_subscription(codex_app_server_responses(has_rate_limits=False))
+def require_codex_subscription(environment: dict[str, str]) -> None:
+    validate_codex_subscription(codex_app_server_responses(environment, has_rate_limits=False))
 
 
 def codex_rate_limits() -> dict[str, Any]:
-    responses = codex_app_server_responses(has_rate_limits=True)
+    responses = codex_app_server_responses(os.environ.copy(), has_rate_limits=True)
     validate_codex_subscription(responses)
     rate_limits_result = cast("object", responses[3]["result"])
     rate_limits_fields = (
@@ -2476,7 +2480,7 @@ def run_task_from_arguments(arguments: argparse.Namespace) -> int:
     task_args = tuple(arguments.agent_args)
     if arguments.backend == BACKEND_CODEX:
         reject_unsupported_codex_arguments(list(task_args), is_run=True)
-        require_codex_subscription()
+        require_codex_subscription(os.environ.copy())
     if arguments.after is not None:
         dependent_record = new_task_record(
             str(Path.cwd()), prompt_text, task_args, None, arguments.backend, after=arguments.after

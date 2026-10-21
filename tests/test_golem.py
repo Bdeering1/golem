@@ -2720,26 +2720,6 @@ def test_codex_run_records_result_and_thread(
         assert capsys.readouterr().out.endswith(f"{result}\n")
 
 
-def test_codex_pickup_resumes_thread(installed_launch_agent, fake_commands, ledger_path):
-    write_task(
-        ledger_path,
-        golem.STATUS_NEEDS_REVIEW,
-        backend=golem.BACKEND_CODEX,
-        thread_id="codex-thread",
-    )
-
-    assert golem.main(["pickup", TASK_ID, "--", "-m", "x"]) == 0
-
-    assert logged_codex_args(fake_commands) == [
-        "resume",
-        "codex-thread",
-        "-m",
-        "x",
-        "-c",
-        golem.CODEX_PROVIDER_OVERRIDE,
-    ]
-
-
 @pytest.mark.parametrize(
     ("primary", "secondary", "expected_offset"),
     [
@@ -2902,6 +2882,7 @@ def test_codex_worktree_base_fetches_stale_default_branch(
     assert git_output(worktree, "rev-parse", "HEAD") == (
         remote_commit if is_fetched else cached_commit
     )
+    assert golem.run_git(str(worktree), "rev-parse", "--abbrev-ref", "@{upstream}").returncode
 
 
 @pytest.mark.parametrize(
@@ -3070,7 +3051,7 @@ def test_codex_retry_and_reschedule_use_codex_reset_time(
     assert datetime.fromisoformat(read_task(ledger_path)["due_at"]) == reset_time
 
 
-def test_codex_pickup_uses_task_worktree_and_rejects_app(
+def test_codex_pickup_resumes_thread_in_task_worktree_and_rejects_app(
     installed_launch_agent, fake_commands, ledger_path, tmp_path
 ):
     worktree = tmp_path / "worktree"
@@ -3084,6 +3065,14 @@ def test_codex_pickup_uses_task_worktree_and_rejects_app(
     )
 
     assert golem.main(["pickup", TASK_ID, "--", "-m", "x"]) == 0
+    assert logged_codex_args(fake_commands) == [
+        "resume",
+        "codex-thread",
+        "-m",
+        "x",
+        "-c",
+        golem.CODEX_PROVIDER_OVERRIDE,
+    ]
     assert fake_commands["codex-cwd"].read_text(encoding="utf-8").splitlines()[-1] == str(worktree)
     write_task(ledger_path, golem.STATUS_NEEDS_REVIEW, backend=golem.BACKEND_CODEX)
 
@@ -3139,31 +3128,49 @@ def test_codex_non_git_run_and_retry_keep_worktree_and_arguments(
     assert "resume" not in exec_calls[-1]
 
 
+@pytest.mark.parametrize(
+    "backends",
+    [
+        pytest.param(
+            (golem.BACKEND_CLAUDE, golem.BACKEND_CODEX, golem.BACKEND_CLAUDE), id="claude-parent"
+        ),
+        pytest.param(
+            (golem.BACKEND_CODEX, golem.BACKEND_CLAUDE, golem.BACKEND_CODEX), id="codex-parent"
+        ),
+    ],
+)
 def test_mixed_backend_chain_shares_worktree_and_uses_fresh_conversations(
-    installed_launch_agent, fake_commands, git_repository, ledger_path, monkeypatch
+    installed_launch_agent, fake_commands, git_repository, ledger_path, monkeypatch, backends
 ):
     monkeypatch.chdir(git_repository)
-    assert golem.main(["run", "parent", PROMPT, "--now"]) == 0
-    assert golem.main(["run", "child", PROMPT, "--backend", "codex", "--after", "parent"]) == 0
-    assert golem.main(["run", "grandchild", PROMPT, "--after", "child"]) == 0
+    parent_backend, child_backend, grandchild_backend = backends
+    assert golem.main(["run", "parent", PROMPT, "--backend", parent_backend, "--now"]) == 0
+    assert (
+        golem.main(["run", "child", PROMPT, "--backend", child_backend, "--after", "parent"]) == 0
+    )
+    assert (
+        golem.main(
+            ["run", "grandchild", PROMPT, "--backend", grandchild_backend, "--after", "child"]
+        )
+        == 0
+    )
     parent = read_task(ledger_path, "parent")
 
     assert golem.main(["_execute", "parent", parent["session_id"]]) == 0
     tasks = read_tasks(ledger_path)
-    assert tasks["child"]["worktree"] == tasks["parent"]["worktree"]
-    assert tasks["grandchild"]["worktree"] == tasks["parent"]["worktree"]
-    assert len({tasks[task_id]["session_id"] for task_id in tasks}) == 3
+    worktree = tasks["parent"]["worktree"]
+    assert {task["worktree"] for task in tasks.values()} == {worktree}
+    assert len({task["session_id"] for task in tasks.values()}) == 3
     assert {task["status"] for task in tasks.values()} == {golem.STATUS_NEEDS_REVIEW}
-    assert tasks["child"]["thread_id"] == "thread"
     codex_cwds = fake_commands["codex-cwd"].read_text(encoding="utf-8").splitlines()
-    child_call, child_cwd = next(
+    codex_executions = [
         (call, cwd)
         for call, cwd in zip(logged_codex_calls(fake_commands), codex_cwds, strict=True)
         if call[0] == "exec"
-    )
-    assert "resume" not in child_call
-    assert child_cwd == tasks["parent"]["worktree"]
-    assert logged_claude_cwds(fake_commands)[-1] == tasks["parent"]["worktree"]
+    ]
+    assert len(codex_executions) == backends.count(golem.BACKEND_CODEX)
+    assert all("resume" not in call and cwd == worktree for call, cwd in codex_executions)
+    assert logged_claude_cwds(fake_commands)[-1] == worktree
 
 
 def test_codex_home_reaches_launch_agent_executor(
