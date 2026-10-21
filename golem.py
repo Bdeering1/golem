@@ -4,14 +4,17 @@ import hashlib
 import json
 import os
 import plistlib
+import queue
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -27,6 +30,8 @@ STATUS_NEEDS_REVIEW = "needs_review"
 STATUS_FAILED = "failed"
 STATUS_DONE = "done"
 STATUS_CANCELLED = "cancelled"
+BACKEND_CLAUDE = "claude"
+BACKEND_CODEX = "codex"
 LIST_STATUS_ORDER = (
     STATUS_NEEDS_REVIEW,
     STATUS_FAILED,
@@ -50,7 +55,14 @@ SUCCEEDED_STATUSES = {STATUS_NEEDS_REVIEW, STATUS_DONE}
 UNREVIEWED_STATUSES = {STATUS_SCHEDULED, STATUS_RUNNING, STATUS_WAITING, STATUS_NEEDS_REVIEW}
 AGENT_LOG_MAX_BYTES = 1024 * 1024
 USAGE_ERROR = "golem: usage lookup unavailable"
+CODEX_ACCOUNT_ERROR = "golem: Codex account lookup unavailable"
+CODEX_SUBSCRIPTION_ERROR = (
+    "golem: Codex must be signed in with a ChatGPT subscription; run codex login"
+)
 USAGE_TIMEOUT_SECONDS = 30
+GIT_FETCH_TIMEOUT_SECONDS = 5
+GIT_FETCH_MAX_AGE_SECONDS = 24 * 60 * 60
+ORIGIN_HEAD = "refs/remotes/origin/HEAD"
 USAGE_LIMIT_HTTP_STATUS = 429
 FULL_UTILIZATION = 100
 MAX_USAGE_LIMIT_RESUMES = 2
@@ -67,6 +79,25 @@ PERMISSION_ARGUMENTS = {
     "--dangerously-skip-permissions",
     "--permission-mode",
 }
+CODEX_PERMISSION_ARGUMENTS = {
+    "-s",
+    "--sandbox",
+    "--approve-for-me",
+    "--not-so-yolo",
+    "--dangerously-bypass-approvals-and-sandbox",
+    "--yolo",
+    "-a",
+    "--ask-for-approval",
+}
+CODEX_CONFIG_ARGUMENTS = {"-c", "--config"}
+CODEX_UNSUPPORTED_ARGUMENTS = {
+    "--oss",
+    "--local-provider",
+    "--remote",
+    "--remote-auth-token-env",
+}
+CODEX_PROVIDER_OVERRIDE = 'model_provider="openai"'
+CODEX_PROVIDER_ARGUMENTS = ("-c", CODEX_PROVIDER_OVERRIDE)
 VERBOSE_ARGUMENT = "--verbose"
 WORKTREE_OWNER_GOLEM = "golem"
 WORKTREE_OWNER_EXTERNAL = "external"
@@ -387,7 +418,7 @@ def new_session_id() -> str:
 
 
 def is_captured_variable(name: str) -> bool:
-    return name in {"PATH", "LANG"} or name.startswith("LC_")
+    return name in {"PATH", "LANG", "CODEX_HOME"} or name.startswith("LC_")
 
 
 def captured_environment() -> dict[str, str]:
@@ -401,12 +432,59 @@ def task_environment(task: dict[str, Any]) -> dict[str, str]:
     return {**inherited_environment, **task.get("environment", {})}
 
 
+def codex_environment(environment: dict[str, str]) -> dict[str, str]:
+    environment = environment.copy()
+    environment.pop("OPENAI_API_KEY", None)
+    environment.pop("CODEX_API_KEY", None)
+    return environment
+
+
+def task_backend(task: dict[str, Any]) -> str:
+    return cast("str", task.get("backend", BACKEND_CLAUDE))
+
+
 def has_agent_argument(agent_args: list[str], names: set[str]) -> bool:
     return any(
         argument == name or argument.startswith(f"{name}=")
         for argument in agent_args
         for name in names
     )
+
+
+def codex_config_key(argument: str) -> str:
+    return argument.split("=", 1)[0].strip()
+
+
+def codex_config_values(agent_args: list[str]) -> list[str]:
+    values: list[str] = []
+    index = 0
+    while index < len(agent_args):
+        argument = agent_args[index]
+        if argument in CODEX_CONFIG_ARGUMENTS and index + 1 < len(agent_args):
+            values.append(agent_args[index + 1])
+            index += 2
+            continue
+        if argument.startswith("--config="):
+            values.append(argument.removeprefix("--config="))
+        index += 1
+    return values
+
+
+def has_codex_permission_argument(agent_args: list[str]) -> bool:
+    return has_agent_argument(agent_args, CODEX_PERMISSION_ARGUMENTS) or any(
+        codex_config_key(value) in {"sandbox_mode", "approval_policy"}
+        for value in codex_config_values(agent_args)
+    )
+
+
+def reject_unsupported_codex_arguments(agent_args: list[str], *, is_run: bool) -> None:
+    unsupported: set[str] = CODEX_UNSUPPORTED_ARGUMENTS | (WORKTREE_ARGUMENTS if is_run else set())
+    for argument in agent_args:
+        if argument in unsupported or any(argument.startswith(f"{name}=") for name in unsupported):
+            raise SystemExit(f"golem: Codex argument is not supported: {argument}")
+    for value in codex_config_values(agent_args):
+        if codex_config_key(value) in {"model_provider", "forced_login_method"}:
+            raise SystemExit(f"golem: Codex argument is not supported: {value}")
 
 
 def resolved_path(path: str) -> str:
@@ -587,11 +665,15 @@ def record_resolved_worktree(
     clear_worktree_pending_if_created(task)
 
 
+def is_usage_limit_resume(task: dict[str, Any]) -> bool:
+    return cast("int", task.get("usage_limit_resume_count", 0)) > 0
+
+
 def run_claude(
     task_id: str, task: dict[str, Any], lock_file_descriptors: tuple[int, ...]
 ) -> tuple[int, str]:
     session_id = cast("str", task["session_id"])
-    is_resuming = cast("int", task.get("usage_limit_resume_count", 0)) > 0
+    is_resuming = is_usage_limit_resume(task)
     command = (
         ["claude", "--resume", session_id, "--print", USAGE_LIMIT_RESUME_PROMPT]
         if is_resuming
@@ -629,11 +711,217 @@ def run_claude(
     return claude_process.returncode, claude_process.stdout
 
 
+def fetch_stale_default_branch(cwd: str) -> None:
+    default_branch = run_git(cwd, "symbolic-ref", "--quiet", "--short", ORIGIN_HEAD)
+    fetch_head = run_git(cwd, "rev-parse", "--path-format=absolute", "--git-path", "FETCH_HEAD")
+    if default_branch.returncode or fetch_head.returncode:
+        return
+    fetch_head_path = Path(fetch_head.stdout.strip())
+    if (
+        fetch_head_path.exists()
+        and time.time() - fetch_head_path.stat().st_mtime < GIT_FETCH_MAX_AGE_SECONDS
+    ):
+        return
+    with suppress(subprocess.TimeoutExpired):
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                cwd,
+                "fetch",
+                "--quiet",
+                "--no-tags",
+                "origin",
+                default_branch.stdout.strip().removeprefix("origin/"),
+            ],
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=GIT_FETCH_TIMEOUT_SECONDS,
+            check=False,
+        )
+
+
+def create_codex_worktree(task_id: str, task: dict[str, Any]) -> str | None:
+    worktree = cast("str", task["worktree"])
+    cwd = cast("str", task["cwd"])
+    fetch_stale_default_branch(cwd)
+    base = ORIGIN_HEAD
+    if run_git(cwd, "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}").returncode:
+        base = "HEAD"
+    result = run_git(
+        cwd,
+        "worktree",
+        "add",
+        "--no-track",
+        "-b",
+        f"worktree-{Path(worktree).name}",
+        worktree,
+        base,
+    )
+    if result.returncode:
+        error = result.stderr.strip() or result.stdout.strip()
+        return f"golem: could not create worktree: {error}"
+    common_directory = cast("str", git_common_directory(cwd))
+    exclude_path = Path(common_directory) / "info" / "exclude"
+    exclude_path.parent.mkdir(parents=True, exist_ok=True)
+    exclude_text = exclude_path.read_text(encoding="utf-8") if exclude_path.exists() else ""
+    if ".claude/worktrees/" not in exclude_text.splitlines():
+        separator = "\n" if exclude_text and not exclude_text.endswith("\n") else ""
+        with exclude_path.open("a", encoding="utf-8") as exclude_file:
+            exclude_file.write(f"{separator}.claude/worktrees/\n")
+    record_created_worktree_owner(task_id, task)
+    return None
+
+
+def record_codex_thread(task_id: str, session_id: str, thread_id: str) -> None:
+    with locked_tasks() as tasks:
+        stored_task = tasks.get(task_id)
+        if isinstance(stored_task, dict):
+            task = cast("dict[str, Any]", stored_task)
+            if task.get("session_id") == session_id:
+                task["thread_id"] = thread_id
+
+
+def codex_event_message(event: dict[str, object]) -> str | None:
+    message = event.get("message")
+    return message if isinstance(message, str) else None
+
+
+def codex_command(task: dict[str, Any]) -> tuple[list[str], str]:
+    agent_args = cast("list[str]", task["agent_args"])
+    default_args = (
+        []
+        if has_codex_permission_argument(agent_args)
+        else ["--dangerously-bypass-approvals-and-sandbox"]
+    )
+    command = [
+        "codex",
+        "exec",
+        "--json",
+        "--skip-git-repo-check",
+        *agent_args,
+        *default_args,
+        *CODEX_PROVIDER_ARGUMENTS,
+    ]
+    prompt = cast("str", task["prompt"])
+    if is_usage_limit_resume(task):
+        command += ["resume", cast("str", task["thread_id"]), "-"]
+        return command, USAGE_LIMIT_RESUME_PROMPT
+    command.append("-")
+    return command, prompt
+
+
+@dataclass
+class CodexEventState:
+    last_agent_message: str | None = None
+    failed_message: str | None = None
+    last_error_message: str | None = None
+
+
+def update_codex_event_state(
+    event: dict[str, object], task_id: str, session_id: str, state: CodexEventState
+) -> None:
+    event_type = event.get("type")
+    if event_type == "thread.started":
+        thread_id = event.get("thread_id")
+        if isinstance(thread_id, str):
+            record_codex_thread(task_id, session_id, thread_id)
+        return
+    if event_type == "item.completed":
+        item = event.get("item")
+        if not isinstance(item, dict):
+            return
+        item_fields = cast("dict[str, object]", item)
+        text = item_fields.get("text") if item_fields.get("type") == "agent_message" else None
+        if isinstance(text, str):
+            state.last_agent_message = text
+        return
+    if event_type == "turn.failed":
+        error = event.get("error")
+        if isinstance(error, dict):
+            state.failed_message = codex_event_message(cast("dict[str, object]", error))
+        return
+    if event_type == "error":
+        state.last_error_message = codex_event_message(event)
+
+
+def read_codex_events(
+    process: subprocess.Popen[str], task_id: str, session_id: str
+) -> CodexEventState:
+    state = CodexEventState()
+    output = cast("io.TextIOWrapper", process.stdout)
+    try:
+        for line in output:
+            try:
+                event = cast("object", json.loads(line))
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict):
+                update_codex_event_state(
+                    cast("dict[str, object]", event), task_id, session_id, state
+                )
+    finally:
+        output.close()
+    return state
+
+
+def run_codex(
+    task_id: str, task: dict[str, Any], lock_file_descriptors: tuple[int, ...]
+) -> tuple[int, str | None, bool]:
+    try:
+        require_codex_subscription(task_environment(task))
+    except SystemExit as error:
+        return 1, str(error), False
+    worktree = task.get("worktree")
+    if worktree is not None and not Path(worktree).is_dir():
+        if task.get("worktree_pending") is not True:
+            return 1, f"golem: worktree is missing: {worktree}", False
+        if error := create_codex_worktree(task_id, task):
+            return 1, error, False
+    if is_usage_limit_resume(task) and not isinstance(task.get("thread_id"), str):
+        return 1, "golem: task has no Codex conversation", False
+    command, prompt = codex_command(task)
+    process = subprocess.Popen(
+        command,
+        cwd=task_directory(task),
+        env=codex_environment(task_environment(task)),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        encoding="utf-8",
+        pass_fds=lock_file_descriptors,
+    )
+    standard_input = cast("io.TextIOWrapper", process.stdin)
+    try:
+        with suppress(BrokenPipeError):
+            standard_input.write(prompt)
+    finally:
+        with suppress(BrokenPipeError):
+            standard_input.close()
+    event_state = read_codex_events(process, task_id, cast("str", task["session_id"]))
+    returncode = process.wait()
+    result = (
+        event_state.failed_message
+        or event_state.last_agent_message
+        or event_state.last_error_message
+    )
+    is_usage_limit = bool(
+        event_state.failed_message
+        and event_state.failed_message.replace("\N{RIGHT SINGLE QUOTATION MARK}", "'").startswith(
+            "You've hit your usage limit"
+        )
+    )
+    return returncode, result, is_usage_limit
+
+
 def new_task_record(
     cwd: str,
     prompt: str,
     agent_args: tuple[str, ...],
     when: datetime | None,
+    backend: str,
+    *,
     after: str | None = None,
 ) -> dict[str, Any]:
     record: dict[str, Any] = {
@@ -643,6 +931,7 @@ def new_task_record(
         "status": STATUS_WAITING,
         "session_id": new_session_id(),
         "environment": captured_environment(),
+        "backend": backend,
     }
     if after is not None:
         record["after"] = after
@@ -653,6 +942,15 @@ def new_task_record(
 
 
 def pickup(task_id: str, *agent_args: str, is_app: bool, is_review_required: bool = False) -> int:
+    preflight_task = load_tasks().get(task_id)
+    is_codex = isinstance(preflight_task, dict) and (
+        task_backend(cast("dict[str, Any]", preflight_task)) == BACKEND_CODEX
+    )
+    if is_codex and is_app:
+        raise SystemExit(f"golem: pickup --app does not support Codex tasks: {task_id}")
+    if is_codex:
+        reject_unsupported_codex_arguments(list(agent_args), is_run=False)
+        require_codex_subscription(os.environ.copy())
     with locked_ledger() as (tasks, worktrees):
         if task_id not in tasks:
             raise SystemExit(f"golem: task not found: {task_id}")
@@ -666,6 +964,10 @@ def pickup(task_id: str, *agent_args: str, is_app: bool, is_review_required: boo
         directory_lock_file = acquire_lock(directory_lock_path(directory))
         if directory_lock_file is None:
             raise SystemExit(f"golem: directory is busy: {directory}")
+        thread_id = task.get("thread_id")
+        if is_codex and not isinstance(thread_id, str):
+            release_lock(directory_lock_file)
+            raise SystemExit(f"golem: task has no Codex conversation: {task_id}")
         clear_worktree_release(tasks, worktrees, task)
         if task.get("status") == STATUS_NEEDS_REVIEW:
             task["status"] = STATUS_DONE
@@ -678,6 +980,20 @@ def pickup(task_id: str, *agent_args: str, is_app: bool, is_review_required: boo
             ["open", f"claude://resume?session={session_id}"], check=False
         ).returncode
     try:
+        if is_codex:
+            return subprocess.run(
+                [
+                    "codex",
+                    "resume",
+                    cast("str", thread_id),
+                    *agent_args,
+                    *CODEX_PROVIDER_ARGUMENTS,
+                ],
+                cwd=cwd,
+                env=codex_environment(os.environ.copy()),
+                pass_fds=(directory_lock_file.fileno(),),
+                check=False,
+            ).returncode
         return subprocess.run(
             ["claude", "--resume", session_id, *agent_args],
             cwd=cwd,
@@ -913,11 +1229,208 @@ def next_reset_time() -> datetime | None:
         raise SystemExit(USAGE_ERROR) from error
 
 
-def reset_time_from_limit(limit: dict[str, Any]) -> datetime:
-    reset_time = datetime.fromisoformat(limit["resets_at"])
+def codex_app_server_requests(*, has_rate_limits: bool) -> list[dict[str, Any]]:
+    requests: list[dict[str, Any]] = [
+        {
+            "id": 1,
+            "method": "initialize",
+            "params": {"clientInfo": {"name": "golem", "version": "0.1.0"}},
+        },
+        {"method": "initialized"},
+        {"id": 2, "method": "account/read", "params": {}},
+    ]
+    if has_rate_limits:
+        requests.append({"id": 3, "method": "account/rateLimits/read"})
+    return requests
+
+
+def read_codex_app_server_output(
+    output: io.TextIOWrapper, response_lines: queue.Queue[str | None]
+) -> None:
+    for line in output:
+        response_lines.put(line)
+    response_lines.put(None)
+
+
+def codex_app_server_response(
+    response_lines: queue.Queue[str | None], deadline: float
+) -> dict[str, Any]:
+    timeout = deadline - time.monotonic()
+    if timeout <= 0:
+        raise subprocess.TimeoutExpired("codex app-server", USAGE_TIMEOUT_SECONDS)
+    try:
+        line = response_lines.get(timeout=timeout)
+    except queue.Empty as error:
+        raise subprocess.TimeoutExpired("codex app-server", USAGE_TIMEOUT_SECONDS) from error
+    if not line:
+        raise OSError("Codex app-server exited before responding")
+    response = cast("object", json.loads(line))
+    if not isinstance(response, dict):
+        raise TypeError("invalid Codex app-server response")
+    return cast("dict[str, Any]", response)
+
+
+def validate_codex_app_server(
+    process: subprocess.Popen[str], responses: dict[int, dict[str, Any]]
+) -> None:
+    if process.returncode:
+        raise OSError("Codex app-server failed")
+    if any("error" in response or "result" not in response for response in responses.values()):
+        raise ValueError("Codex app-server returned an error")
+
+
+def codex_app_server_responses(
+    environment: dict[str, str], *, has_rate_limits: bool
+) -> dict[int, dict[str, Any]]:
+    process: subprocess.Popen[str] | None = None
+    response_reader: threading.Thread | None = None
+    standard_output: io.TextIOWrapper | None = None
+    try:
+        process = subprocess.Popen(
+            ["codex", "app-server", *CODEX_PROVIDER_ARGUMENTS],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=codex_environment(environment),
+            encoding="utf-8",
+        )
+        standard_input = cast("io.TextIOWrapper", process.stdin)
+        standard_output = cast("io.TextIOWrapper", process.stdout)
+        response_lines: queue.Queue[str | None] = queue.Queue()
+        response_reader = threading.Thread(
+            target=read_codex_app_server_output,
+            args=(standard_output, response_lines),
+            daemon=True,
+        )
+        response_reader.start()
+        requests = codex_app_server_requests(has_rate_limits=has_rate_limits)
+        standard_input.write("".join(json.dumps(request) + "\n" for request in requests))
+        standard_input.flush()
+        responses: dict[int, dict[str, Any]] = {}
+        required_ids = {request["id"] for request in requests if isinstance(request.get("id"), int)}
+        deadline = time.monotonic() + USAGE_TIMEOUT_SECONDS
+        while required_ids - responses.keys():
+            response = codex_app_server_response(response_lines, deadline)
+            response_id = response.get("id")
+            if isinstance(response_id, int):
+                responses[response_id] = response
+        standard_input.close()
+        process.wait(timeout=max(0, deadline - time.monotonic()))
+        validate_codex_app_server(process, responses)
+    except (
+        json.JSONDecodeError,
+        OSError,
+        subprocess.TimeoutExpired,
+        TypeError,
+        ValueError,
+    ) as error:
+        raise SystemExit(CODEX_ACCOUNT_ERROR) from error
+    else:
+        return responses
+    finally:
+        if process is not None:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+            with suppress(BrokenPipeError):
+                cast("io.TextIOWrapper", process.stdin).close()
+        if response_reader is not None:
+            response_reader.join()
+        if standard_output is not None:
+            standard_output.close()
+
+
+def validate_codex_subscription(responses: dict[int, dict[str, Any]]) -> None:
+    account_result = cast("object", responses[2]["result"])
+    if not isinstance(account_result, dict):
+        raise SystemExit(CODEX_ACCOUNT_ERROR)
+    account_result_fields = cast("dict[str, object]", account_result)
+    account = account_result_fields.get("account")
+    account_fields = cast("dict[str, object]", account) if isinstance(account, dict) else None
+    if (
+        account_fields is None
+        or account_fields.get("type") != "chatgpt"
+        or account_result_fields.get("requiresOpenaiAuth") is not True
+    ):
+        raise SystemExit(CODEX_SUBSCRIPTION_ERROR)
+
+
+def require_codex_subscription(environment: dict[str, str]) -> None:
+    validate_codex_subscription(codex_app_server_responses(environment, has_rate_limits=False))
+
+
+def codex_rate_limits() -> dict[str, Any]:
+    responses = codex_app_server_responses(os.environ.copy(), has_rate_limits=True)
+    validate_codex_subscription(responses)
+    rate_limits_result = cast("object", responses[3]["result"])
+    rate_limits_fields = (
+        cast("dict[str, object]", rate_limits_result)
+        if isinstance(rate_limits_result, dict)
+        else None
+    )
+    if rate_limits_fields is None or not isinstance(rate_limits_fields.get("rateLimits"), dict):
+        raise SystemExit(CODEX_ACCOUNT_ERROR)
+    return cast("dict[str, Any]", rate_limits_fields["rateLimits"])
+
+
+def codex_reset_time_from_limit(limit: dict[str, Any]) -> datetime:
+    resets_at = limit.get("resetsAt")
+    if not isinstance(resets_at, int | float):
+        raise SystemExit(USAGE_ERROR)
+    return validated_reset_time(datetime.fromtimestamp(resets_at, UTC))
+
+
+def required_codex_primary_limit(rate_limits: dict[str, Any]) -> dict[str, Any] | None:
+    if "primary" not in rate_limits:
+        raise SystemExit(USAGE_ERROR)
+    primary = rate_limits["primary"]
+    return cast("dict[str, Any]", primary) if isinstance(primary, dict) else None
+
+
+def codex_active_reset_time(primary: dict[str, Any]) -> datetime | None:
+    used_percent = primary.get("usedPercent")
+    if primary.get("resetsAt") is None or used_percent == 0:
+        return None
+    if not isinstance(used_percent, int | float):
+        raise SystemExit(USAGE_ERROR)
+    return codex_reset_time_from_limit(primary)
+
+
+def next_codex_reset_time() -> datetime | None:
+    try:
+        rate_limits = codex_rate_limits()
+        primary = required_codex_primary_limit(rate_limits)
+        secondary = rate_limits.get("secondary")
+        limits = [
+            cast("dict[str, Any]", limit)
+            for limit in (primary, secondary)
+            if isinstance(limit, dict)
+        ]
+        exhausted_limits = [
+            limit
+            for limit in limits
+            if isinstance(limit.get("usedPercent"), int | float)
+            and limit["usedPercent"] >= FULL_UTILIZATION
+        ]
+        if exhausted_limits:
+            return max(codex_reset_time_from_limit(limit) for limit in exhausted_limits)
+        if primary is None:
+            return None
+        return codex_active_reset_time(primary)
+    except SystemExit as error:
+        if str(error) == CODEX_SUBSCRIPTION_ERROR:
+            raise
+        raise SystemExit(USAGE_ERROR) from error
+
+
+def validated_reset_time(reset_time: datetime) -> datetime:
     if reset_time.tzinfo is None or reset_time <= datetime.now(UTC):
         raise SystemExit(USAGE_ERROR)
     return reset_time
+
+
+def reset_time_from_limit(limit: dict[str, Any]) -> datetime:
+    return validated_reset_time(datetime.fromisoformat(limit["resets_at"]))
 
 
 def schedule_new_task(
@@ -926,9 +1439,11 @@ def schedule_new_task(
     agent_args: tuple[str, ...],
     when: datetime | None,
     after: str | None,
+    *,
+    backend: str,
 ) -> int:
     due_time = when or datetime.now(UTC).astimezone()
-    record = new_task_record(str(Path.cwd()), prompt, agent_args, due_time, after)
+    record = new_task_record(str(Path.cwd()), prompt, agent_args, due_time, backend, after=after)
     reserve_task(task_id, record)
     return wake_launch_agent_and_report(task_id, due_time)
 
@@ -991,7 +1506,12 @@ def clear_recorded_worktree_pending(task_id: str) -> None:
 
 def mark_task_waiting_for_reset(task_id: str, result: str) -> bool:
     try:
-        when = planned_execution_time(is_now=False, at_text=None)
+        task = load_tasks().get(task_id)
+        if not isinstance(task, dict):
+            return False
+        when = planned_execution_time(
+            task_backend(cast("dict[str, Any]", task)), is_now=False, at_text=None
+        )
     except SystemExit:
         return False
     if when is None:
@@ -1116,20 +1636,28 @@ def drain_dependents(task_id: str, session_id: str) -> None:
 
 def execute_task(task_id: str, task: dict[str, Any], lock_file_descriptors: tuple[int, ...]) -> int:
     try:
-        returncode, output = run_claude(task_id, task, lock_file_descriptors)
+        if task_backend(task) == BACKEND_CODEX:
+            returncode, result, is_usage_limit = run_codex(task_id, task, lock_file_descriptors)
+            output = "" if result is None else result
+        else:
+            returncode, output = run_claude(task_id, task, lock_file_descriptors)
+            result, is_usage_limit = claude_result_and_usage_limit(output)
     except OSError as error:
         print(f"golem: could not execute task: {error}", file=sys.stderr)
         returncode = 127
         output = ""
-    result, is_usage_limit = claude_result_and_usage_limit(output)
-    working_directory = claude_working_directory(output)
-    if working_directory is not None and working_directory != task["cwd"]:
-        record_worktree(task_id, working_directory)
+        result = None
+        is_usage_limit = False
+    if task_backend(task) == BACKEND_CLAUDE:
+        working_directory = claude_working_directory(output)
+        if working_directory is not None and working_directory != task["cwd"]:
+            record_worktree(task_id, working_directory)
     clear_recorded_worktree_pending(task_id)
     usage_limit_resume_count = cast("int", task.get("usage_limit_resume_count", 0))
     if (
         is_usage_limit
         and usage_limit_resume_count < MAX_USAGE_LIMIT_RESUMES
+        and result is not None
         and mark_task_waiting_for_reset(task_id, result)
     ):
         return 0
@@ -1582,13 +2110,21 @@ def delete_task(task_id: str, *, is_removing_worktree: bool) -> int:
                     )
                     return 1
         delete_task_and_release_worktrees(tasks, worktrees, task_id)
-        print(f"golem: deleted task: {task_id}")
-        print(f"golem: session: {task['session_id']}")
-        if worktree is not None:
-            print(f"golem: worktree: {worktree}")
-        if is_removed:
-            print(f"golem: removed worktree: {worktree}")
+        print_deleted_task(task_id, task, worktree, is_removed=is_removed)
     return 0
+
+
+def print_deleted_task(
+    task_id: str, task: dict[str, Any], worktree: str | None, *, is_removed: bool
+) -> None:
+    print(f"golem: deleted task: {task_id}")
+    session = task.get("thread_id") if task_backend(task) == BACKEND_CODEX else task["session_id"]
+    if isinstance(session, str):
+        print(f"golem: session: {session}")
+    if worktree is not None:
+        print(f"golem: worktree: {worktree}")
+    if is_removed:
+        print(f"golem: removed worktree: {worktree}")
 
 
 def dependents_first_task_ids(tasks: dict[str, Any], task_ids: list[str]) -> list[str]:
@@ -1643,10 +2179,20 @@ def branch_pull_request(worktree: str | None) -> dict[str, Any] | None:
     return max(pull_requests, key=lambda pull_request: pull_request["number"], default=None)
 
 
-def session_idle_reason(session_id: str) -> str | None:
-    transcript_paths = (Path.home() / ".claude" / "projects").glob(f"*/{session_id}.jsonl")
+def transcript_paths(task: dict[str, Any]) -> list[Path]:
+    if task_backend(task) == BACKEND_CLAUDE:
+        return list((Path.home() / ".claude" / "projects").glob(f"*/{task['session_id']}.jsonl"))
+    thread_id = task.get("thread_id")
+    if not isinstance(thread_id, str):
+        return []
+    codex_home = Path(task.get("environment", {}).get("CODEX_HOME", Path.home() / ".codex"))
+    return list((codex_home / "sessions").glob(f"**/rollout-*-{thread_id}.jsonl"))
+
+
+def session_idle_reason(task: dict[str, Any]) -> str | None:
     transcript_modified_time = max(
-        (transcript_path.stat().st_mtime for transcript_path in transcript_paths), default=None
+        (transcript_path.stat().st_mtime for transcript_path in transcript_paths(task)),
+        default=None,
     )
     if transcript_modified_time is None:
         return "no transcript"
@@ -1664,7 +2210,7 @@ def done_task_prune_reason(task: dict[str, Any], pull_requests: PullRequestCache
         pull_requests[worktree] = branch_pull_request(worktree)
     pull_request = pull_requests[worktree]
     if pull_request is None:
-        return session_idle_reason(task["session_id"])
+        return session_idle_reason(task)
     if pull_request["state"] == PULL_REQUEST_STATE_OPEN:
         return None
     return f"PR #{pull_request['number']} {pull_request['state'].lower()}"
@@ -1850,7 +2396,10 @@ def retry_task(task_id: str, *, is_now: bool, at_text: str | None) -> int:
     retryable = retryable_task(tasks, task_id)
     reject_missing_worktree(retryable, load_worktrees())
     require_launch_agent()
-    when = planned_execution_time(is_now=is_now, at_text=at_text) or datetime.now(UTC).astimezone()
+    when = (
+        planned_execution_time(task_backend(retryable), is_now=is_now, at_text=at_text)
+        or datetime.now(UTC).astimezone()
+    )
 
     with locked_ledger() as (tasks, worktrees):
         task = retryable_task(tasks, task_id)
@@ -1860,7 +2409,8 @@ def retry_task(task_id: str, *, is_now: bool, at_text: str | None) -> int:
             cast("str", task["prompt"]),
             tuple(cast("list[str]", task["agent_args"])),
             when,
-            task.get("after"),
+            task_backend(task),
+            after=task.get("after"),
         )
         for name in ("environment", "worktree", "worktree_pending"):
             if name in task:
@@ -1878,9 +2428,12 @@ def scheduled_task(tasks: dict[str, Any], task_id: str) -> dict[str, Any]:
 
 
 def reschedule_task(task_id: str, *, is_now: bool, at_text: str | None) -> int:
-    scheduled_task(load_tasks(), task_id)
+    task = scheduled_task(load_tasks(), task_id)
     require_launch_agent()
-    when = planned_execution_time(is_now=is_now, at_text=at_text) or datetime.now(UTC).astimezone()
+    when = (
+        planned_execution_time(task_backend(task), is_now=is_now, at_text=at_text)
+        or datetime.now(UTC).astimezone()
+    )
 
     with locked_tasks() as tasks:
         task = scheduled_task(tasks, task_id)
@@ -1888,10 +2441,14 @@ def reschedule_task(task_id: str, *, is_now: bool, at_text: str | None) -> int:
     return wake_launch_agent_and_report(task_id, when)
 
 
-def planned_execution_time(*, is_now: bool, at_text: str | None) -> datetime | None:
+def planned_execution_time(backend: str, *, is_now: bool, at_text: str | None) -> datetime | None:
     if is_now:
         return None
-    when = next_reset_time() if at_text is None else scheduled_time(at_text)
+    when = (
+        (next_codex_reset_time() if backend == BACKEND_CODEX else next_reset_time())
+        if at_text is None
+        else scheduled_time(at_text)
+    )
     if when is None:
         return None
     when = when.astimezone(UTC)
@@ -1921,15 +2478,20 @@ def run_task_from_arguments(arguments: argparse.Namespace) -> int:
         Path(arguments.file).read_text(encoding="utf-8") if arguments.file else arguments.prompt
     )
     task_args = tuple(arguments.agent_args)
+    if arguments.backend == BACKEND_CODEX:
+        reject_unsupported_codex_arguments(list(task_args), is_run=True)
+        require_codex_subscription(os.environ.copy())
     if arguments.after is not None:
         dependent_record = new_task_record(
-            str(Path.cwd()), prompt_text, task_args, None, arguments.after
+            str(Path.cwd()), prompt_text, task_args, None, arguments.backend, after=arguments.after
         )
         if reserve_dependent_task(arguments.id, dependent_record, arguments.after):
             print(f"golem: {arguments.id} will run after {arguments.after}")
             return 0
-    when = planned_execution_time(is_now=arguments.now, at_text=arguments.at)
-    return schedule_new_task(arguments.id, prompt_text, task_args, when, arguments.after)
+    when = planned_execution_time(arguments.backend, is_now=arguments.now, at_text=arguments.at)
+    return schedule_new_task(
+        arguments.id, prompt_text, task_args, when, arguments.after, backend=arguments.backend
+    )
 
 
 def add_worktree_commands(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
@@ -1957,15 +2519,15 @@ def add_prune_command(add_parser: Callable[..., argparse.ArgumentParser]) -> Non
     set_command_handler(prune_command, lambda arguments: prune_tasks(is_confirmed=arguments.yes))
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="golem")
-    commands = parser.add_subparsers(dest="command", required=True)
-
-    run_command = commands.add_parser(
+def add_run_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
+    run_command = add_parser(
         "run",
         description=SCHEDULE_DESCRIPTION,
     )
     run_command.add_argument("id")
+    run_command.add_argument(
+        "--backend", choices=(BACKEND_CLAUDE, BACKEND_CODEX), default=BACKEND_CLAUDE
+    )
     prompt_group = run_command.add_mutually_exclusive_group(required=True)
     prompt_group.add_argument("prompt", nargs="?")
     prompt_group.add_argument("--file")
@@ -1974,6 +2536,12 @@ def build_parser() -> argparse.ArgumentParser:
     run_schedule_group.add_argument("--after", metavar="PARENT", help="run after PARENT succeeds")
     set_command_handler(run_command, run_task_from_arguments)
 
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="golem")
+    commands = parser.add_subparsers(dest="command", required=True)
+
+    add_run_command(commands.add_parser)
     pickup_command = commands.add_parser("pickup")
     pickup_command.add_argument("id", nargs="?")
     pickup_command.add_argument(
