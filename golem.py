@@ -134,20 +134,21 @@ def load_aliases() -> dict[str, str]:
     path = config_path()
     if not path.exists():
         return {}
+    invalid_config_error = f"golem: invalid config file {path}"
     try:
         config = tomllib.loads(path.read_text(encoding="utf-8"))
     except tomllib.TOMLDecodeError as error:
-        raise SystemExit(f"golem: invalid config file {path}: {error}") from error
+        raise SystemExit(f"{invalid_config_error}: {error}") from error
     aliases = config.get("aliases")
     if aliases is None:
         return {}
     if not isinstance(aliases, dict):
-        raise SystemExit(f"golem: invalid config file {path}: aliases must be a table")
+        raise SystemExit(f"{invalid_config_error}: aliases must be a table")
     alias_table = cast("dict[str, object]", aliases)
     validated_aliases: dict[str, str] = {}
     for name, template in alias_table.items():
         if not isinstance(template, str):
-            raise SystemExit(f"golem: invalid config file {path}: alias {name} must be a string")
+            raise SystemExit(f"{invalid_config_error}: alias {name} must be a string")
         validated_aliases[name] = template
     return validated_aliases
 

@@ -664,7 +664,7 @@ def test_alias_appends_extra_arguments_before_template_agent_arguments(
 
     task = read_task(ledger_path)
     assert task["agent_args"] == ["--model", f"template-{TASK_ID}", "--model", "command-line"]
-    assert task["due_at"]
+    assert datetime.fromisoformat(task["due_at"]) < RESET_TIME
 
 
 def test_alias_requires_all_placeholder_arguments(ledger_path):
