@@ -313,6 +313,26 @@ def mark_ancestors_done(tasks: dict[str, Any], task: dict[str, Any]) -> None:
         ancestor = tasks.get(parent.get("after", ""))
 
 
+def mark_task_done(tasks: dict[str, Any], task: dict[str, Any]) -> None:
+    if task.get("status") != STATUS_NEEDS_REVIEW:
+        return
+    task["status"] = STATUS_DONE
+    mark_ancestors_done(tasks, task)
+
+
+def open_app_session_and_mark_done(task_id: str, session_id: str) -> int:
+    returncode = subprocess.run(
+        ["open", f"claude://resume?session={session_id}"], check=False
+    ).returncode
+    if returncode != 0:
+        return returncode
+    with locked_tasks() as tasks:
+        current_task = tasks.get(task_id)
+        if isinstance(current_task, dict):
+            mark_task_done(tasks, cast("dict[str, Any]", current_task))
+    return 0
+
+
 def reserve_dependent_task(records: dict[str, Any], parent_id: str) -> bool:
     with locked_tasks() as tasks:
         for task_id in records:
@@ -325,6 +345,10 @@ def reserve_dependent_task(records: dict[str, Any], parent_id: str) -> bool:
             raise SystemExit(f"golem: parent task is cancelled: {parent_id}")
         if parent_status in SUCCEEDED_STATUSES:
             return False
+        if tasks[parent_id].get("auto_pickup"):
+            for record in records.values():
+                if record.get("backend") == BACKEND_CLAUDE:
+                    record["auto_pickup"] = True
         tasks.update(records)
         return True
 
@@ -926,6 +950,7 @@ def new_task_record(
     backend: str,
     *,
     after: str | None = None,
+    is_auto_pickup: bool = False,
 ) -> dict[str, Any]:
     record: dict[str, Any] = {
         "cwd": cwd,
@@ -938,6 +963,8 @@ def new_task_record(
     }
     if after is not None:
         record["after"] = after
+    if is_auto_pickup:
+        record["auto_pickup"] = True
     if when is not None:
         record["status"] = STATUS_SCHEDULED
         record["due_at"] = when.isoformat()
@@ -945,7 +972,12 @@ def new_task_record(
 
 
 def new_follow_up_records(
-    run_task_id: str, follow_ups: list[list[str]], agent_args: tuple[str, ...], backend: str
+    run_task_id: str,
+    follow_ups: list[list[str]],
+    agent_args: tuple[str, ...],
+    backend: str,
+    *,
+    is_auto_pickup: bool,
 ) -> dict[str, Any]:
     records: dict[str, Any] = {}
     previous_task_id = run_task_id
@@ -953,7 +985,13 @@ def new_follow_up_records(
         if task_id == run_task_id or task_id in records:
             raise SystemExit(f"golem: task ID used more than once: {task_id}")
         records[task_id] = new_task_record(
-            str(Path.cwd()), prompt, agent_args, None, backend, after=previous_task_id
+            str(Path.cwd()),
+            prompt,
+            agent_args,
+            None,
+            backend,
+            after=previous_task_id,
+            is_auto_pickup=is_auto_pickup,
         )
         previous_task_id = task_id
     return records
@@ -987,16 +1025,13 @@ def pickup(task_id: str, *agent_args: str, is_app: bool, is_review_required: boo
             release_lock(directory_lock_file)
             raise SystemExit(f"golem: task has no Codex conversation: {task_id}")
         clear_worktree_release(tasks, worktrees, task)
-        if task.get("status") == STATUS_NEEDS_REVIEW:
-            task["status"] = STATUS_DONE
-            mark_ancestors_done(tasks, task)
+        if not is_app:
+            mark_task_done(tasks, task)
         cwd = task_directory(task)
         session_id = cast("str", task["session_id"])
     if is_app:
         release_lock(directory_lock_file)
-        return subprocess.run(
-            ["open", f"claude://resume?session={session_id}"], check=False
-        ).returncode
+        return open_app_session_and_mark_done(task_id, session_id)
     try:
         if is_codex:
             return subprocess.run(
@@ -1022,14 +1057,15 @@ def pickup(task_id: str, *agent_args: str, is_app: bool, is_review_required: boo
         release_lock(directory_lock_file)
 
 
+def is_ready_for_review(tasks: dict[str, Any], task_id: str) -> bool:
+    return tasks[task_id].get("status") == STATUS_NEEDS_REVIEW and not has_unreviewed_dependent(
+        tasks, task_id
+    )
+
+
 def pickup_all() -> int:
     tasks = load_tasks()
-    task_ids = [
-        task_id
-        for task_id, task in tasks.items()
-        if task.get("status") == STATUS_NEEDS_REVIEW
-        and not has_unreviewed_dependent(tasks, task_id)
-    ]
+    task_ids = [task_id for task_id in tasks if is_ready_for_review(tasks, task_id)]
     if not task_ids:
         print("golem: no tasks ready for review")
         return 0
@@ -1042,6 +1078,26 @@ def pickup_all() -> int:
             print(error, file=sys.stderr)
             has_failure = True
     return int(has_failure)
+
+
+def auto_pickup_task(task_id: str) -> None:
+    tasks = load_tasks()
+    task = tasks.get(task_id)
+    if not isinstance(task, dict):
+        return
+    task = cast("dict[str, Any]", task)
+    if task.get("status") == STATUS_FAILED:
+        auto_pickup_task(task.get("after", ""))
+        return
+    if not task.get("auto_pickup") or not is_ready_for_review(tasks, task_id):
+        return
+    try:
+        returncode = pickup(task_id, is_app=True, is_review_required=True)
+    except SystemExit as error:
+        print(error, file=sys.stderr)
+        return
+    if returncode != 0:
+        print(f"golem: could not open {task_id} in the desktop app", file=sys.stderr)
 
 
 def close(task_id: str) -> int:
@@ -1459,10 +1515,19 @@ def schedule_new_task(
     after: str | None,
     *,
     backend: str,
+    is_auto_pickup: bool,
     follow_up_records: dict[str, Any],
 ) -> int:
     due_time = when or datetime.now(UTC).astimezone()
-    record = new_task_record(str(Path.cwd()), prompt, agent_args, due_time, backend, after=after)
+    record = new_task_record(
+        str(Path.cwd()),
+        prompt,
+        agent_args,
+        due_time,
+        backend,
+        after=after,
+        is_auto_pickup=is_auto_pickup,
+    )
     reserve_tasks({task_id: record, **follow_up_records})
     return wake_launch_agent_and_report(task_id, due_time)
 
@@ -1654,6 +1719,7 @@ def print_task_result(result: str) -> None:
 def drain_dependents(task_id: str, session_id: str) -> None:
     while next_dependent := claim_next_dependent(task_id, session_id):
         execute_claimed_task(*next_dependent)
+    auto_pickup_task(task_id)
 
 
 def execute_task(task_id: str, task: dict[str, Any], lock_file_descriptors: tuple[int, ...]) -> int:
@@ -2550,7 +2616,7 @@ def retry_task(task_id: str, *, is_now: bool, at_text: str | None) -> int:
             task_backend(task),
             after=task.get("after"),
         )
-        for name in ("environment", "worktree", "worktree_pending"):
+        for name in ("environment", "worktree", "worktree_pending", "auto_pickup"):
             if name in task:
                 record[name] = task[name]
         tasks[task_id] = record
@@ -2618,7 +2684,13 @@ def schedule_run_task(
 ) -> int:
     if arguments.after is not None:
         dependent_record = new_task_record(
-            str(Path.cwd()), prompt_text, task_args, None, arguments.backend, after=arguments.after
+            str(Path.cwd()),
+            prompt_text,
+            task_args,
+            None,
+            arguments.backend,
+            after=arguments.after,
+            is_auto_pickup=arguments.auto_pickup,
         )
         if reserve_dependent_task(
             {arguments.id: dependent_record, **follow_up_records}, arguments.after
@@ -2633,18 +2705,25 @@ def schedule_run_task(
         when,
         arguments.after,
         backend=arguments.backend,
+        is_auto_pickup=arguments.auto_pickup,
         follow_up_records=follow_up_records,
     )
 
 
 def run_task_from_arguments(arguments: argparse.Namespace) -> int:
+    if arguments.auto_pickup and arguments.backend == BACKEND_CODEX:
+        raise SystemExit("golem: --auto-pickup does not support Codex tasks")
     require_launch_agent()
     prompt_text = (
         Path(arguments.file).read_text(encoding="utf-8") if arguments.file else arguments.prompt
     )
     task_args = tuple(arguments.agent_args)
     follow_up_records = new_follow_up_records(
-        arguments.id, arguments.then, task_args, arguments.backend
+        arguments.id,
+        arguments.then,
+        task_args,
+        arguments.backend,
+        is_auto_pickup=arguments.auto_pickup,
     )
     if arguments.backend == BACKEND_CODEX:
         reject_unsupported_codex_arguments(list(task_args), is_run=True)
@@ -2699,6 +2778,11 @@ def add_run_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
         default=[],
         metavar=("ID", "PROMPT"),
         help="run PROMPT as task ID after the previous task succeeds; repeatable",
+    )
+    run_command.add_argument(
+        "--auto-pickup",
+        action="store_true",
+        help="open the session in the Claude desktop app when the task succeeds; follow-ups get it too",
     )
     run_schedule_group = run_command.add_mutually_exclusive_group()
     add_scheduling_arguments(run_schedule_group.add_argument)

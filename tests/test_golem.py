@@ -65,18 +65,24 @@ if [ -n "${UNRELATED+x}" ]; then
     printf '%s\\n' "$UNRELATED" >> "$GOLEM_CLAUDE_UNRELATED"
 fi
 worktree=''
-next=0
+task_name=''
+next=''
 for argument in "$@"; do
-    if [ "$next" = 1 ]; then
-        worktree="$argument"
-        next=0
+    if [ -n "$next" ]; then
+        if [ "$next" = worktree ]; then
+            worktree="$argument"
+        else
+            task_name="$argument"
+        fi
+        next=''
         continue
     fi
-    if [ "$argument" = '--worktree' ]; then
-        next=1
-        continue
-    fi
-    case "$argument" in --worktree=*) worktree="${argument#--worktree=}" ;; esac
+    case "$argument" in
+        --worktree) next=worktree ;;
+        --worktree=*) worktree="${argument#--worktree=}" ;;
+        --name) next=name ;;
+        --name=*) task_name="${argument#--name=}" ;;
+    esac
 done
 if [ -n "$worktree" ]; then
     common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
@@ -103,6 +109,9 @@ if [ -f "$GOLEM_CLAUDE_STDOUT" ]; then
     cat "$GOLEM_CLAUDE_STDOUT"
 else
     printf '%s' '{"result": "done"}'
+fi
+if [ -n "${GOLEM_CLAUDE_FAIL_TASK:-}" ] && [ "$task_name" = "$GOLEM_CLAUDE_FAIL_TASK" ]; then
+    exit 1
 fi
 exit "${GOLEM_CLAUDE_EXIT:-0}"
 """,
@@ -178,6 +187,7 @@ esac
 """,
         "open": """#!/bin/sh
 printf '%s\\n' "$*" >> "$GOLEM_OPEN_ARGS"
+exit "${GOLEM_OPEN_EXIT:-0}"
 """,
         "gh": """#!/bin/sh
 head=''
@@ -1042,6 +1052,26 @@ def test_pickup_app_opens_task_session_in_desktop_app(fake_commands, ledger_path
     assert logged_claude_calls(fake_commands) == []
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param(["pickup", TASK_ID, "--app"], id="one"),
+        pytest.param(["pickup", "--all", "--app"], id="all"),
+    ],
+)
+def test_failed_app_pickup_leaves_task_needing_review(
+    fake_commands, ledger_path, monkeypatch, command
+):
+    write_task(ledger_path, golem.STATUS_NEEDS_REVIEW)
+    monkeypatch.setenv("GOLEM_OPEN_EXIT", "1")
+
+    assert golem.main(command) == 1
+    assert read_task(ledger_path)["status"] == golem.STATUS_NEEDS_REVIEW
+    assert fake_commands["open-args"].read_text(encoding="utf-8") == (
+        f"claude://resume?session={read_task(ledger_path)['session_id']}\n"
+    )
+
+
 def test_pickup_app_rejects_agent_arguments(fake_commands, ledger_path):
     write_task(ledger_path, golem.STATUS_NEEDS_REVIEW)
 
@@ -1226,6 +1256,50 @@ def test_run_now_records_claude_result(
     capsys.readouterr()
     assert golem.main(["show", TASK_ID]) == 0
     assert capsys.readouterr().out == f"{expected_result}\n"
+
+
+def test_auto_pickup_waits_for_usage_limit_resume(
+    installed_launch_agent, fake_commands, ledger_path, monkeypatch
+):
+    monkeypatch.setattr(golem, "next_reset_time", lambda: RESET_TIME)
+    write_claude_output(
+        fake_commands, USAGE_LIMIT_RESULT, api_error_status=golem.USAGE_LIMIT_HTTP_STATUS
+    )
+    golem.main(["run", TASK_ID, PROMPT, "--now", "--auto-pickup"])
+    task = read_task(ledger_path)
+
+    assert golem.main(["_execute", TASK_ID, task["session_id"]]) == 0
+    assert read_task(ledger_path)["status"] == golem.STATUS_SCHEDULED
+    assert fake_commands["open-args"].read_text(encoding="utf-8") == ""
+
+    set_task_due_now(ledger_path)
+    write_claude_output(fake_commands, PROMPT)
+    assert golem.main(["_execute", TASK_ID, task["session_id"]]) == 0
+    assert read_task(ledger_path)["status"] == golem.STATUS_DONE
+    assert fake_commands["open-args"].read_text(encoding="utf-8") == (
+        f"claude://resume?session={task['session_id']}\n"
+    )
+
+
+def test_auto_pickup_opens_parent_when_resumed_follow_up_fails(
+    fake_commands, ledger_path, monkeypatch
+):
+    monkeypatch.setenv("GOLEM_CLAUDE_EXIT", "1")
+    write_tasks(
+        ledger_path,
+        {
+            PARENT_ID: task_record(golem.STATUS_NEEDS_REVIEW, task_id=PARENT_ID, auto_pickup=True),
+            TASK_ID: task_record(golem.STATUS_SCHEDULED, after=PARENT_ID, auto_pickup=True),
+        },
+    )
+
+    assert golem.main(["_execute", TASK_ID, f"{TASK_ID}-session"]) == 1
+    tasks = read_tasks(ledger_path)
+    assert tasks[TASK_ID]["status"] == golem.STATUS_FAILED
+    assert tasks[PARENT_ID]["status"] == golem.STATUS_DONE
+    assert fake_commands["open-args"].read_text(encoding="utf-8") == (
+        f"claude://resume?session={PARENT_ID}-session\n"
+    )
 
 
 @pytest.mark.parametrize(
@@ -1438,6 +1512,118 @@ def test_run_then_chain_runs_in_order_with_shared_agent_arguments(
     assert logged_claude_calls(fake_commands) == [
         expected_claude_args(tasks[task_id], prompt, task_id=task_id) for task_id, prompt in chain
     ]
+
+
+def test_run_then_auto_pickup_opens_only_last_task(
+    installed_launch_agent, fake_commands, ledger_path
+):
+    assert (
+        golem.main(
+            [
+                "run",
+                TASK_ID,
+                PROMPT,
+                "--now",
+                "--auto-pickup",
+                "--then",
+                CHILD_ID,
+                CHILD_PROMPT,
+                "--then",
+                GRANDCHILD_ID,
+                GRANDCHILD_PROMPT,
+            ]
+        )
+        == 0
+    )
+    tasks = read_tasks(ledger_path)
+
+    assert golem.main(["_execute", TASK_ID, tasks[TASK_ID]["session_id"]]) == 0
+    assert {task["status"] for task in read_tasks(ledger_path).values()} == {golem.STATUS_DONE}
+    assert fake_commands["open-args"].read_text(encoding="utf-8") == (
+        f"claude://resume?session={tasks[GRANDCHILD_ID]['session_id']}\n"
+    )
+
+
+def test_failed_follow_up_auto_pickup_opens_last_success(
+    installed_launch_agent, fake_commands, ledger_path, monkeypatch
+):
+    monkeypatch.setenv("GOLEM_CLAUDE_FAIL_TASK", GRANDCHILD_ID)
+    golem.main(
+        [
+            "run",
+            TASK_ID,
+            PROMPT,
+            "--now",
+            "--auto-pickup",
+            "--then",
+            CHILD_ID,
+            CHILD_PROMPT,
+            "--then",
+            GRANDCHILD_ID,
+            GRANDCHILD_PROMPT,
+        ]
+    )
+    tasks = read_tasks(ledger_path)
+
+    assert golem.main(["_execute", TASK_ID, tasks[TASK_ID]["session_id"]]) == 0
+    assert {task_id: task["status"] for task_id, task in read_tasks(ledger_path).items()} == {
+        TASK_ID: golem.STATUS_DONE,
+        CHILD_ID: golem.STATUS_DONE,
+        GRANDCHILD_ID: golem.STATUS_FAILED,
+    }
+    assert fake_commands["open-args"].read_text(encoding="utf-8") == (
+        f"claude://resume?session={tasks[CHILD_ID]['session_id']}\n"
+    )
+
+
+def test_after_pending_auto_pickup_parent_passes_to_claude_only(
+    installed_launch_agent, ledger_path
+):
+    golem.main(["run", PARENT_ID, PARENT_PROMPT, "--now", "--auto-pickup"])
+
+    assert golem.main(["run", CHILD_ID, CHILD_PROMPT, "--after", PARENT_ID]) == 0
+    assert (
+        golem.main(
+            ["run", GRANDCHILD_ID, GRANDCHILD_PROMPT, "--backend", "codex", "--after", PARENT_ID]
+        )
+        == 0
+    )
+
+    tasks = read_tasks(ledger_path)
+    assert tasks[CHILD_ID]["auto_pickup"] is True
+    assert "auto_pickup" not in tasks[GRANDCHILD_ID]
+
+
+def test_after_succeeded_auto_pickup_parent_does_not_pass_to_child(
+    installed_launch_agent, ledger_path, monkeypatch
+):
+    monkeypatch.setattr(golem, "next_reset_time", lambda: RESET_TIME)
+    write_task(
+        ledger_path,
+        golem.STATUS_DONE,
+        task_id=PARENT_ID,
+        auto_pickup=True,
+    )
+
+    assert golem.main(["run", CHILD_ID, CHILD_PROMPT, "--after", PARENT_ID]) == 0
+    assert "auto_pickup" not in read_task(ledger_path, CHILD_ID)
+
+
+def test_auto_pickup_rejects_codex_without_changing_ledger(ledger_path):
+    write_task(ledger_path, golem.STATUS_SCHEDULED)
+    tasks = read_tasks(ledger_path)
+
+    with pytest.raises(SystemExit, match="--auto-pickup does not support Codex"):
+        golem.main(["run", CHILD_ID, CHILD_PROMPT, "--backend", "codex", "--auto-pickup", "--now"])
+
+    assert read_tasks(ledger_path) == tasks
+
+
+def test_retry_keeps_auto_pickup(installed_launch_agent, ledger_path):
+    write_task(ledger_path, golem.STATUS_FAILED, auto_pickup=True)
+
+    assert golem.main(["retry", TASK_ID, "--now"]) == 0
+    assert read_task(ledger_path)["auto_pickup"] is True
 
 
 @pytest.mark.parametrize(
