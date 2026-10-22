@@ -239,11 +239,13 @@ def fake_commands(monkeypatch, tmp_path, fake_bin_path):
     paths["gh-pull-requests"].mkdir()
     home_path = tmp_path / "home"
     state_path = tmp_path / "state"
+    config_path = tmp_path / "config"
     work_path = tmp_path / "work"
     work_path.mkdir()
     monkeypatch.setenv("PATH", f"{fake_bin_path}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.setenv("HOME", str(home_path))
     monkeypatch.setenv("XDG_STATE_HOME", str(state_path))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_path))
     for name, path in paths.items():
         monkeypatch.setenv(f"GOLEM_{name.upper().replace('-', '_')}", str(path))
     monkeypatch.setenv("GOLEM_CODEX_", str(tmp_path / "codex-"))
@@ -289,6 +291,16 @@ def write_task(ledger_path, status, *, task_id=TASK_ID, **fields: object):
 def write_tasks(ledger_path, tasks):
     ledger_path.parent.mkdir(parents=True, exist_ok=True)
     ledger_path.write_text(json.dumps(tasks), encoding="utf-8")
+
+
+def write_aliases(aliases):
+    path = golem.config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "[aliases]",
+        *(f"{name} = {json.dumps(template)}" for name, template in aliases.items()),
+    ]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def list_output(capsys):
@@ -582,6 +594,120 @@ def expected_claude_args(task, prompt=PROMPT, agent_args=AGENT_ARGS, task_id=TAS
 
 def raise_usage_lookup_error() -> Never:
     raise SystemExit
+
+
+def test_alias_expands_arguments_verbatim_like_run(
+    installed_launch_agent, ledger_path, monkeypatch
+):
+    class FixedDateTime(datetime):
+        @classmethod
+        @override
+        def now(cls, tz=None) -> datetime:
+            now = datetime(2030, 1, 1, 10, tzinfo=UTC)
+            return now if tz is not None else now.replace(tzinfo=None)
+
+    monkeypatch.setattr(golem, "datetime", FixedDateTime)
+    monkeypatch.setattr(golem, "new_session_id", lambda: "session")
+    write_aliases({"impl": 'run {1} "/impl {2}" --then {1}-review /review-lite'})
+    task_id = "t42"
+    prompt = 'add "retry" {backoff}\nonce'
+
+    assert golem.main(["impl", task_id, prompt, "--now"]) == 0
+    alias_tasks = read_tasks(ledger_path)
+
+    write_tasks(ledger_path, {})
+
+    assert (
+        golem.main(
+            [
+                "run",
+                task_id,
+                f"/impl {prompt}",
+                "--then",
+                f"{task_id}-review",
+                "/review-lite",
+                "--now",
+            ]
+        )
+        == 0
+    )
+
+    assert read_tasks(ledger_path) == alias_tasks
+
+
+def test_alias_appends_extra_arguments_before_template_agent_arguments(
+    installed_launch_agent, ledger_path
+):
+    write_aliases({"queue": "run {1} {2} -- --model template-{1}"})
+
+    assert (
+        golem.main(
+            [
+                "queue",
+                TASK_ID,
+                PROMPT,
+                "--now",
+                "--",
+                "--model",
+                "command-line",
+            ]
+        )
+        == 0
+    )
+
+    task = read_task(ledger_path)
+    assert task["agent_args"] == ["--model", f"template-{TASK_ID}", "--model", "command-line"]
+    assert datetime.fromisoformat(task["due_at"]) < RESET_TIME
+
+
+def test_alias_requires_all_placeholder_arguments(ledger_path):
+    write_aliases({"impl": "run {1} {2}"})
+
+    with pytest.raises(SystemExit, match=r"alias impl needs 2 arguments, got 1"):
+        golem.main(["impl", TASK_ID])
+
+    assert not ledger_path.exists()
+
+
+def test_alias_list_marks_shadowed_builtin(capsys):
+    write_aliases({"ship": "run {1} {2}", "run": "not a command"})
+
+    assert golem.main(["alias", "list"]) == 0
+
+    ship_line, run_line = capsys.readouterr().out.splitlines()
+    assert "shadowed" not in ship_line
+    assert "shadowed" in run_line
+
+
+def test_builtin_command_wins_over_alias(installed_launch_agent, ledger_path):
+    write_aliases({"run": "not a command"})
+
+    assert golem.main(["run", TASK_ID, PROMPT, "--now"]) == 0
+
+    assert read_task(ledger_path)["prompt"] == PROMPT
+
+
+def test_alias_cannot_expand_to_another_alias(ledger_path):
+    write_aliases({"impl": "review", "review": "run {1} {2}"})
+
+    with pytest.raises(SystemExit, match=r"alias impl expands to alias review"):
+        golem.main(["impl"])
+
+    assert not ledger_path.exists()
+
+
+def test_missing_and_invalid_alias_config_do_not_block_builtin_commands(capsys):
+    assert golem.main(["alias", "list"]) == 0
+    assert capsys.readouterr().out == "golem: no aliases\n"
+
+    path = golem.config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("[aliases\n", encoding="utf-8")
+
+    assert golem.main(["list"]) == 0
+    assert capsys.readouterr().out == "golem: no tasks\n"
+    with pytest.raises(SystemExit, match=re.escape(str(path))):
+        golem.main(["alias", "list"])
 
 
 @pytest.mark.parametrize(

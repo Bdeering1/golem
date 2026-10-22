@@ -6,12 +6,14 @@ import os
 import plistlib
 import queue
 import re
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+import tomllib
 import uuid
 from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass
@@ -115,17 +117,82 @@ PRUNE_ANSWER_NO = "n"
 PRUNE_ANSWER_ALL = "a"
 PRUNE_ANSWER_QUIT = "q"
 PRUNE_ANSWERS = (PRUNE_ANSWER_YES, PRUNE_ANSWER_NO, PRUNE_ANSWER_ALL, PRUNE_ANSWER_QUIT)
+ALIAS_PLACEHOLDER_PATTERN = re.compile(r"\{(\d+)\}")
 
 type PullRequestCache = dict[str | None, dict[str, Any] | None]
 
 
-def state_directory() -> Path:
-    state_home = Path(os.environ.get("XDG_STATE_HOME", ""))
-    golem_state_directory = (
-        state_home / "golem"
-        if state_home.is_absolute()
-        else Path.home() / ".local" / "state" / "golem"
+def xdg_golem_directory(variable: str, fallback: Path) -> Path:
+    base_directory = Path(os.environ.get(variable, ""))
+    return (base_directory if base_directory.is_absolute() else fallback) / "golem"
+
+
+def config_path() -> Path:
+    return xdg_golem_directory("XDG_CONFIG_HOME", Path.home() / ".config") / "config.toml"
+
+
+def load_aliases() -> dict[str, str]:
+    path = config_path()
+    if not path.exists():
+        return {}
+    invalid_config_error = f"golem: invalid config file {path}"
+    try:
+        config = tomllib.loads(path.read_text(encoding="utf-8"))
+    except tomllib.TOMLDecodeError as error:
+        raise SystemExit(f"{invalid_config_error}: {error}") from error
+    aliases = config.get("aliases")
+    if aliases is None:
+        return {}
+    if not isinstance(aliases, dict):
+        raise SystemExit(f"{invalid_config_error}: aliases must be a table")
+    alias_table = cast("dict[str, object]", aliases)
+    validated_aliases: dict[str, str] = {}
+    for name, template in alias_table.items():
+        if not isinstance(template, str):
+            raise SystemExit(f"{invalid_config_error}: alias {name} must be a string")
+        validated_aliases[name] = template
+    return validated_aliases
+
+
+def expand_alias(
+    name: str, template: str, alias_args: list[str], command_line_agent_args: list[str]
+) -> tuple[list[str], list[str]]:
+    try:
+        template_args = shlex.split(template)
+    except ValueError as error:
+        raise SystemExit(f"golem: invalid alias {name}: {error}") from error
+    separator_index = template_args.index("--") if "--" in template_args else len(template_args)
+    command_args = template_args[:separator_index]
+    template_agent_args = template_args[separator_index + 1 :]
+    placeholder_numbers = [
+        int(match.group(1))
+        for argument in template_args
+        for match in ALIAS_PLACEHOLDER_PATTERN.finditer(argument)
+    ]
+    if 0 in placeholder_numbers:
+        raise SystemExit(f"golem: alias {name} has placeholder {{0}}; placeholders start at {{1}}")
+    required_arguments = max(placeholder_numbers, default=0)
+    if len(alias_args) < required_arguments:
+        raise SystemExit(
+            f"golem: alias {name} needs {required_arguments} arguments, got {len(alias_args)}"
+        )
+
+    def substitute(argument: str) -> str:
+        return ALIAS_PLACEHOLDER_PATTERN.sub(
+            lambda match: alias_args[int(match.group(1)) - 1], argument
+        )
+
+    return (
+        [*(substitute(argument) for argument in command_args), *alias_args[required_arguments:]],
+        [
+            *(substitute(argument) for argument in template_agent_args),
+            *command_line_agent_args,
+        ],
     )
+
+
+def state_directory() -> Path:
+    golem_state_directory = xdg_golem_directory("XDG_STATE_HOME", Path.home() / ".local" / "state")
     golem_state_directory.mkdir(parents=True, exist_ok=True)
     return golem_state_directory
 
@@ -2759,6 +2826,18 @@ def add_prune_command(add_parser: Callable[..., argparse.ArgumentParser]) -> Non
     set_command_handler(prune_command, lambda arguments: prune_tasks(is_confirmed=arguments.yes))
 
 
+def list_aliases(command_parsers: dict[str, argparse.ArgumentParser]) -> int:
+    aliases = load_aliases()
+    if not aliases:
+        print("golem: no aliases")
+        return 0
+    widest_name = max(map(len, aliases))
+    for name, template in aliases.items():
+        shadowed_suffix = "  (shadowed by built-in command)" if name in command_parsers else ""
+        print(f"{name:<{widest_name}}  {template}{shadowed_suffix}")
+    return 0
+
+
 def add_run_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
     run_command = add_parser(
         "run",
@@ -2790,7 +2869,7 @@ def add_run_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
     set_command_handler(run_command, run_task_from_arguments)
 
 
-def build_parser() -> argparse.ArgumentParser:
+def build_parser() -> tuple[argparse.ArgumentParser, dict[str, argparse.ArgumentParser]]:
     parser = argparse.ArgumentParser(prog="golem")
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -2858,6 +2937,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_prune_command(commands.add_parser)
     set_command_handler(commands.add_parser("list"), lambda _: list_tasks())
+    alias_command = commands.add_parser("alias")
+    alias_commands = alias_command.add_subparsers(dest="alias_command", required=True)
+    set_command_handler(alias_commands.add_parser("list"), lambda _: list_aliases(commands.choices))
     add_worktree_commands(commands.add_parser)
     launch_agent_command = commands.add_parser(
         "agent",
@@ -2882,7 +2964,7 @@ def build_parser() -> argparse.ArgumentParser:
         execute_command,
         lambda arguments: execute_or_drain_task(arguments.id, arguments.session_id),
     )
-    return parser
+    return parser, commands.choices
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -2894,7 +2976,18 @@ def main(argv: list[str] | None = None) -> int:
         agent_args = golem_args[separator_index + 1 :]
         golem_args = golem_args[:separator_index]
 
-    parser = build_parser()
+    parser, command_parsers = build_parser()
+    if golem_args and not golem_args[0].startswith("-") and golem_args[0] not in command_parsers:
+        aliases = load_aliases()
+        alias_name = golem_args[0]
+        template = aliases.get(alias_name)
+        if template is not None:
+            golem_args, agent_args = expand_alias(alias_name, template, golem_args[1:], agent_args)
+            if golem_args and golem_args[0] not in command_parsers and golem_args[0] in aliases:
+                raise SystemExit(
+                    f"golem: alias {alias_name} expands to alias {golem_args[0]}; "
+                    "aliases cannot use other aliases"
+                )
     arguments = parser.parse_args(golem_args, argparse.Namespace(agent_args=agent_args))
     if agent_args and arguments.command == "retry":
         parser.error("retry does not accept agent arguments")
