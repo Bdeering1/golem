@@ -122,12 +122,13 @@ ALIAS_PLACEHOLDER_PATTERN = re.compile(r"\{(\d+)\}")
 type PullRequestCache = dict[str | None, dict[str, Any] | None]
 
 
+def xdg_golem_directory(variable: str, fallback: Path) -> Path:
+    base_directory = Path(os.environ.get(variable, ""))
+    return (base_directory if base_directory.is_absolute() else fallback) / "golem"
+
+
 def config_path() -> Path:
-    config_home = Path(os.environ.get("XDG_CONFIG_HOME", ""))
-    config_directory = (
-        config_home / "golem" if config_home.is_absolute() else Path.home() / ".config" / "golem"
-    )
-    return config_directory / "config.toml"
+    return xdg_golem_directory("XDG_CONFIG_HOME", Path.home() / ".config") / "config.toml"
 
 
 def load_aliases() -> dict[str, str]:
@@ -191,12 +192,7 @@ def expand_alias(
 
 
 def state_directory() -> Path:
-    state_home = Path(os.environ.get("XDG_STATE_HOME", ""))
-    golem_state_directory = (
-        state_home / "golem"
-        if state_home.is_absolute()
-        else Path.home() / ".local" / "state" / "golem"
-    )
+    golem_state_directory = xdg_golem_directory("XDG_STATE_HOME", Path.home() / ".local" / "state")
     golem_state_directory.mkdir(parents=True, exist_ok=True)
     return golem_state_directory
 
