@@ -1,0 +1,15 @@
+#!/bin/sh
+staged_python_files() {
+    git diff --cached --name-only -z --diff-filter=ACMR -- '*.py' '*.pyi'
+}
+
+git diff --cached --quiet --diff-filter=ACMR -- '*.py' '*.pyi' && exit 0
+
+status=0
+staged_python_files |
+    xargs -0 uv run --frozen ruff check --force-exclude -- || status=1
+staged_python_files |
+    xargs -0 uv run --frozen ruff format --check --force-exclude -- || status=1
+staged_python_files |
+    xargs -0 uv run --frozen basedpyright || status=1
+exit "$status"

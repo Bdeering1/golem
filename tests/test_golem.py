@@ -13,7 +13,7 @@ import sys
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Never
+from typing import Any, Never, override
 
 import pytest
 
@@ -342,6 +342,7 @@ def test_list_abbreviates_only_home_and_its_descendants(ledger_path, capsys):
 def test_list_formats_due_times_in_local_time(ledger_path, capsys, monkeypatch):
     class FixedDateTime(datetime):
         @classmethod
+        @override
         def now(cls, tz=None) -> datetime:
             now = datetime(2030, 3, 10, 12, tzinfo=UTC)
             return now if tz is not None else now.replace(tzinfo=None)
@@ -3494,9 +3495,11 @@ class TerminalInput(io.StringIO):
         super().__init__(answers)
         self.on_first_read = on_first_read
 
+    @override
     def isatty(self):
         return True
 
+    @override
     def readline(self, size: int = -1) -> str:
         self.on_first_read()
         self.on_first_read = lambda: None
