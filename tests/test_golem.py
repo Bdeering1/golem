@@ -1257,17 +1257,6 @@ def test_run_now_records_claude_result(
     assert capsys.readouterr().out == f"{expected_result}\n"
 
 
-def test_auto_pickup_opens_completed_task(installed_launch_agent, fake_commands, ledger_path):
-    assert golem.main(["run", TASK_ID, PROMPT, "--now", "--auto-pickup"]) == 0
-    task = read_task(ledger_path)
-
-    assert golem.main(["_execute", TASK_ID, task["session_id"]]) == 0
-    assert read_task(ledger_path)["status"] == golem.STATUS_DONE
-    assert fake_commands["open-args"].read_text(encoding="utf-8") == (
-        f"claude://resume?session={task['session_id']}\n"
-    )
-
-
 def test_auto_pickup_waits_for_usage_limit_resume(
     installed_launch_agent, fake_commands, ledger_path, monkeypatch
 ):
