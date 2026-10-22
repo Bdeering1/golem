@@ -17,19 +17,28 @@ golem = "golem:main"
 
 [dependency-groups]
 dev = [
-    "pyright>=1.1.411",
+    "basedpyright>=1.40.2",
     "pytest>=9.1.1",
+    "pytest-randomly>=5.0.0",
+    "pytest-socket>=0.8.1",
     "ruff>=0.16.2",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "--strict-markers"
+addopts = "--strict-markers --strict-config --disable-socket --allow-unix-socket"
+filterwarnings = ["error"]
+xfail_strict = true
 
-[tool.pyright]
+[tool.basedpyright]
 typeCheckingMode = "strict"
+include = ["golem.py", "tests"]
+reportUnreachable = "error"
+reportDeprecated = "error"
+reportImplicitOverride = "error"
+reportUnnecessaryTypeIgnoreComment = "error"
 
-[[tool.pyright.executionEnvironments]]
+[[tool.basedpyright.executionEnvironments]]
 root = "tests"
 extraPaths = ["."]
 reportMissingParameterType = "none"
