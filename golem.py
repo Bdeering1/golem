@@ -111,6 +111,7 @@ WORKTREE_OWNER_MARKER = "golem-owner"
 CLAUDE_LOCK_PATTERN = re.compile(r"claude session (\S+) \(pid (\d+) start .+\)")
 PRUNE_IDLE_DAYS = 7
 PULL_REQUEST_TIMEOUT_SECONDS = 30
+GATE_TIMEOUT_SECONDS = 300
 PULL_REQUEST_STATE_OPEN = "OPEN"
 PRUNE_ANSWER_YES = "y"
 PRUNE_ANSWER_NO = "n"
@@ -1157,6 +1158,16 @@ def pickup_all() -> int:
     return int(has_failure)
 
 
+def reopen_settled_parent(parent_id: str) -> None:
+    with locked_tasks() as tasks:
+        stored_parent = tasks.get(parent_id)
+        if not isinstance(stored_parent, dict):
+            return
+        parent = cast("dict[str, Any]", stored_parent)
+        if parent.get("auto_pickup") and parent.get("status") == STATUS_DONE:
+            parent["status"] = STATUS_NEEDS_REVIEW
+
+
 def auto_pickup_task(task_id: str) -> None:
     tasks = load_tasks()
     task = tasks.get(task_id)
@@ -1164,7 +1175,9 @@ def auto_pickup_task(task_id: str) -> None:
         return
     task = cast("dict[str, Any]", task)
     if task.get("status") == STATUS_FAILED:
-        auto_pickup_task(task.get("after", ""))
+        parent_id = task.get("after", "")
+        reopen_settled_parent(parent_id)
+        auto_pickup_task(parent_id)
         return
     if not task.get("auto_pickup") or not is_ready_for_review(tasks, task_id):
         return
@@ -1802,7 +1815,6 @@ def print_task_result(result: str) -> None:
 
 
 def drain_dependents(task_id: str, session_id: str) -> None:
-    settle_succeeded_task(task_id)
     while next_dependent := claim_next_dependent(task_id, session_id):
         execute_claimed_task(*next_dependent)
     auto_pickup_task(task_id)
@@ -1876,28 +1888,39 @@ def gate_stop_reason(task_id: str, task: dict[str, Any]) -> str | None:
             capture_output=True,
             encoding="utf-8",
             errors="replace",
+            timeout=GATE_TIMEOUT_SECONDS,
             check=False,
         )
+    except subprocess.TimeoutExpired:
+        return f"gate timed out after {GATE_TIMEOUT_SECONDS}s"
     except OSError as error:
         return str(error)
     if gate_process.returncode == 0:
         return None
-    return gate_process.stderr.strip()
+    return gate_process.stderr.strip() or f"gate exited with status {gate_process.returncode}"
+
+
+def is_unsettled(tasks: dict[str, Any], task_id: str) -> bool:
+    stored_task = tasks.get(task_id)
+    if not isinstance(stored_task, dict):
+        return False
+    task = cast("dict[str, Any]", stored_task)
+    return (
+        task.get("status") == STATUS_NEEDS_REVIEW
+        and "gate_reason" not in task
+        and bool(waiting_dependent_ids(tasks, task_id))
+    )
+
+
+def task_directory_lock(task: dict[str, Any]) -> io.TextIOWrapper | None:
+    return acquire_lock(directory_lock_path(directory_to_lock(task, task.get("worktree"))))
 
 
 def settle_succeeded_task(task_id: str) -> None:
     tasks = load_tasks()
-    stored_task = tasks.get(task_id)
-    if not isinstance(stored_task, dict):
+    if not is_unsettled(tasks, task_id):
         return
-    task = cast("dict[str, Any]", stored_task)
-    if (
-        task.get("status") != STATUS_NEEDS_REVIEW
-        or "gate_reason" in task
-        or task_backend(task) != BACKEND_CLAUDE
-        or not waiting_dependent_ids(tasks, task_id)
-    ):
-        return
+    task = cast("dict[str, Any]", tasks[task_id])
     stop_reason = gate_stop_reason(task_id, task) if "gate" in task else None
     with locked_tasks() as locked_tasks_by_id:
         current_task = locked_tasks_by_id.get(task_id)
@@ -1915,7 +1938,13 @@ def continue_task(task_id: str, *, is_forced: bool) -> int:
     if "gate_reason" not in task:
         raise SystemExit(f"golem: task is not stopped at a gate: {task_id}")
     if not is_forced:
-        stop_reason = gate_stop_reason(task_id, task)
+        directory_lock_file = task_directory_lock(task)
+        if directory_lock_file is None:
+            raise SystemExit(f"golem: directory is busy: {task_id}")
+        try:
+            stop_reason = gate_stop_reason(task_id, task)
+        finally:
+            release_lock(directory_lock_file)
         if stop_reason is not None:
             with locked_tasks() as tasks:
                 stopped_task = existing_task(tasks, task_id)
@@ -1961,12 +1990,28 @@ def execute_scheduled_task(task_id: str, session_id: str) -> int:
     return execute_claimed_task(task_id, *claim)
 
 
+def settle_unsettled_task_locked(task_id: str) -> bool:
+    tasks = load_tasks()
+    if not is_unsettled(tasks, task_id):
+        return True
+    directory_lock_file = task_directory_lock(cast("dict[str, Any]", tasks[task_id]))
+    if directory_lock_file is None:
+        return False
+    try:
+        settle_succeeded_task(task_id)
+    finally:
+        release_lock(directory_lock_file)
+    return True
+
+
 def drain_succeeded_task(task_id: str, session_id: str) -> None:
     with locked_tasks():
         run_lock_file = acquire_run_lock(session_id)
     if run_lock_file is None:
         return
     try:
+        if not settle_unsettled_task_locked(task_id):
+            return
         drain_dependents(task_id, session_id)
     finally:
         release_run_lock(run_lock_file, session_id)

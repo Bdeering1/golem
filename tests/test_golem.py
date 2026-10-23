@@ -1677,7 +1677,7 @@ def test_run_then_auto_pickup_opens_only_last_task(
     )
 
 
-def test_failed_follow_up_leaves_earlier_chain_tasks_done(
+def test_failed_follow_up_auto_pickup_opens_last_success(
     installed_launch_agent, fake_commands, ledger_path, monkeypatch
 ):
     monkeypatch.setenv("GOLEM_CLAUDE_FAIL_TASK", GRANDCHILD_ID)
@@ -1704,7 +1704,9 @@ def test_failed_follow_up_leaves_earlier_chain_tasks_done(
         CHILD_ID: golem.STATUS_DONE,
         GRANDCHILD_ID: golem.STATUS_FAILED,
     }
-    assert not fake_commands["open-args"].read_text(encoding="utf-8")
+    assert fake_commands["open-args"].read_text(encoding="utf-8") == (
+        f"claude://resume?session={tasks[CHILD_ID]['session_id']}\n"
+    )
 
 
 GATE_REASON = "no pull request yet"
@@ -1756,7 +1758,9 @@ def test_passing_gate_continues_chain_and_receives_task_as_json(
     installed_launch_agent, fake_commands, ledger_path, tmp_path
 ):
     write_claude_output(fake_commands, CLAUDE_RESULT)
-    parent = run_gated_chain(ledger_path, gate_command(tmp_path))
+    parent = schedule_gated_chain(ledger_path, gate_command(tmp_path))
+    write_transcript(parent["session_id"], 0)
+    assert golem.main(["_execute", PARENT_ID, parent["session_id"]]) == 0
 
     tasks = read_tasks(ledger_path)
     assert tasks[PARENT_ID]["status"] == golem.STATUS_DONE
@@ -1769,7 +1773,9 @@ def test_passing_gate_continues_chain_and_receives_task_as_json(
             "started_at": tasks[PARENT_ID]["started_at"],
             "exit_code": 0,
             "result": CLAUDE_RESULT,
-            "transcript_path": None,
+            "transcript_path": str(
+                Path.home() / ".claude" / "projects" / "project" / f"{parent['session_id']}.jsonl"
+            ),
         }
     ]
     assert len(logged_claude_calls(fake_commands)) == 2
@@ -1831,6 +1837,43 @@ def test_executor_resuming_unsettled_task_runs_gate_before_follow_up(
     assert len(gate_inputs(tmp_path)) == (0 if is_cwd_missing else 1)
     if is_cwd_missing:
         assert missing_directory in tasks[PARENT_ID]["gate_reason"]
+
+
+@pytest.mark.parametrize(
+    ("gate", "expected_reason"),
+    [
+        pytest.param("exit 3", "gate exited with status 3", id="no-stderr"),
+        pytest.param("sleep 5", "gate timed out after 0.2s", id="timeout"),
+    ],
+)
+def test_gate_stop_reason_when_gate_gives_none(ledger_path, monkeypatch, gate, expected_reason):
+    monkeypatch.setattr(golem, "GATE_TIMEOUT_SECONDS", 0.2)
+    write_task(ledger_path, golem.STATUS_NEEDS_REVIEW, gate=gate)
+
+    assert golem.gate_stop_reason(TASK_ID, read_task(ledger_path)) == expected_reason
+
+
+def test_executor_resuming_unsettled_task_skips_gate_while_directory_is_busy(
+    installed_launch_agent, ledger_path, tmp_path
+):
+    write_tasks(
+        ledger_path,
+        {
+            PARENT_ID: task_record(
+                golem.STATUS_NEEDS_REVIEW, task_id=PARENT_ID, gate=gate_command(tmp_path)
+            ),
+            CHILD_ID: task_record(golem.STATUS_WAITING, task_id=CHILD_ID, after=PARENT_ID),
+        },
+    )
+    directory_lock_file = golem.acquire_lock(golem.directory_lock_path(str(Path.cwd())))
+    assert directory_lock_file is not None
+    try:
+        assert golem.main(["_execute", PARENT_ID, f"{PARENT_ID}-session"]) == 0
+    finally:
+        golem.release_lock(directory_lock_file)
+
+    assert gate_inputs(tmp_path) == []
+    assert read_task(ledger_path, CHILD_ID)["status"] == golem.STATUS_WAITING
 
 
 def test_failing_gate_keeps_chain_stopped_when_task_is_picked_up_meanwhile(
@@ -2040,6 +2083,13 @@ def test_retry_keeps_auto_pickup(installed_launch_agent, ledger_path):
 
     assert golem.main(["retry", TASK_ID, "--now"]) == 0
     assert read_task(ledger_path)["auto_pickup"] is True
+
+
+def test_retry_keeps_gate(installed_launch_agent, ledger_path):
+    write_task(ledger_path, golem.STATUS_FAILED, gate="true")
+
+    assert golem.main(["retry", TASK_ID, "--now"]) == 0
+    assert read_task(ledger_path)["gate"] == "true"
 
 
 @pytest.mark.parametrize(
@@ -4051,10 +4101,9 @@ def test_mixed_backend_chain_shares_worktree_and_uses_fresh_conversations(
     assert {task["worktree"] for task in tasks.values()} == {worktree}
     assert len({task["session_id"] for task in tasks.values()}) == 3
     assert [tasks[task_id]["status"] for task_id in ("parent", "child", "grandchild")] == [
-        golem.STATUS_NEEDS_REVIEW
-        if backend == golem.BACKEND_CODEX or task_id == "grandchild"
-        else golem.STATUS_DONE
-        for task_id, backend in zip(("parent", "child", "grandchild"), backends, strict=True)
+        golem.STATUS_DONE,
+        golem.STATUS_DONE,
+        golem.STATUS_NEEDS_REVIEW,
     ]
     codex_cwds = fake_commands["codex-cwd"].read_text(encoding="utf-8").splitlines()
     codex_executions = [
