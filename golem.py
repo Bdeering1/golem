@@ -8,6 +8,7 @@ import queue
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -111,6 +112,7 @@ WORKTREE_OWNER_MARKER = "golem-owner"
 CLAUDE_LOCK_PATTERN = re.compile(r"claude session (\S+) \(pid (\d+) start .+\)")
 PRUNE_IDLE_DAYS = 7
 PULL_REQUEST_TIMEOUT_SECONDS = 30
+GATE_TIMEOUT_SECONDS = 300
 PULL_REQUEST_STATE_OPEN = "OPEN"
 PRUNE_ANSWER_YES = "y"
 PRUNE_ANSWER_NO = "n"
@@ -340,6 +342,10 @@ def reserve_tasks(records: dict[str, Any]) -> None:
         tasks.update(records)
 
 
+def can_start_dependents(task: dict[str, Any]) -> bool:
+    return task.get("status") in SUCCEEDED_STATUSES and "gate_reason" not in task
+
+
 def waiting_dependent_ids(tasks: dict[str, Any], parent_id: str) -> list[str]:
     return [
         dependent_id
@@ -410,7 +416,7 @@ def reserve_dependent_task(records: dict[str, Any], parent_id: str) -> bool:
         parent_status = tasks[parent_id]["status"]
         if parent_status == STATUS_CANCELLED:
             raise SystemExit(f"golem: parent task is cancelled: {parent_id}")
-        if parent_status in SUCCEEDED_STATUSES:
+        if can_start_dependents(tasks[parent_id]) and not is_gate_pending(tasks, parent_id):
             return False
         if tasks[parent_id].get("auto_pickup"):
             for record in records.values():
@@ -1022,6 +1028,7 @@ class RunPlacement:
     cwd: str
     is_auto_pickup: bool = False
     is_no_worktree: bool = False
+    gate: str | None = None
 
 
 def new_task_record(
@@ -1048,6 +1055,8 @@ def new_task_record(
         record["auto_pickup"] = True
     if placement.is_no_worktree:
         record["no_worktree"] = True
+    if placement.gate is not None:
+        record["gate"] = placement.gate
     if when is not None:
         record["status"] = STATUS_SCHEDULED
         record["due_at"] = when.isoformat()
@@ -1134,8 +1143,9 @@ def pickup(task_id: str, *agent_args: str, is_app: bool, is_review_required: boo
 
 
 def is_ready_for_review(tasks: dict[str, Any], task_id: str) -> bool:
-    return tasks[task_id].get("status") == STATUS_NEEDS_REVIEW and not has_unreviewed_dependent(
-        tasks, task_id
+    task = tasks[task_id]
+    return task.get("status") == STATUS_NEEDS_REVIEW and (
+        "gate_reason" in task or not has_unreviewed_dependent(tasks, task_id)
     )
 
 
@@ -1192,6 +1202,8 @@ def show_task_result(task_id: str) -> int:
     if task_id not in tasks:
         raise SystemExit(f"golem: task not found: {task_id}")
     task = cast("dict[str, Any]", tasks[task_id])
+    if "gate_reason" in task:
+        print(f"golem: gate stopped: {task['gate_reason']}", file=sys.stderr)
     result = task.get("result")
     if not isinstance(result, str):
         raise SystemExit(f"golem: task has no result: {task_id}")
@@ -1246,6 +1258,10 @@ def display_status(status: str, width: int, *, is_color: bool) -> str:
     return f"\033[38;5;{STATUS_COLORS[status]}m{padded_status}{ANSI_RESET}"
 
 
+def first_line(text: str) -> str:
+    return next(iter(text.splitlines()), "")
+
+
 def list_tasks() -> int:
     tasks = load_tasks()
     if not tasks:
@@ -1259,11 +1275,12 @@ def list_tasks() -> int:
             display_directory(task["cwd"]),
             display_due_at(task["due_at"], today) if "due_at" in task else "",
             task["after"] if task["status"] == STATUS_WAITING else "",
+            first_line(task.get("gate_reason", "")),
         )
         for task_id, task in tasks.items()
     ]
     rows.sort(key=lambda row: (LIST_STATUS_ORDER.index(row[1]), row[0]))
-    headers = ("ID", "STATUS", "DIRECTORY", "DUE AT", "AFTER")
+    headers = ("ID", "STATUS", "DIRECTORY", "DUE AT", "AFTER", "REASON")
     widths = [
         max(len(str(value)) for value in column) for column in zip(headers, *rows, strict=True)
     ]
@@ -1271,7 +1288,7 @@ def list_tasks() -> int:
     print(
         "  ".join(value.ljust(width) for value, width in zip(headers, widths, strict=True)).rstrip()
     )
-    for task_id, status, directory, due_at, after in rows:
+    for task_id, status, directory, due_at, after, reason in rows:
         print(
             "  ".join(
                 (
@@ -1280,6 +1297,7 @@ def list_tasks() -> int:
                     directory.ljust(widths[2]),
                     due_at.ljust(widths[3]),
                     after.ljust(widths[4]),
+                    reason.ljust(widths[5]),
                 )
             ).rstrip()
         )
@@ -1705,6 +1723,12 @@ def finish_task(
             else STATUS_FAILED
         )
         task_record["returncode"] = returncode
+        stored_parent = tasks.get(task_record.get("after", ""))
+        if task_record["status"] != STATUS_NEEDS_REVIEW or not isinstance(stored_parent, dict):
+            return
+        parent = cast("dict[str, Any]", stored_parent)
+        if parent.get("status") == STATUS_NEEDS_REVIEW:
+            parent["status"] = STATUS_DONE
 
 
 def claim_task(
@@ -1754,6 +1778,7 @@ def claim_task(
                 record_worktree_resource(worktrees, worktree, session_id)
     clear_worktree_release(tasks, worktrees, task)
     task["status"] = STATUS_RUNNING
+    task["started_at"] = datetime.now(UTC).isoformat()
     return task.copy(), run_lock_file, directory_lock_file
 
 
@@ -1765,10 +1790,7 @@ def claim_next_dependent(
         if not isinstance(parent_record, dict):
             return None
         parent = cast("dict[str, Any]", parent_record)
-        if (
-            parent.get("session_id") != parent_session_id
-            or parent.get("status") not in SUCCEEDED_STATUSES
-        ):
+        if parent.get("session_id") != parent_session_id or not can_start_dependents(parent):
             return None
         for dependent_id in waiting_dependent_ids(tasks, task_id):
             dependent_session_id = tasks[dependent_id]["session_id"]
@@ -1833,6 +1855,116 @@ def execute_task(task_id: str, task: dict[str, Any], lock_file_descriptors: tupl
     return returncode
 
 
+def gate_input_json(task_id: str, task: dict[str, Any]) -> str:
+    transcript_path = next(iter(transcript_paths(task)), None)
+    return json.dumps(
+        {
+            "task_id": task_id,
+            "session_id": task["session_id"],
+            "directory": task_directory(task),
+            "started_at": task.get("started_at"),
+            "exit_code": task.get("returncode"),
+            "result": task.get("result"),
+            "transcript_path": None if transcript_path is None else str(transcript_path),
+        }
+    )
+
+
+def gate_stop_reason(task_id: str, task: dict[str, Any]) -> str | None:
+    # A file, not a pipe: a background process the gate starts can hold stderr open after it exits.
+    with tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as stderr_file:
+        try:
+            gate_process = subprocess.Popen(
+                ["/bin/sh", "-c", task["gate"]],
+                cwd=task_directory(task),
+                env=task_environment(task),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=stderr_file,
+                encoding="utf-8",
+                errors="replace",
+                process_group=0,
+            )
+        except OSError as error:
+            return str(error)
+        with gate_process:
+            try:
+                gate_process.communicate(
+                    gate_input_json(task_id, task), timeout=GATE_TIMEOUT_SECONDS
+                )
+            except subprocess.TimeoutExpired:
+                return f"gate timed out after {GATE_TIMEOUT_SECONDS}s"
+            finally:
+                # Unreaped, so the group ID is still ours; macOS fails with EPERM once only zombies remain.
+                if gate_process.returncode is None:
+                    with suppress(OSError):
+                        os.killpg(gate_process.pid, signal.SIGKILL)
+        if gate_process.returncode == 0:
+            return None
+        stderr_file.seek(0)
+        return stderr_file.read().strip() or f"gate exited with status {gate_process.returncode}"
+
+
+def is_gate_pending(tasks: dict[str, Any], task_id: str) -> bool:
+    stored_task = tasks.get(task_id)
+    if not isinstance(stored_task, dict):
+        return False
+    task = cast("dict[str, Any]", stored_task)
+    return (
+        task.get("status") == STATUS_NEEDS_REVIEW
+        and "gate" in task
+        and "gate_reason" not in task
+        and bool(waiting_dependent_ids(tasks, task_id))
+    )
+
+
+def acquire_task_directory_lock(task: dict[str, Any]) -> io.TextIOWrapper | None:
+    return acquire_lock(directory_lock_path(directory_to_lock(task, task.get("worktree"))))
+
+
+def run_pending_gate(task_id: str) -> None:
+    tasks = load_tasks()
+    if not is_gate_pending(tasks, task_id):
+        return
+    stop_reason = gate_stop_reason(task_id, cast("dict[str, Any]", tasks[task_id]))
+    if stop_reason is None:
+        return
+    with locked_tasks() as locked_tasks_by_id:
+        current_task = locked_tasks_by_id.get(task_id)
+        if not isinstance(current_task, dict):
+            return
+        current = cast("dict[str, Any]", current_task)
+        if current.get("status") in SUCCEEDED_STATUSES:
+            current["gate_reason"] = stop_reason
+
+
+def continue_task(task_id: str, *, is_forced: bool) -> int:
+    task = existing_task(load_tasks(), task_id)
+    if "gate_reason" not in task:
+        raise SystemExit(f"golem: task is not stopped at a gate: {task_id}")
+    if not is_forced:
+        directory_lock_file = acquire_task_directory_lock(task)
+        if directory_lock_file is None:
+            raise SystemExit(f"golem: directory is busy: {task_id}")
+        try:
+            stop_reason = gate_stop_reason(task_id, task)
+        finally:
+            release_lock(directory_lock_file)
+        if stop_reason is not None:
+            with locked_tasks() as tasks:
+                stopped_task = existing_task(tasks, task_id)
+                if "gate_reason" in stopped_task:
+                    stopped_task["gate_reason"] = stop_reason
+            print(stop_reason, file=sys.stderr)
+            return 1
+    with locked_tasks() as tasks:
+        task = existing_task(tasks, task_id)
+        task.pop("gate_reason", None)
+        task["status"] = STATUS_DONE
+    start_task_executor(task_id, task)
+    return 0
+
+
 def execute_claimed_task(
     task_id: str,
     task: dict[str, Any],
@@ -1846,6 +1978,7 @@ def execute_claimed_task(
                 task,
                 (run_lock_file.fileno(), directory_lock_file.fileno()),
             )
+            run_pending_gate(task_id)
         finally:
             release_lock(directory_lock_file)
         drain_dependents(task_id, task["session_id"])
@@ -1862,12 +1995,28 @@ def execute_scheduled_task(task_id: str, session_id: str) -> int:
     return execute_claimed_task(task_id, *claim)
 
 
+def run_pending_gate_under_directory_lock(task_id: str) -> bool:
+    tasks = load_tasks()
+    if not is_gate_pending(tasks, task_id):
+        return True
+    directory_lock_file = acquire_task_directory_lock(cast("dict[str, Any]", tasks[task_id]))
+    if directory_lock_file is None:
+        return False
+    try:
+        run_pending_gate(task_id)
+    finally:
+        release_lock(directory_lock_file)
+    return True
+
+
 def drain_succeeded_task(task_id: str, session_id: str) -> None:
     with locked_tasks():
         run_lock_file = acquire_run_lock(session_id)
     if run_lock_file is None:
         return
     try:
+        if not run_pending_gate_under_directory_lock(task_id):
+            return
         drain_dependents(task_id, session_id)
     finally:
         release_run_lock(run_lock_file, session_id)
@@ -2169,7 +2318,7 @@ def run_launch_agent_pass() -> list[subprocess.Popen[bytes]]:
                 and datetime.fromisoformat(task["due_at"]) <= now
                 and not is_known_directory_busy(tasks, task)
             ) or (
-                task["status"] in SUCCEEDED_STATUSES
+                can_start_dependents(task)
                 and (dependent_ids := waiting_dependent_ids(tasks, task_id))
                 and not has_running_dependent(tasks, task_id)
                 and not is_known_directory_busy(tasks, tasks[dependent_ids[0]])
@@ -2187,7 +2336,7 @@ def has_pending_tasks(tasks: dict[str, Any]) -> bool:
         task["status"] in {STATUS_SCHEDULED, STATUS_RUNNING}
         or (
             task["status"] == STATUS_WAITING
-            and tasks.get(task.get("after", ""), {}).get("status") in SUCCEEDED_STATUSES
+            and can_start_dependents(tasks.get(task.get("after", ""), {}))
         )
         for task in tasks.values()
     )
@@ -2690,6 +2839,7 @@ def retry_task(task_id: str, *, is_now: bool, at_text: str | None) -> int:
             "worktree_pending",
             "auto_pickup",
             "no_worktree",
+            "gate",
         ):
             if name in task:
                 record[name] = task[name]
@@ -2782,6 +2932,8 @@ def schedule_run_task(
 def run_task_from_arguments(arguments: argparse.Namespace) -> int:
     if arguments.auto_pickup and arguments.backend == BACKEND_CODEX:
         raise SystemExit("golem: --auto-pickup does not support Codex tasks")
+    if arguments.gate is not None and arguments.backend == BACKEND_CODEX:
+        raise SystemExit("golem: --gate does not support Codex tasks")
     require_launch_agent()
     prompt_text = (
         Path(arguments.file).read_text(encoding="utf-8") if arguments.file else arguments.prompt
@@ -2791,6 +2943,7 @@ def run_task_from_arguments(arguments: argparse.Namespace) -> int:
         str(Path.cwd()),
         is_auto_pickup=arguments.auto_pickup,
         is_no_worktree=arguments.no_worktree,
+        gate=arguments.gate,
     )
     has_worktree_argument = has_agent_argument(list(task_args), WORKTREE_ARGUMENTS)
     parent = (
@@ -2847,6 +3000,17 @@ def add_prune_command(add_parser: Callable[..., argparse.ArgumentParser]) -> Non
     set_command_handler(prune_command, lambda arguments: prune_tasks(is_confirmed=arguments.yes))
 
 
+def add_continue_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
+    continue_command = add_parser(
+        "continue", description="Re-run a stopped task's gate and start its follow-ups."
+    )
+    continue_command.add_argument("id")
+    continue_command.add_argument("--force", action="store_true", help="skip the gate")
+    set_command_handler(
+        continue_command, lambda arguments: continue_task(arguments.id, is_forced=arguments.force)
+    )
+
+
 def list_aliases(command_parsers: dict[str, argparse.ArgumentParser]) -> int:
     aliases = load_aliases()
     if not aliases:
@@ -2889,6 +3053,14 @@ def add_run_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
         action="store_true",
         help="run in the task directory instead of a new worktree; follow-ups get it too",
     )
+    run_command.add_argument(
+        "--gate",
+        metavar="CMD",
+        help=(
+            "shell command run after the task succeeds with a waiting follow-up; "
+            "a non-zero exit stops the chain; follow-ups get it too"
+        ),
+    )
     run_schedule_group = run_command.add_mutually_exclusive_group()
     add_scheduling_arguments(run_schedule_group.add_argument)
     run_schedule_group.add_argument("--after", metavar="PARENT", help="run after PARENT succeeds")
@@ -2924,6 +3096,7 @@ def build_parser() -> tuple[argparse.ArgumentParser, dict[str, argparse.Argument
     close_command = commands.add_parser("close")
     close_command.add_argument("id")
     set_command_handler(close_command, lambda arguments: close(arguments.id))
+    add_continue_command(commands.add_parser)
     show_command = commands.add_parser("show")
     show_command.add_argument("id")
     set_command_handler(show_command, lambda arguments: show_task_result(arguments.id))
