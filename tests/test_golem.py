@@ -2096,15 +2096,23 @@ def test_hooks_are_seeded_when_chain_stops_and_removed_when_it_ends(
     assert stat.S_IMODE(settings_file().stat().st_mode) == USER_SETTINGS_MODE
 
 
-def test_hook_settings_that_are_not_json_are_left_alone(
-    installed_launch_agent, fake_commands, ledger_path, tmp_path, capsys
+@pytest.mark.parametrize("is_symlink", [False, True], ids=["not-json", "symlink"])
+def test_unusable_hook_settings_are_left_alone(
+    installed_launch_agent, fake_commands, ledger_path, tmp_path, capsys, is_symlink
 ):
     settings_file().parent.mkdir()
-    settings_file().write_text("{not json", encoding="utf-8")
+    if is_symlink:
+        shared_settings_path = tmp_path / "shared-settings.json"
+        shared_settings_path.write_text("{}", encoding="utf-8")
+        settings_file().symlink_to(shared_settings_path)
+    else:
+        settings_file().write_text("{not json", encoding="utf-8")
+    original_text = settings_file().read_text(encoding="utf-8")
     write_claude_output(fake_commands, CLAUDE_RESULT)
     run_gated_chain(ledger_path, gate_command(tmp_path, exit_code=1, stderr=GATE_REASON))
 
-    assert settings_file().read_text(encoding="utf-8") == "{not json"
+    assert settings_file().is_symlink() == is_symlink
+    assert settings_file().read_text(encoding="utf-8") == original_text
     assert "hooks not installed" in capsys.readouterr().err
 
 
@@ -2114,7 +2122,8 @@ def write_settings(settings):
 
 
 def test_install_hooks_replaces_stale_golem_command():
-    stale_entry = {"type": "command", "command": "/old/python /old/golem.py _hook stop"}
+    stale_command = f"/old/python /old/golem.py _hook stop{golem.HOOK_FAILURE_SUFFIX}"
+    stale_entry = {"type": "command", "command": stale_command}
     write_settings({"hooks": {"Stop": [{"hooks": [stale_entry]}]}})
 
     golem.install_hooks(str(Path.cwd()))
@@ -2136,19 +2145,20 @@ def test_remove_hooks_keeps_user_entry_sharing_a_group():
 
 
 @pytest.mark.parametrize(
-    ("child_status", "is_needed"),
+    ("parent_status", "child_status", "is_needed"),
     [
-        (golem.STATUS_RUNNING, True),
-        (golem.STATUS_SCHEDULED, True),
-        (golem.STATUS_NEEDS_REVIEW, False),
+        (golem.STATUS_DONE, golem.STATUS_RUNNING, True),
+        (golem.STATUS_DONE, golem.STATUS_SCHEDULED, True),
+        (golem.STATUS_DONE, golem.STATUS_NEEDS_REVIEW, False),
+        (golem.STATUS_FAILED, golem.STATUS_WAITING, False),
     ],
-    ids=["follow-up-running", "follow-up-paused", "follow-up-finished"],
+    ids=["follow-up-running", "follow-up-paused", "follow-up-finished", "parent-failed"],
 )
-def test_hooks_stay_until_follow_up_finishes(ledger_path, child_status, is_needed):
+def test_hooks_stay_until_follow_up_finishes(ledger_path, parent_status, child_status, is_needed):
     write_tasks(
         ledger_path,
         {
-            PARENT_ID: task_record(golem.STATUS_DONE, task_id=PARENT_ID, gate="true"),
+            PARENT_ID: task_record(parent_status, task_id=PARENT_ID, gate="true"),
             CHILD_ID: task_record(child_status, task_id=CHILD_ID, after=PARENT_ID),
         },
     )
@@ -2158,16 +2168,37 @@ def test_hooks_stay_until_follow_up_finishes(ledger_path, child_status, is_neede
     assert settings_file().exists() == is_needed
 
 
-def test_follow_up_queued_after_stopped_task_seeds_hooks(
-    installed_launch_agent, fake_commands, ledger_path, tmp_path
+@pytest.mark.parametrize(
+    "requeue_arguments",
+    [["run", GRANDCHILD_ID, CHILD_PROMPT, "--after", PARENT_ID], ["retry", CHILD_ID, "--now"]],
+    ids=["run-after", "retry"],
+)
+def test_follow_up_requeued_after_stopped_task_seeds_hooks(
+    installed_launch_agent, fake_commands, ledger_path, tmp_path, requeue_arguments
 ):
     stop_gated_chain(ledger_path, fake_commands, tmp_path, None)
     assert golem.main(["cancel", CHILD_ID]) == 0
     assert not settings_file().exists()
 
-    assert golem.main(["run", GRANDCHILD_ID, CHILD_PROMPT, "--after", PARENT_ID]) == 0
+    assert golem.main(requeue_arguments) == 0
 
     assert settings_file().exists()
+
+
+def test_launch_agent_pass_removes_hooks_of_abandoned_follow_up(ledger_path):
+    write_tasks(
+        ledger_path,
+        {
+            PARENT_ID: task_record(golem.STATUS_DONE, task_id=PARENT_ID, gate="true"),
+            CHILD_ID: task_record(golem.STATUS_RUNNING, task_id=CHILD_ID, after=PARENT_ID),
+        },
+    )
+    golem.sync_hooks(str(Path.cwd()))
+    assert settings_file().exists()
+
+    golem.run_launch_agent_pass()
+
+    assert not settings_file().exists()
 
 
 def test_ungated_chain_gets_no_hooks(installed_launch_agent, fake_commands, ledger_path):
@@ -2322,6 +2353,20 @@ def test_hook_commands_run_without_path_or_state_environment(ledger_path):
     )
 
     assert json.loads(result.stdout)["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_hook_command_does_not_block_claude_when_golem_is_missing(monkeypatch):
+    monkeypatch.setattr(golem, "golem_command", lambda: [sys.executable, "/missing/golem.py"])
+
+    result = golem.subprocess.run(
+        ["/bin/sh", "-c", golem.hook_command_line(golem.HOOK_ARGUMENT_PRE_TOOL_USE)],
+        input="",
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 2
 
 
 def test_after_parent_with_pending_gate_waits_for_the_gate(

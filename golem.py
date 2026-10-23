@@ -124,7 +124,11 @@ HOOK_EVENT_ARGUMENTS = {
     HOOK_EVENT_STOP: HOOK_ARGUMENT_STOP,
     HOOK_EVENT_PRE_TOOL_USE: HOOK_ARGUMENT_PRE_TOOL_USE,
 }
-HOOK_COMMAND_SUFFIXES = tuple(f" _hook {argument}" for argument in HOOK_EVENT_ARGUMENTS.values())
+# Claude Code treats exit status 2 as blocking, which a missing golem.py would return.
+HOOK_FAILURE_SUFFIX = " || exit 1"
+HOOK_COMMAND_SUFFIXES = tuple(
+    f" _hook {argument}{HOOK_FAILURE_SUFFIX}" for argument in HOOK_EVENT_ARGUMENTS.values()
+)
 HOOK_TOOL_MATCHER = "Edit|Write|MultiEdit|NotebookEdit|Bash"
 PULL_REQUEST_STATE_OPEN = "OPEN"
 PRUNE_ANSWER_YES = "y"
@@ -2015,7 +2019,8 @@ def release_gate_stop(task_id: str, *, stderr: int | None = None) -> bool:
 
 def hook_command_line(argument: str) -> str:
     state_home = shlex.quote(str(state_directory().parent))
-    return f"XDG_STATE_HOME={state_home} {shlex.join([*golem_command(), '_hook', argument])}"
+    command = shlex.join([*golem_command(), "_hook", argument])
+    return f"XDG_STATE_HOME={state_home} {command}{HOOK_FAILURE_SUFFIX}"
 
 
 def hook_group(event: str) -> dict[str, Any]:
@@ -2053,6 +2058,8 @@ def save_local_settings(path: Path, settings: dict[str, Any]) -> None:
 
 
 def read_local_settings(path: Path) -> dict[str, Any] | None:
+    if path.is_symlink():
+        return None
     try:
         loaded_settings = cast("object", load_json(path))
     except ValueError, OSError:
@@ -2214,8 +2221,9 @@ def hook_stop() -> int:
         release_lock(directory_lock_file)
     if stop_reason is not None:
         return 0
-    if not release_gate_stop(task_id, stderr=subprocess.DEVNULL):
-        return 0
+    with agent_log_path().open("a", encoding="utf-8") as log_file:
+        if not release_gate_stop(task_id, stderr=log_file.fileno()):
+            return 0
     print(json.dumps({"systemMessage": f"golem: continuing chain with {next_ids[0]}"}))
     return 0
 
@@ -2231,7 +2239,7 @@ def hook_pre_tool_use() -> int:
     reason = f"golem is running {running_ids[0]}; wait for it to finish"
     output = {
         "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
+            "hookEventName": HOOK_EVENT_PRE_TOOL_USE,
             "permissionDecision": "deny",
             "permissionDecisionReason": reason,
         }
@@ -3136,6 +3144,9 @@ def retry_task(task_id: str, *, is_now: bool, at_text: str | None) -> int:
                 record[name] = task[name]
         tasks[task_id] = record
         clear_worktree_release(tasks, worktrees, record)
+        directories = hook_affected_directories(tasks, record)
+    for directory in directories:
+        sync_hooks(directory)
     return wake_launch_agent_and_report(task_id, when)
 
 
