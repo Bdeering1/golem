@@ -1938,21 +1938,7 @@ def test_gate_is_refused_for_codex_without_changing_ledger(ledger_path):
     assert read_tasks(ledger_path) == tasks
 
 
-def test_pickup_all_opens_stopped_task_and_keeps_chain_stopped(fake_commands, ledger_path):
-    tasks = write_stopped_chain(ledger_path)
-
-    assert golem.main(["pickup", "--all", "--app"]) == 0
-
-    assert fake_commands["open-args"].read_text(encoding="utf-8") == (
-        f"claude://resume?session={tasks[PARENT_ID]['session_id']}\n"
-    )
-    parent = read_task(ledger_path, PARENT_ID)
-    assert parent["status"] == golem.STATUS_DONE
-    assert parent["gate_reason"] == GATE_REASON
-    assert golem.run_launch_agent_pass() == []
-
-
-def test_auto_pickup_opens_stopped_task(
+def test_auto_pickup_opens_stopped_task_and_keeps_chain_stopped(
     installed_launch_agent, fake_commands, ledger_path, tmp_path
 ):
     parent = run_gated_chain(
@@ -1962,7 +1948,9 @@ def test_auto_pickup_opens_stopped_task(
     assert fake_commands["open-args"].read_text(encoding="utf-8") == (
         f"claude://resume?session={parent['session_id']}\n"
     )
+    assert read_task(ledger_path, PARENT_ID)["gate_reason"] == GATE_REASON
     assert read_task(ledger_path, CHILD_ID)["status"] == golem.STATUS_WAITING
+    assert golem.run_launch_agent_pass() == []
 
 
 @pytest.fixture
