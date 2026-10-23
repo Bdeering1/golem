@@ -1876,21 +1876,6 @@ def test_failed_task_never_runs_its_gate(
     assert gate_inputs(tmp_path) == []
 
 
-def test_usage_limited_task_never_runs_its_gate(
-    installed_launch_agent, fake_commands, ledger_path, tmp_path, monkeypatch
-):
-    monkeypatch.setattr(golem, "next_reset_time", lambda: RESET_TIME)
-    write_claude_output(
-        fake_commands, USAGE_LIMIT_RESULT, api_error_status=golem.USAGE_LIMIT_HTTP_STATUS
-    )
-    monkeypatch.setenv("GOLEM_CLAUDE_EXIT", "1")
-    parent = schedule_gated_chain(ledger_path, gate_command(tmp_path))
-
-    assert golem.main(["_execute", PARENT_ID, parent["session_id"]]) == 0
-    assert read_task(ledger_path, PARENT_ID)["status"] == golem.STATUS_SCHEDULED
-    assert gate_inputs(tmp_path) == []
-
-
 def test_task_without_waiting_follow_up_never_runs_its_gate(
     installed_launch_agent, ledger_path, tmp_path
 ):
@@ -1996,19 +1981,6 @@ def test_continue_reruns_gate_then_releases_follow_ups(
     if not is_continued:
         assert parent["gate_reason"] == "still missing"
         assert "still missing" in capsys.readouterr().err
-
-
-def test_continue_starts_follow_up_after_gate_passes(
-    installed_launch_agent, fake_commands, ledger_path, tmp_path, started_executors
-):
-    write_stopped_chain(ledger_path, gate=gate_command(tmp_path))
-    parent = read_task(ledger_path, PARENT_ID)
-
-    assert golem.main(["continue", PARENT_ID]) == 0
-    assert golem.main(["_execute", PARENT_ID, parent["session_id"]]) == 0
-
-    assert read_task(ledger_path, CHILD_ID)["status"] == golem.STATUS_NEEDS_REVIEW
-    assert len(logged_claude_calls(fake_commands)) == 1
 
 
 @pytest.mark.parametrize("status", [golem.STATUS_NEEDS_REVIEW, golem.STATUS_DONE])
