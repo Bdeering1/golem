@@ -9,6 +9,7 @@ import re
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -113,6 +114,22 @@ CLAUDE_LOCK_PATTERN = re.compile(r"claude session (\S+) \(pid (\d+) start .+\)")
 PRUNE_IDLE_DAYS = 7
 PULL_REQUEST_TIMEOUT_SECONDS = 30
 GATE_TIMEOUT_SECONDS = 300
+HOOK_GATE_TIMEOUT_SECONDS = 20
+HOOK_STOP_TIMEOUT_SECONDS = 30
+HOOK_ARGUMENT_STOP = "stop"
+HOOK_ARGUMENT_PRE_TOOL_USE = "pre-tool-use"
+HOOK_EVENT_STOP = "Stop"
+HOOK_EVENT_PRE_TOOL_USE = "PreToolUse"
+HOOK_EVENT_ARGUMENTS = {
+    HOOK_EVENT_STOP: HOOK_ARGUMENT_STOP,
+    HOOK_EVENT_PRE_TOOL_USE: HOOK_ARGUMENT_PRE_TOOL_USE,
+}
+# Claude Code treats exit status 2 as blocking, which a missing golem.py would return.
+HOOK_FAILURE_SUFFIX = " || exit 1"
+HOOK_COMMAND_SUFFIXES = tuple(
+    f" _hook {argument}{HOOK_FAILURE_SUFFIX}" for argument in HOOK_EVENT_ARGUMENTS.values()
+)
+HOOK_TOOL_MATCHER = "Edit|Write|MultiEdit|NotebookEdit|Bash"
 PULL_REQUEST_STATE_OPEN = "OPEN"
 PRUNE_ANSWER_YES = "y"
 PRUNE_ANSWER_NO = "n"
@@ -361,6 +378,19 @@ def dependent_task_ids(tasks: dict[str, Any], parent_id: str) -> list[str]:
         if isinstance(dependent, dict)
         and cast("dict[str, Any]", dependent).get("after") == parent_id
     )
+
+
+def descendant_ids_with_status(
+    tasks: dict[str, Any], task_id: str, statuses: set[str]
+) -> list[str]:
+    matching_ids: list[str] = []
+    pending_ids = [task_id]
+    while pending_ids:
+        for dependent_id in dependent_task_ids(tasks, pending_ids.pop()):
+            pending_ids.append(dependent_id)
+            if tasks[dependent_id]["status"] in statuses:
+                matching_ids.append(dependent_id)
+    return matching_ids
 
 
 def has_running_dependent(tasks: dict[str, Any], parent_id: str) -> bool:
@@ -1226,6 +1256,9 @@ def cancel_task(task_id: str) -> int:
                 waiting_task = cast("dict[str, Any]", tasks[waiting_task_id])
                 waiting_task["status"] = STATUS_CANCELLED
                 pending_task_ids.append(waiting_task_id)
+        directories = hook_affected_directories(tasks, task)
+    for directory in directories:
+        sync_hooks(directory)
     return 0
 
 
@@ -1810,6 +1843,9 @@ def drain_dependents(task_id: str, session_id: str) -> None:
     while next_dependent := claim_next_dependent(task_id, session_id):
         execute_claimed_task(*next_dependent)
     auto_pickup_task(task_id)
+    drained_task = load_tasks().get(task_id)
+    if isinstance(drained_task, dict):
+        sync_hooks(task_directory(cast("dict[str, Any]", drained_task)))
 
 
 def execute_task(task_id: str, task: dict[str, Any], lock_file_descriptors: tuple[int, ...]) -> int:
@@ -1870,7 +1906,11 @@ def gate_input_json(task_id: str, task: dict[str, Any]) -> str:
     )
 
 
-def gate_stop_reason(task_id: str, task: dict[str, Any]) -> str | None:
+def gate_stop_reason(
+    task_id: str, task: dict[str, Any], timeout_seconds: int | None = None
+) -> str | None:
+    if timeout_seconds is None:
+        timeout_seconds = GATE_TIMEOUT_SECONDS
     # A file, not a pipe: a background process the gate starts can hold stderr open after it exits.
     with tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as stderr_file:
         try:
@@ -1889,11 +1929,9 @@ def gate_stop_reason(task_id: str, task: dict[str, Any]) -> str | None:
             return str(error)
         with gate_process:
             try:
-                gate_process.communicate(
-                    gate_input_json(task_id, task), timeout=GATE_TIMEOUT_SECONDS
-                )
+                gate_process.communicate(gate_input_json(task_id, task), timeout=timeout_seconds)
             except subprocess.TimeoutExpired:
-                return f"gate timed out after {GATE_TIMEOUT_SECONDS}s"
+                return f"gate timed out after {timeout_seconds}s"
             finally:
                 # Unreaped, so the group ID is still ours; macOS fails with EPERM once only zombies remain.
                 if gate_process.returncode is None:
@@ -1934,8 +1972,11 @@ def run_pending_gate(task_id: str) -> None:
         if not isinstance(current_task, dict):
             return
         current = cast("dict[str, Any]", current_task)
-        if current.get("status") in SUCCEEDED_STATUSES:
-            current["gate_reason"] = stop_reason
+        if current.get("status") not in SUCCEEDED_STATUSES:
+            return
+        current["gate_reason"] = stop_reason
+        directory = task_directory(current)
+    sync_hooks(directory)
 
 
 def continue_task(task_id: str, *, is_forced: bool) -> int:
@@ -1957,11 +1998,253 @@ def continue_task(task_id: str, *, is_forced: bool) -> int:
                     stopped_task["gate_reason"] = stop_reason
             print(stop_reason, file=sys.stderr)
             return 1
+    if not release_gate_stop(task_id):
+        raise SystemExit(f"golem: task is not stopped at a gate: {task_id}")
+    return 0
+
+
+def release_gate_stop(task_id: str, *, stderr: int | None = None) -> bool:
     with locked_tasks() as tasks:
-        task = existing_task(tasks, task_id)
-        task.pop("gate_reason", None)
+        stored_task = tasks.get(task_id)
+        if not isinstance(stored_task, dict):
+            return False
+        task = cast("dict[str, Any]", stored_task)
+        if "gate_reason" not in task:
+            return False
+        del task["gate_reason"]
         task["status"] = STATUS_DONE
-    start_task_executor(task_id, task)
+    start_task_executor(task_id, task, stderr=stderr)
+    return True
+
+
+def hook_command_line(argument: str) -> str:
+    state_home = shlex.quote(str(state_directory().parent))
+    command = shlex.join([*golem_command(), "_hook", argument])
+    return f"XDG_STATE_HOME={state_home} {command}{HOOK_FAILURE_SUFFIX}"
+
+
+def hook_group(event: str) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "type": "command",
+        "command": hook_command_line(HOOK_EVENT_ARGUMENTS[event]),
+    }
+    if event == HOOK_EVENT_STOP:
+        entry["timeout"] = HOOK_STOP_TIMEOUT_SECONDS
+        return {"hooks": [entry]}
+    return {"matcher": HOOK_TOOL_MATCHER, "hooks": [entry]}
+
+
+def group_entries(group: object) -> list[object]:
+    entries = cast("dict[str, Any]", group).get("hooks") if isinstance(group, dict) else None
+    return cast("list[object]", entries) if isinstance(entries, list) else []
+
+
+def is_golem_hook_entry(entry: object) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    command = cast("dict[str, Any]", entry).get("command")
+    return isinstance(command, str) and command.endswith(HOOK_COMMAND_SUFFIXES)
+
+
+def local_settings_path(directory: str) -> Path:
+    return Path(directory) / ".claude" / "settings.local.json"
+
+
+def save_local_settings(path: Path, settings: dict[str, Any]) -> None:
+    mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else None
+    save_json(path, settings)
+    if mode is not None:
+        path.chmod(mode)
+
+
+def read_local_settings(path: Path) -> dict[str, Any] | None:
+    if path.is_symlink():
+        return None
+    try:
+        loaded_settings = cast("object", load_json(path))
+    except ValueError, OSError:
+        return None
+    if not isinstance(loaded_settings, dict):
+        return None
+    settings = cast("dict[str, Any]", loaded_settings)
+    hooks = settings.get("hooks", {})
+    if not isinstance(hooks, dict):
+        return None
+    hooks_by_event = cast("dict[str, Any]", hooks)
+    if not all(isinstance(hooks_by_event.get(event, []), list) for event in HOOK_EVENT_ARGUMENTS):
+        return None
+    return settings
+
+
+def groups_without_golem_entries(groups: list[object]) -> list[object]:
+    kept_groups: list[object] = []
+    for group in groups:
+        entries = group_entries(group)
+        kept_entries = [entry for entry in entries if not is_golem_hook_entry(entry)]
+        if len(kept_entries) == len(entries):
+            kept_groups.append(group)
+        elif kept_entries:
+            kept_groups.append({**cast("dict[str, Any]", group), "hooks": kept_entries})
+    return kept_groups
+
+
+def install_hooks(directory: str) -> None:
+    if not Path(directory).is_dir():
+        return
+    path = local_settings_path(directory)
+    settings = read_local_settings(path)
+    if settings is None:
+        print(f"golem: hooks not installed: {path} is not usable settings", file=sys.stderr)
+        return
+    hooks = settings.setdefault("hooks", {})
+    is_changed = False
+    for event in HOOK_EVENT_ARGUMENTS:
+        groups = hooks.get(event, [])
+        current_group = hook_group(event)
+        current_entry = current_group["hooks"][0]
+        if any(entry == current_entry for group in groups for entry in group_entries(group)):
+            continue
+        hooks[event] = [*groups_without_golem_entries(groups), current_group]
+        is_changed = True
+    if not is_changed:
+        return
+    try:
+        path.parent.mkdir(exist_ok=True)
+        save_local_settings(path, settings)
+    except OSError as error:
+        print(f"golem: hooks not installed: {error}", file=sys.stderr)
+
+
+def remove_hooks(directory: str) -> None:
+    path = local_settings_path(directory)
+    if not path.exists():
+        return
+    settings = read_local_settings(path)
+    if settings is None:
+        return
+    hooks = settings.get("hooks", {})
+    is_changed = False
+    for event in HOOK_EVENT_ARGUMENTS:
+        groups = hooks.get(event, [])
+        kept_groups = groups_without_golem_entries(groups)
+        if kept_groups == groups:
+            continue
+        is_changed = True
+        if kept_groups:
+            hooks[event] = kept_groups
+        else:
+            del hooks[event]
+    if not is_changed:
+        return
+    if not hooks:
+        del settings["hooks"]
+    try:
+        if settings:
+            save_local_settings(path, settings)
+            return
+        path.unlink()
+    except OSError as error:
+        print(f"golem: hooks not removed: {error}", file=sys.stderr)
+        return
+    with suppress(OSError):
+        path.parent.rmdir()
+
+
+def has_pending_follow_up(tasks: dict[str, Any], task_id: str) -> bool:
+    return bool(
+        waiting_dependent_ids(tasks, task_id)
+        or descendant_ids_with_status(tasks, task_id, {STATUS_SCHEDULED, STATUS_RUNNING})
+    )
+
+
+def is_hook_needed(tasks: dict[str, Any], directory: str) -> bool:
+    return any(
+        "gate" in task
+        and task["status"] in SUCCEEDED_STATUSES
+        and task_directory(task) == directory
+        and has_pending_follow_up(tasks, task_id)
+        for task_id, task in tasks.items()
+    )
+
+
+def hook_affected_directories(tasks: dict[str, Any], task: dict[str, Any]) -> set[str]:
+    directories = {task_directory(task)}
+    parent = tasks.get(task.get("after", ""))
+    if isinstance(parent, dict):
+        directories.add(task_directory(cast("dict[str, Any]", parent)))
+    return directories
+
+
+def sync_hooks(directory: str) -> None:
+    with locked_tasks() as tasks:
+        if is_hook_needed(tasks, directory):
+            install_hooks(directory)
+        else:
+            remove_hooks(directory)
+
+
+def read_hook_session_id() -> str | None:
+    try:
+        payload = json.load(sys.stdin)
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    session_id = cast("dict[str, Any]", payload).get("session_id")
+    return session_id if isinstance(session_id, str) and session_id else None
+
+
+def session_task_id(tasks: dict[str, Any], session_id: str | None) -> str | None:
+    if session_id is None:
+        return None
+    return next(
+        (task_id for task_id, task in tasks.items() if task.get("session_id") == session_id),
+        None,
+    )
+
+
+def hook_stop() -> int:
+    tasks = load_tasks()
+    task_id = session_task_id(tasks, read_hook_session_id())
+    if task_id is None:
+        return 0
+    task = cast("dict[str, Any]", tasks[task_id])
+    next_ids = waiting_dependent_ids(tasks, task_id)
+    if "gate_reason" not in task or not next_ids:
+        return 0
+    directory_lock_file = acquire_task_directory_lock(task)
+    if directory_lock_file is None:
+        return 0
+    try:
+        stop_reason = gate_stop_reason(task_id, task, HOOK_GATE_TIMEOUT_SECONDS)
+    finally:
+        release_lock(directory_lock_file)
+    if stop_reason is not None:
+        return 0
+    with agent_log_path().open("a", encoding="utf-8") as log_file:
+        if not release_gate_stop(task_id, stderr=log_file.fileno()):
+            return 0
+    print(json.dumps({"systemMessage": f"golem: continuing chain with {next_ids[0]}"}))
+    return 0
+
+
+def hook_pre_tool_use() -> int:
+    tasks = load_tasks()
+    task_id = session_task_id(tasks, read_hook_session_id())
+    if task_id is None:
+        return 0
+    running_ids = descendant_ids_with_status(tasks, task_id, {STATUS_RUNNING})
+    if not running_ids:
+        return 0
+    reason = f"golem is running {running_ids[0]}; wait for it to finish"
+    output = {
+        "hookSpecificOutput": {
+            "hookEventName": HOOK_EVENT_PRE_TOOL_USE,
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    }
+    print(json.dumps(output))
     return 0
 
 
@@ -2030,13 +2313,16 @@ def execute_or_drain_task(task_id: str, session_id: str) -> int:
     return 0
 
 
-def start_task_executor(task_id: str, task: dict[str, Any]) -> subprocess.Popen[bytes]:
+def start_task_executor(
+    task_id: str, task: dict[str, Any], *, stderr: int | None = None
+) -> subprocess.Popen[bytes]:
     return subprocess.Popen(
         [*golem_command(), "_execute", task_id, task["session_id"]],
         env=task_environment(task),
         start_new_session=True,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
+        stderr=stderr,
     )
 
 
@@ -2306,6 +2592,7 @@ def run_launch_agent_pass() -> list[subprocess.Popen[bytes]]:
     rotate_agent_log()
     now = datetime.now(UTC)
     due_tasks: list[tuple[str, dict[str, Any]]] = []
+    hook_directories: set[str] = set()
     with locked_tasks() as tasks:
         remove_orphan_run_locks()
         remove_interrupted_ledger_writes()
@@ -2313,6 +2600,7 @@ def run_launch_agent_pass() -> list[subprocess.Popen[bytes]]:
             if task["status"] == STATUS_RUNNING:
                 if is_run_lock_free(task["session_id"]):
                     task["status"] = STATUS_FAILED
+                    hook_directories |= hook_affected_directories(tasks, task)
             elif (
                 task["status"] == STATUS_SCHEDULED
                 and datetime.fromisoformat(task["due_at"]) <= now
@@ -2325,6 +2613,8 @@ def run_launch_agent_pass() -> list[subprocess.Popen[bytes]]:
                 and is_run_lock_free(task["session_id"])
             ):
                 due_tasks.append((task_id, task.copy()))
+    for directory in hook_directories:
+        sync_hooks(directory)
     processes: list[subprocess.Popen[bytes]] = []
     for task_id, task in due_tasks:
         processes.append(start_task_executor(task_id, task))
@@ -2516,6 +2806,7 @@ def remove_selected_worktrees(
 
 
 def delete_tasks(task_ids: list[str], *, is_chain: bool, is_removing_worktree: bool) -> int:
+    directories: set[str] = set()
     with locked_ledger() as (tasks, worktrees):
         selected_task_ids, messages = selected_delete_task_ids(tasks, task_ids, is_chain=is_chain)
         worktrees_by_task, check_messages = task_worktrees_and_refusals(
@@ -2523,19 +2814,27 @@ def delete_tasks(task_ids: list[str], *, is_chain: bool, is_removing_worktree: b
         )
         if messages or check_messages:
             raise SystemExit("\n".join([*messages, *check_messages]))
+        for task_id in selected_task_ids:
+            directories |= hook_affected_directories(tasks, tasks[task_id])
         removed_worktrees: set[str] | None = set()
         if is_removing_worktree:
+            # golem's own settings file would otherwise count as local changes.
+            for task_id in selected_task_ids:
+                remove_hooks(task_directory(tasks[task_id]))
             removed_worktrees = remove_selected_worktrees(tasks, worktrees, worktrees_by_task)
-            if removed_worktrees is None:
-                return 1
-        selected_tasks = [
-            (task_id, cast("dict[str, Any]", tasks[task_id])) for task_id in selected_task_ids
-        ]
-        delete_task_and_release_worktrees(tasks, worktrees, selected_task_ids)
-        for task_id, task in selected_tasks:
-            worktree = worktrees_by_task[task_id]
-            print_deleted_task(task_id, task, worktree, is_removed=worktree in removed_worktrees)
-    return 0
+        if removed_worktrees is not None:
+            selected_tasks = [
+                (task_id, cast("dict[str, Any]", tasks[task_id])) for task_id in selected_task_ids
+            ]
+            delete_task_and_release_worktrees(tasks, worktrees, selected_task_ids)
+            for task_id, task in selected_tasks:
+                worktree = worktrees_by_task[task_id]
+                print_deleted_task(
+                    task_id, task, worktree, is_removed=worktree in removed_worktrees
+                )
+    for directory in directories:
+        sync_hooks(directory)
+    return 0 if removed_worktrees is not None else 1
 
 
 def print_deleted_task(
@@ -2845,6 +3144,9 @@ def retry_task(task_id: str, *, is_now: bool, at_text: str | None) -> int:
                 record[name] = task[name]
         tasks[task_id] = record
         clear_worktree_release(tasks, worktrees, record)
+        directories = hook_affected_directories(tasks, record)
+    for directory in directories:
+        sync_hooks(directory)
     return wake_launch_agent_and_report(task_id, when)
 
 
@@ -2914,6 +3216,7 @@ def schedule_run_task(
         if reserve_dependent_task(
             {arguments.id: dependent_record, **follow_up_records}, arguments.after
         ):
+            sync_hooks(task_directory(existing_task(load_tasks(), arguments.after)))
             print(f"golem: {arguments.id} will run after {arguments.after}")
             return 0
     when = planned_execution_time(arguments.backend, is_now=arguments.now, at_text=arguments.at)
@@ -3008,6 +3311,17 @@ def add_continue_command(add_parser: Callable[..., argparse.ArgumentParser]) -> 
     continue_command.add_argument("--force", action="store_true", help="skip the gate")
     set_command_handler(
         continue_command, lambda arguments: continue_task(arguments.id, is_forced=arguments.force)
+    )
+
+
+def add_hook_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
+    hook_command = add_parser("_hook")
+    hook_command.add_argument("event", choices=tuple(HOOK_EVENT_ARGUMENTS.values()))
+    set_command_handler(
+        hook_command,
+        lambda arguments: (
+            hook_stop() if arguments.event == HOOK_ARGUMENT_STOP else hook_pre_tool_use()
+        ),
     )
 
 
@@ -3166,6 +3480,7 @@ def build_parser() -> tuple[argparse.ArgumentParser, dict[str, argparse.Argument
         execute_command,
         lambda arguments: execute_or_drain_task(arguments.id, arguments.session_id),
     )
+    add_hook_command(commands.add_parser)
     return parser, commands.choices
 
 
