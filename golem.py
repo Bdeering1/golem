@@ -2059,6 +2059,18 @@ def read_local_settings(path: Path) -> dict[str, Any] | None:
     return settings
 
 
+def groups_without_golem_entries(groups: list[object]) -> list[object]:
+    kept_groups: list[object] = []
+    for group in groups:
+        entries = group_entries(group)
+        kept_entries = [entry for entry in entries if not is_golem_hook_entry(entry)]
+        if len(kept_entries) == len(entries):
+            kept_groups.append(group)
+        elif kept_entries:
+            kept_groups.append({**cast("dict[str, Any]", group), "hooks": kept_entries})
+    return kept_groups
+
+
 def install_hooks(directory: str) -> None:
     if not Path(directory).is_dir():
         return
@@ -2070,10 +2082,12 @@ def install_hooks(directory: str) -> None:
     hooks = settings.setdefault("hooks", {})
     is_changed = False
     for event in HOOK_EVENT_ARGUMENTS:
-        groups = hooks.setdefault(event, [])
-        if any(is_golem_hook_entry(entry) for group in groups for entry in group_entries(group)):
+        groups = hooks.get(event, [])
+        current_group = hook_group(event)
+        current_entry = current_group["hooks"][0]
+        if any(entry == current_entry for group in groups for entry in group_entries(group)):
             continue
-        groups.append(hook_group(event))
+        hooks[event] = [*groups_without_golem_entries(groups), current_group]
         is_changed = True
     if not is_changed:
         return
@@ -2095,18 +2109,10 @@ def remove_hooks(directory: str) -> None:
     is_changed = False
     for event in HOOK_EVENT_ARGUMENTS:
         groups = hooks.get(event, [])
-        kept_groups: list[object] = []
-        for group in groups:
-            entries = group_entries(group)
-            kept_entries = [entry for entry in entries if not is_golem_hook_entry(entry)]
-            if len(kept_entries) == len(entries):
-                kept_groups.append(group)
-                continue
-            is_changed = True
-            if kept_entries:
-                kept_groups.append({**group, "hooks": kept_entries})
+        kept_groups = groups_without_golem_entries(groups)
         if kept_groups == groups:
             continue
+        is_changed = True
         if kept_groups:
             hooks[event] = kept_groups
         else:

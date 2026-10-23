@@ -2104,6 +2104,33 @@ def test_hook_settings_that_are_not_json_are_left_alone(
     assert "hooks not installed" in capsys.readouterr().err
 
 
+def write_settings(settings):
+    settings_file().parent.mkdir()
+    settings_file().write_text(json.dumps(settings), encoding="utf-8")
+
+
+def test_install_hooks_replaces_stale_golem_command():
+    stale_entry = {"type": "command", "command": "/old/python /old/golem.py _hook stop"}
+    write_settings({"hooks": {"Stop": [{"hooks": [stale_entry]}]}})
+
+    golem.install_hooks(str(Path.cwd()))
+
+    stop_groups = json.loads(settings_file().read_text(encoding="utf-8"))["hooks"]["Stop"]
+    assert stop_groups == [golem.hook_group(golem.HOOK_EVENT_STOP)]
+
+
+def test_remove_hooks_keeps_user_entry_sharing_a_group():
+    user_entry = {"type": "command", "command": "echo user-stop"}
+    golem_entry = golem.hook_group(golem.HOOK_EVENT_STOP)["hooks"][0]
+    write_settings({"hooks": {"Stop": [{"hooks": [user_entry, golem_entry]}]}})
+
+    golem.remove_hooks(str(Path.cwd()))
+
+    assert json.loads(settings_file().read_text(encoding="utf-8")) == {
+        "hooks": {"Stop": [{"hooks": [user_entry]}]}
+    }
+
+
 def test_ungated_chain_gets_no_hooks(installed_launch_agent, fake_commands, ledger_path):
     write_claude_output(fake_commands, CLAUDE_RESULT)
     golem.main(["run", PARENT_ID, PARENT_PROMPT, "--now", "--then", CHILD_ID, CHILD_PROMPT])
@@ -2133,18 +2160,34 @@ def test_stop_hook_continues_stopped_chain_when_gate_passes(
 
 
 @pytest.mark.parametrize(
-    ("session_id", "gate_exit_code"),
-    [("unknown-session", 0), (PARENT_SESSION, 1)],
-    ids=["unknown-session", "failing-gate"],
+    ("session_id", "gate_exit_code", "is_directory_busy"),
+    [("unknown-session", 0, False), (PARENT_SESSION, 1, False), (PARENT_SESSION, 0, True)],
+    ids=["unknown-session", "failing-gate", "busy-directory"],
 )
 def test_stop_hook_does_nothing(
-    ledger_path, tmp_path, started_executors, monkeypatch, capsys, session_id, gate_exit_code
+    ledger_path,
+    tmp_path,
+    started_executors,
+    monkeypatch,
+    capsys,
+    session_id,
+    gate_exit_code,
+    is_directory_busy,
 ):
     write_parent_with_waiting_child(
         ledger_path, gate=gate_command(tmp_path, exit_code=gate_exit_code), gate_reason=GATE_REASON
     )
+    directory_lock_file = (
+        golem.acquire_lock(golem.directory_lock_path(str(Path.cwd())))
+        if is_directory_busy
+        else None
+    )
 
-    assert run_hook(monkeypatch, capsys, golem.HOOK_ARGUMENT_STOP, session_id) == ""
+    try:
+        assert run_hook(monkeypatch, capsys, golem.HOOK_ARGUMENT_STOP, session_id) == ""
+    finally:
+        if directory_lock_file is not None:
+            golem.release_lock(directory_lock_file)
     assert read_task(ledger_path, PARENT_ID)["gate_reason"] == GATE_REASON
     assert started_executors == []
 
