@@ -1408,14 +1408,25 @@ def test_auto_pickup_waits_for_usage_limit_resume(
     )
 
 
+@pytest.mark.parametrize(
+    ("parent_status", "expected_open_args"),
+    [
+        pytest.param(
+            golem.STATUS_NEEDS_REVIEW,
+            f"claude://resume?session={PARENT_ID}-session\n",
+            id="unreviewed-parent",
+        ),
+        pytest.param(golem.STATUS_DONE, "", id="reviewed-parent"),
+    ],
+)
 def test_auto_pickup_opens_parent_when_resumed_follow_up_fails(
-    fake_commands, ledger_path, monkeypatch
+    fake_commands, ledger_path, monkeypatch, parent_status, expected_open_args
 ):
     monkeypatch.setenv("GOLEM_CLAUDE_EXIT", "1")
     write_tasks(
         ledger_path,
         {
-            PARENT_ID: task_record(golem.STATUS_NEEDS_REVIEW, task_id=PARENT_ID, auto_pickup=True),
+            PARENT_ID: task_record(parent_status, task_id=PARENT_ID, auto_pickup=True),
             TASK_ID: task_record(golem.STATUS_SCHEDULED, after=PARENT_ID, auto_pickup=True),
         },
     )
@@ -1424,9 +1435,7 @@ def test_auto_pickup_opens_parent_when_resumed_follow_up_fails(
     tasks = read_tasks(ledger_path)
     assert tasks[TASK_ID]["status"] == golem.STATUS_FAILED
     assert tasks[PARENT_ID]["status"] == golem.STATUS_DONE
-    assert fake_commands["open-args"].read_text(encoding="utf-8") == (
-        f"claude://resume?session={PARENT_ID}-session\n"
-    )
+    assert fake_commands["open-args"].read_text(encoding="utf-8") == expected_open_args
 
 
 @pytest.mark.parametrize(
@@ -1808,7 +1817,7 @@ def test_failing_gate_stops_chain_with_its_stderr_as_reason(
     "is_cwd_missing",
     [pytest.param(False, id="passing-gate"), pytest.param(True, id="gate-cannot-run")],
 )
-def test_executor_resuming_unsettled_task_runs_gate_before_follow_up(
+def test_executor_resuming_gated_task_runs_gate_before_follow_up(
     installed_launch_agent, fake_commands, ledger_path, tmp_path, is_cwd_missing
 ):
     missing_directory = str(tmp_path / "missing")
@@ -1850,7 +1859,25 @@ def test_gate_stop_reason_when_gate_gives_none(ledger_path, monkeypatch, gate, e
     assert golem.gate_stop_reason(TASK_ID, read_task(ledger_path)) == expected_reason
 
 
-def test_executor_resuming_unsettled_task_skips_gate_while_directory_is_busy(
+def test_timed_out_gate_kills_processes_it_started(ledger_path, monkeypatch, tmp_path):
+    monkeypatch.setattr(golem, "GATE_TIMEOUT_SECONDS", 0.2)
+    pid_path = tmp_path / "gate-child-pid"
+    write_task(
+        ledger_path, golem.STATUS_NEEDS_REVIEW, gate=f"sleep 30 & echo $! > {pid_path}; wait"
+    )
+
+    golem.gate_stop_reason(TASK_ID, read_task(ledger_path))
+
+    child_pid = int(pid_path.read_text(encoding="utf-8"))
+    deadline = time.monotonic() + 5
+    with contextlib.suppress(ProcessLookupError):
+        while time.monotonic() < deadline:
+            os.kill(child_pid, 0)
+            select.select([], [], [], 0.05)
+        pytest.fail(f"gate child {child_pid} is still running")
+
+
+def test_executor_resuming_gated_task_skips_gate_while_directory_is_busy(
     installed_launch_agent, ledger_path, tmp_path
 ):
     write_tasks(

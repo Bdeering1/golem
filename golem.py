@@ -8,6 +8,7 @@ import queue
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -1165,16 +1166,6 @@ def pickup_all() -> int:
     return int(has_failure)
 
 
-def reopen_settled_parent(parent_id: str) -> None:
-    with locked_tasks() as tasks:
-        stored_parent = tasks.get(parent_id)
-        if not isinstance(stored_parent, dict):
-            return
-        parent = cast("dict[str, Any]", stored_parent)
-        if parent.get("auto_pickup") and parent.get("status") == STATUS_DONE:
-            parent["status"] = STATUS_NEEDS_REVIEW
-
-
 def auto_pickup_task(task_id: str) -> None:
     tasks = load_tasks()
     task = tasks.get(task_id)
@@ -1182,9 +1173,7 @@ def auto_pickup_task(task_id: str) -> None:
         return
     task = cast("dict[str, Any]", task)
     if task.get("status") == STATUS_FAILED:
-        parent_id = task.get("after", "")
-        reopen_settled_parent(parent_id)
-        auto_pickup_task(parent_id)
+        auto_pickup_task(task.get("after", ""))
         return
     if not task.get("auto_pickup") or not is_ready_for_review(tasks, task_id):
         return
@@ -1734,6 +1723,12 @@ def finish_task(
             else STATUS_FAILED
         )
         task_record["returncode"] = returncode
+        stored_parent = tasks.get(task_record.get("after", ""))
+        if task_record["status"] != STATUS_NEEDS_REVIEW or not isinstance(stored_parent, dict):
+            return
+        parent = cast("dict[str, Any]", stored_parent)
+        if parent.get("status") == STATUS_NEEDS_REVIEW:
+            parent["status"] = STATUS_DONE
 
 
 def claim_task(
@@ -1877,33 +1872,44 @@ def gate_input(task_id: str, task: dict[str, Any]) -> str:
 
 def gate_stop_reason(task_id: str, task: dict[str, Any]) -> str | None:
     try:
-        gate_process = subprocess.run(
+        gate_process = subprocess.Popen(
             ["/bin/sh", "-c", task["gate"]],
             cwd=task_directory(task),
             env=task_environment(task),
-            input=gate_input(task_id, task),
-            capture_output=True,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             encoding="utf-8",
             errors="replace",
-            timeout=GATE_TIMEOUT_SECONDS,
-            check=False,
+            process_group=0,
         )
-    except subprocess.TimeoutExpired:
-        return f"gate timed out after {GATE_TIMEOUT_SECONDS}s"
     except OSError as error:
         return str(error)
+    with gate_process:
+        try:
+            _, stderr = gate_process.communicate(
+                gate_input(task_id, task), timeout=GATE_TIMEOUT_SECONDS
+            )
+        except subprocess.TimeoutExpired:
+            return f"gate timed out after {GATE_TIMEOUT_SECONDS}s"
+        finally:
+            # Unreaped, so the group ID is still ours; macOS fails with EPERM once only zombies remain.
+            if gate_process.returncode is None:
+                with suppress(OSError):
+                    os.killpg(gate_process.pid, signal.SIGKILL)
     if gate_process.returncode == 0:
         return None
-    return gate_process.stderr.strip() or f"gate exited with status {gate_process.returncode}"
+    return stderr.strip() or f"gate exited with status {gate_process.returncode}"
 
 
-def is_unsettled(tasks: dict[str, Any], task_id: str) -> bool:
+def is_gate_pending(tasks: dict[str, Any], task_id: str) -> bool:
     stored_task = tasks.get(task_id)
     if not isinstance(stored_task, dict):
         return False
     task = cast("dict[str, Any]", stored_task)
     return (
         task.get("status") == STATUS_NEEDS_REVIEW
+        and "gate" in task
         and "gate_reason" not in task
         and bool(waiting_dependent_ids(tasks, task_id))
     )
@@ -1913,23 +1919,20 @@ def acquire_task_directory_lock(task: dict[str, Any]) -> io.TextIOWrapper | None
     return acquire_lock(directory_lock_path(directory_to_lock(task, task.get("worktree"))))
 
 
-def settle_succeeded_task(task_id: str) -> None:
+def run_pending_gate(task_id: str) -> None:
     tasks = load_tasks()
-    if not is_unsettled(tasks, task_id):
+    if not is_gate_pending(tasks, task_id):
         return
-    task = cast("dict[str, Any]", tasks[task_id])
-    stop_reason = gate_stop_reason(task_id, task) if "gate" in task else None
+    stop_reason = gate_stop_reason(task_id, cast("dict[str, Any]", tasks[task_id]))
+    if stop_reason is None:
+        return
     with locked_tasks() as locked_tasks_by_id:
         current_task = locked_tasks_by_id.get(task_id)
         if not isinstance(current_task, dict):
             return
         current = cast("dict[str, Any]", current_task)
-        if stop_reason is not None and current.get("status") in SUCCEEDED_STATUSES:
+        if current.get("status") in SUCCEEDED_STATUSES:
             current["gate_reason"] = stop_reason
-        elif current.get("status") == STATUS_NEEDS_REVIEW and waiting_dependent_ids(
-            locked_tasks_by_id, task_id
-        ):
-            current["status"] = STATUS_DONE
 
 
 def continue_task(task_id: str, *, is_forced: bool) -> int:
@@ -1972,7 +1975,7 @@ def execute_claimed_task(
                 task,
                 (run_lock_file.fileno(), directory_lock_file.fileno()),
             )
-            settle_succeeded_task(task_id)
+            run_pending_gate(task_id)
         finally:
             release_lock(directory_lock_file)
         drain_dependents(task_id, task["session_id"])
@@ -1989,15 +1992,15 @@ def execute_scheduled_task(task_id: str, session_id: str) -> int:
     return execute_claimed_task(task_id, *claim)
 
 
-def settle_under_directory_lock(task_id: str) -> bool:
+def run_pending_gate_under_directory_lock(task_id: str) -> bool:
     tasks = load_tasks()
-    if not is_unsettled(tasks, task_id):
+    if not is_gate_pending(tasks, task_id):
         return True
     directory_lock_file = acquire_task_directory_lock(cast("dict[str, Any]", tasks[task_id]))
     if directory_lock_file is None:
         return False
     try:
-        settle_succeeded_task(task_id)
+        run_pending_gate(task_id)
     finally:
         release_lock(directory_lock_file)
     return True
@@ -2009,7 +2012,7 @@ def drain_succeeded_task(task_id: str, session_id: str) -> None:
     if run_lock_file is None:
         return
     try:
-        if not settle_under_directory_lock(task_id):
+        if not run_pending_gate_under_directory_lock(task_id):
             return
         drain_dependents(task_id, session_id)
     finally:
