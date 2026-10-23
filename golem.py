@@ -115,11 +115,14 @@ PULL_REQUEST_TIMEOUT_SECONDS = 30
 GATE_TIMEOUT_SECONDS = 300
 HOOK_GATE_TIMEOUT_SECONDS = 20
 HOOK_STOP_TIMEOUT_SECONDS = 30
-HOOK_STOP = "stop"
-HOOK_PRE_TOOL_USE = "pre-tool-use"
+HOOK_ARGUMENT_STOP = "stop"
+HOOK_ARGUMENT_PRE_TOOL_USE = "pre-tool-use"
 HOOK_EVENT_STOP = "Stop"
 HOOK_EVENT_PRE_TOOL_USE = "PreToolUse"
-HOOK_EVENT_ARGUMENTS = {HOOK_EVENT_STOP: HOOK_STOP, HOOK_EVENT_PRE_TOOL_USE: HOOK_PRE_TOOL_USE}
+HOOK_EVENT_ARGUMENTS = {
+    HOOK_EVENT_STOP: HOOK_ARGUMENT_STOP,
+    HOOK_EVENT_PRE_TOOL_USE: HOOK_ARGUMENT_PRE_TOOL_USE,
+}
 HOOK_COMMAND_SUFFIXES = tuple(f" _hook {argument}" for argument in HOOK_EVENT_ARGUMENTS.values())
 HOOK_TOOL_MATCHER = "Edit|Write|MultiEdit|NotebookEdit|Bash"
 PULL_REQUEST_STATE_OPEN = "OPEN"
@@ -1246,7 +1249,7 @@ def cancel_task(task_id: str) -> int:
                 waiting_task = cast("dict[str, Any]", tasks[waiting_task_id])
                 waiting_task["status"] = STATUS_CANCELLED
                 pending_task_ids.append(waiting_task_id)
-        directories = follow_up_directories(tasks, task)
+        directories = hook_affected_directories(tasks, task)
     for directory in directories:
         sync_hooks(directory)
     return 0
@@ -2074,8 +2077,11 @@ def install_hooks(directory: str) -> None:
         is_changed = True
     if not is_changed:
         return
-    path.parent.mkdir(exist_ok=True)
-    save_json(path, settings)
+    try:
+        path.parent.mkdir(exist_ok=True)
+        save_json(path, settings)
+    except OSError as error:
+        print(f"golem: hooks not installed: {error}", file=sys.stderr)
 
 
 def remove_hooks(directory: str) -> None:
@@ -2131,7 +2137,7 @@ def is_hook_needed(tasks: dict[str, Any], directory: str) -> bool:
     )
 
 
-def follow_up_directories(tasks: dict[str, Any], task: dict[str, Any]) -> set[str]:
+def hook_affected_directories(tasks: dict[str, Any], task: dict[str, Any]) -> set[str]:
     directories = {task_directory(task)}
     parent = tasks.get(task.get("after", ""))
     if isinstance(parent, dict):
@@ -2555,6 +2561,7 @@ def run_launch_agent_pass() -> list[subprocess.Popen[bytes]]:
     rotate_agent_log()
     now = datetime.now(UTC)
     due_tasks: list[tuple[str, dict[str, Any]]] = []
+    hook_directories: set[str] = set()
     with locked_tasks() as tasks:
         remove_orphan_run_locks()
         remove_interrupted_ledger_writes()
@@ -2562,6 +2569,7 @@ def run_launch_agent_pass() -> list[subprocess.Popen[bytes]]:
             if task["status"] == STATUS_RUNNING:
                 if is_run_lock_free(task["session_id"]):
                     task["status"] = STATUS_FAILED
+                    hook_directories |= hook_affected_directories(tasks, task)
             elif (
                 task["status"] == STATUS_SCHEDULED
                 and datetime.fromisoformat(task["due_at"]) <= now
@@ -2574,6 +2582,8 @@ def run_launch_agent_pass() -> list[subprocess.Popen[bytes]]:
                 and is_run_lock_free(task["session_id"])
             ):
                 due_tasks.append((task_id, task.copy()))
+    for directory in hook_directories:
+        sync_hooks(directory)
     processes: list[subprocess.Popen[bytes]] = []
     for task_id, task in due_tasks:
         processes.append(start_task_executor(task_id, task))
@@ -2774,22 +2784,26 @@ def delete_tasks(task_ids: list[str], *, is_chain: bool, is_removing_worktree: b
         if messages or check_messages:
             raise SystemExit("\n".join([*messages, *check_messages]))
         for task_id in selected_task_ids:
-            directories |= follow_up_directories(tasks, tasks[task_id])
+            directories |= hook_affected_directories(tasks, tasks[task_id])
         removed_worktrees: set[str] | None = set()
         if is_removing_worktree:
+            # golem's own settings file would otherwise count as local changes.
+            for task_id in selected_task_ids:
+                remove_hooks(task_directory(tasks[task_id]))
             removed_worktrees = remove_selected_worktrees(tasks, worktrees, worktrees_by_task)
-            if removed_worktrees is None:
-                return 1
-        selected_tasks = [
-            (task_id, cast("dict[str, Any]", tasks[task_id])) for task_id in selected_task_ids
-        ]
-        delete_task_and_release_worktrees(tasks, worktrees, selected_task_ids)
-        for task_id, task in selected_tasks:
-            worktree = worktrees_by_task[task_id]
-            print_deleted_task(task_id, task, worktree, is_removed=worktree in removed_worktrees)
+        if removed_worktrees is not None:
+            selected_tasks = [
+                (task_id, cast("dict[str, Any]", tasks[task_id])) for task_id in selected_task_ids
+            ]
+            delete_task_and_release_worktrees(tasks, worktrees, selected_task_ids)
+            for task_id, task in selected_tasks:
+                worktree = worktrees_by_task[task_id]
+                print_deleted_task(
+                    task_id, task, worktree, is_removed=worktree in removed_worktrees
+                )
     for directory in directories:
         sync_hooks(directory)
-    return 0
+    return 0 if removed_worktrees is not None else 1
 
 
 def print_deleted_task(
@@ -3270,7 +3284,9 @@ def add_hook_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None
     hook_command.add_argument("event", choices=tuple(HOOK_EVENT_ARGUMENTS.values()))
     set_command_handler(
         hook_command,
-        lambda arguments: hook_stop() if arguments.event == HOOK_STOP else hook_pre_tool_use(),
+        lambda arguments: (
+            hook_stop() if arguments.event == HOOK_ARGUMENT_STOP else hook_pre_tool_use()
+        ),
     )
 
 

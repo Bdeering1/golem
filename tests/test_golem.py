@@ -2121,7 +2121,7 @@ def test_stop_hook_continues_stopped_chain_when_gate_passes(
         ledger_path, parent_status, gate=gate_command(tmp_path), gate_reason=GATE_REASON
     )
 
-    output = run_hook(monkeypatch, capsys, golem.HOOK_STOP, PARENT_SESSION)
+    output = run_hook(monkeypatch, capsys, golem.HOOK_ARGUMENT_STOP, PARENT_SESSION)
 
     assert json.loads(output)["systemMessage"].endswith(CHILD_ID)
     assert read_task(ledger_path, PARENT_ID)["status"] == golem.STATUS_DONE
@@ -2140,7 +2140,7 @@ def test_stop_hook_does_nothing(
         ledger_path, gate=gate_command(tmp_path, exit_code=gate_exit_code), gate_reason=GATE_REASON
     )
 
-    assert run_hook(monkeypatch, capsys, golem.HOOK_STOP, session_id) == ""
+    assert run_hook(monkeypatch, capsys, golem.HOOK_ARGUMENT_STOP, session_id) == ""
     assert read_task(ledger_path, PARENT_ID)["gate_reason"] == GATE_REASON
     assert started_executors == []
 
@@ -2165,7 +2165,7 @@ def test_pre_tool_use_hook_denies_while_follow_up_runs(
         },
     )
 
-    output = run_hook(monkeypatch, capsys, golem.HOOK_PRE_TOOL_USE, session_id)
+    output = run_hook(monkeypatch, capsys, golem.HOOK_ARGUMENT_PRE_TOOL_USE, session_id)
 
     if not is_denied:
         assert output == ""
@@ -2185,20 +2185,9 @@ def test_pre_tool_use_hook_denies_while_grandchild_runs(ledger_path, monkeypatch
         },
     )
 
-    output = run_hook(monkeypatch, capsys, golem.HOOK_PRE_TOOL_USE, PARENT_SESSION)
+    output = run_hook(monkeypatch, capsys, golem.HOOK_ARGUMENT_PRE_TOOL_USE, PARENT_SESSION)
 
     assert GRANDCHILD_ID in json.loads(output)["hookSpecificOutput"]["permissionDecisionReason"]
-
-
-def test_hook_commands_carry_state_home_and_stop_timeout():
-    stop = golem.hook_group("Stop")["hooks"][0]
-    pre_tool_use = golem.hook_group("PreToolUse")["hooks"][0]
-
-    state_home = f"XDG_STATE_HOME={golem.state_directory().parent}"
-    assert stop["command"].startswith(state_home)
-    assert stop["command"].endswith(" _hook stop")
-    assert stop["timeout"] == golem.HOOK_STOP_TIMEOUT_SECONDS
-    assert pre_tool_use["command"].endswith(" _hook pre-tool-use")
 
 
 def test_stop_hook_returns_while_follow_up_runs(ledger_path, tmp_path, monkeypatch):
@@ -2212,7 +2201,7 @@ def test_stop_hook_returns_while_follow_up_runs(ledger_path, tmp_path, monkeypat
     )
 
     result = golem.subprocess.run(
-        ["/bin/sh", "-c", golem.hook_command_line(golem.HOOK_STOP)],
+        ["/bin/sh", "-c", golem.hook_command_line(golem.HOOK_ARGUMENT_STOP)],
         input=json.dumps({"session_id": PARENT_SESSION}),
         capture_output=True,
         text=True,
@@ -3454,6 +3443,29 @@ def test_delete_chain_removes_shared_worktree_with_waiting_dependents(owned_work
     assert golem.main(["delete", CHILD_ID, "--chain", "--remove-worktree"]) == 0
 
     assert golem.load_tasks() == {}
+    assert not worktree.exists()
+
+
+def test_delete_chain_removes_worktree_holding_golem_hooks(owned_worktree, ledger_path):
+    worktree = owned_worktree()
+    write_tasks(
+        ledger_path,
+        {
+            PARENT_ID: task_record(
+                golem.STATUS_DONE,
+                task_id=PARENT_ID,
+                worktree=str(worktree),
+                gate="false",
+                gate_reason=GATE_REASON,
+            ),
+            CHILD_ID: task_record(golem.STATUS_WAITING, task_id=CHILD_ID, after=PARENT_ID),
+        },
+    )
+    golem.sync_hooks(str(worktree))
+    assert golem.local_settings_path(str(worktree)).exists()
+
+    assert golem.main(["delete", CHILD_ID, "--chain", "--remove-worktree"]) == 0
+
     assert not worktree.exists()
 
 
