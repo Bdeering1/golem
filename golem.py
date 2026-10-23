@@ -416,7 +416,7 @@ def reserve_dependent_task(records: dict[str, Any], parent_id: str) -> bool:
         parent_status = tasks[parent_id]["status"]
         if parent_status == STATUS_CANCELLED:
             raise SystemExit(f"golem: parent task is cancelled: {parent_id}")
-        if can_start_dependents(tasks[parent_id]):
+        if can_start_dependents(tasks[parent_id]) and not is_gate_pending(tasks, parent_id):
             return False
         if tasks[parent_id].get("auto_pickup"):
             for record in records.values():
@@ -1855,7 +1855,7 @@ def execute_task(task_id: str, task: dict[str, Any], lock_file_descriptors: tupl
     return returncode
 
 
-def gate_input(task_id: str, task: dict[str, Any]) -> str:
+def gate_input_json(task_id: str, task: dict[str, Any]) -> str:
     transcript_path = next(iter(transcript_paths(task)), None)
     return json.dumps(
         {
@@ -1871,35 +1871,38 @@ def gate_input(task_id: str, task: dict[str, Any]) -> str:
 
 
 def gate_stop_reason(task_id: str, task: dict[str, Any]) -> str | None:
-    try:
-        gate_process = subprocess.Popen(
-            ["/bin/sh", "-c", task["gate"]],
-            cwd=task_directory(task),
-            env=task_environment(task),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            encoding="utf-8",
-            errors="replace",
-            process_group=0,
-        )
-    except OSError as error:
-        return str(error)
-    with gate_process:
+    # A file, not a pipe: a background process the gate starts can hold stderr open after it exits.
+    with tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as stderr_file:
         try:
-            _, stderr = gate_process.communicate(
-                gate_input(task_id, task), timeout=GATE_TIMEOUT_SECONDS
+            gate_process = subprocess.Popen(
+                ["/bin/sh", "-c", task["gate"]],
+                cwd=task_directory(task),
+                env=task_environment(task),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=stderr_file,
+                encoding="utf-8",
+                errors="replace",
+                process_group=0,
             )
-        except subprocess.TimeoutExpired:
-            return f"gate timed out after {GATE_TIMEOUT_SECONDS}s"
-        finally:
-            # Unreaped, so the group ID is still ours; macOS fails with EPERM once only zombies remain.
-            if gate_process.returncode is None:
-                with suppress(OSError):
-                    os.killpg(gate_process.pid, signal.SIGKILL)
-    if gate_process.returncode == 0:
-        return None
-    return stderr.strip() or f"gate exited with status {gate_process.returncode}"
+        except OSError as error:
+            return str(error)
+        with gate_process:
+            try:
+                gate_process.communicate(
+                    gate_input_json(task_id, task), timeout=GATE_TIMEOUT_SECONDS
+                )
+            except subprocess.TimeoutExpired:
+                return f"gate timed out after {GATE_TIMEOUT_SECONDS}s"
+            finally:
+                # Unreaped, so the group ID is still ours; macOS fails with EPERM once only zombies remain.
+                if gate_process.returncode is None:
+                    with suppress(OSError):
+                        os.killpg(gate_process.pid, signal.SIGKILL)
+        if gate_process.returncode == 0:
+            return None
+        stderr_file.seek(0)
+        return stderr_file.read().strip() or f"gate exited with status {gate_process.returncode}"
 
 
 def is_gate_pending(tasks: dict[str, Any], task_id: str) -> bool:

@@ -50,6 +50,7 @@ LATER_RESET_TIME = datetime(2030, 1, 2, 11, tzinfo=UTC)
 ANSI_COLOR = re.compile(r"\033\[38;5;\d+m|\033\[0m")
 WORKTREE_BRANCH = "worktree"
 DAY_SECONDS = 24 * 60 * 60
+GATE_REASON = "no pull request yet"
 
 
 @pytest.fixture(scope="session")
@@ -1245,18 +1246,21 @@ def test_pickup_marks_ancestors_that_need_review_done(fake_commands, ledger_path
 
 
 @pytest.mark.parametrize(
-    ("child_status", "opened_ids"),
+    ("parent_fields", "child_status", "opened_ids"),
     [
-        pytest.param(golem.STATUS_NEEDS_REVIEW, [CHILD_ID], id="child-needs-review"),
-        pytest.param(golem.STATUS_RUNNING, [], id="child-running"),
-        pytest.param(golem.STATUS_FAILED, [PARENT_ID], id="child-failed"),
+        pytest.param({}, golem.STATUS_NEEDS_REVIEW, [CHILD_ID], id="child-needs-review"),
+        pytest.param({}, golem.STATUS_RUNNING, [], id="child-running"),
+        pytest.param({}, golem.STATUS_FAILED, [PARENT_ID], id="child-failed"),
+        pytest.param(
+            {"gate_reason": GATE_REASON}, golem.STATUS_WAITING, [PARENT_ID], id="parent-stopped"
+        ),
     ],
 )
 def test_pickup_all_opens_only_latest_reviewable_task_in_chain(
-    fake_commands, ledger_path, child_status, opened_ids
+    fake_commands, ledger_path, parent_fields, child_status, opened_ids
 ):
     tasks = {
-        PARENT_ID: task_record(golem.STATUS_NEEDS_REVIEW, task_id=PARENT_ID),
+        PARENT_ID: task_record(golem.STATUS_NEEDS_REVIEW, task_id=PARENT_ID, **parent_fields),
         CHILD_ID: task_record(child_status, task_id=CHILD_ID, after=PARENT_ID),
     }
     write_tasks(ledger_path, tasks)
@@ -1718,9 +1722,6 @@ def test_failed_follow_up_auto_pickup_opens_last_success(
     )
 
 
-GATE_REASON = "no pull request yet"
-
-
 def gate_command(tmp_path, *, exit_code=0, stderr=""):
     log_path = tmp_path / "gate-stdin"
     return (
@@ -1752,11 +1753,9 @@ def run_gated_chain(ledger_path, gate, *extra_arguments: str):
     return parent
 
 
-def write_stopped_chain(ledger_path, **parent_fields: object):
+def write_parent_with_waiting_child(ledger_path, **parent_fields: object):
     tasks = {
-        PARENT_ID: task_record(
-            golem.STATUS_NEEDS_REVIEW, task_id=PARENT_ID, gate_reason=GATE_REASON, **parent_fields
-        ),
+        PARENT_ID: task_record(golem.STATUS_NEEDS_REVIEW, task_id=PARENT_ID, **parent_fields),
         CHILD_ID: task_record(golem.STATUS_WAITING, task_id=CHILD_ID, after=PARENT_ID),
     }
     write_tasks(ledger_path, tasks)
@@ -1813,60 +1812,46 @@ def test_failing_gate_stops_chain_with_its_stderr_as_reason(
     assert not golem.has_pending_tasks(tasks)
 
 
-@pytest.mark.parametrize(
-    "is_cwd_missing",
-    [pytest.param(False, id="passing-gate"), pytest.param(True, id="gate-cannot-run")],
-)
 def test_executor_resuming_gated_task_runs_gate_before_follow_up(
-    installed_launch_agent, fake_commands, ledger_path, tmp_path, is_cwd_missing
+    installed_launch_agent, fake_commands, ledger_path, tmp_path
+):
+    write_parent_with_waiting_child(ledger_path, gate=gate_command(tmp_path))
+
+    assert golem.main(["_execute", PARENT_ID, f"{PARENT_ID}-session"]) == 0
+    assert len(gate_inputs(tmp_path)) == 1
+    assert read_task(ledger_path, CHILD_ID)["status"] == golem.STATUS_NEEDS_REVIEW
+
+
+def test_gate_that_cannot_run_stops_chain_with_error_as_reason(
+    installed_launch_agent, ledger_path, tmp_path
 ):
     missing_directory = str(tmp_path / "missing")
-    cwd_fields = {"cwd": missing_directory} if is_cwd_missing else {}
-    write_tasks(
-        ledger_path,
-        {
-            PARENT_ID: task_record(
-                golem.STATUS_NEEDS_REVIEW,
-                task_id=PARENT_ID,
-                gate=gate_command(tmp_path),
-                **cwd_fields,
-            ),
-            CHILD_ID: task_record(golem.STATUS_WAITING, task_id=CHILD_ID, after=PARENT_ID),
-        },
-    )
+    write_parent_with_waiting_child(ledger_path, gate="true", cwd=missing_directory)
 
     assert golem.main(["_execute", PARENT_ID, f"{PARENT_ID}-session"]) == 0
 
     tasks = read_tasks(ledger_path)
-    assert (tasks[CHILD_ID]["status"] == golem.STATUS_NEEDS_REVIEW) is not is_cwd_missing
-    assert ("gate_reason" in tasks[PARENT_ID]) is is_cwd_missing
-    assert len(gate_inputs(tmp_path)) == (0 if is_cwd_missing else 1)
-    if is_cwd_missing:
-        assert missing_directory in tasks[PARENT_ID]["gate_reason"]
+    assert missing_directory in tasks[PARENT_ID]["gate_reason"]
+    assert tasks[CHILD_ID]["status"] == golem.STATUS_WAITING
 
 
-@pytest.mark.parametrize(
-    ("gate", "expected_reason"),
-    [
-        pytest.param("exit 3", "gate exited with status 3", id="no-stderr"),
-        pytest.param("sleep 5", "gate timed out after 0.2s", id="timeout"),
-    ],
-)
-def test_gate_stop_reason_when_gate_gives_none(ledger_path, monkeypatch, gate, expected_reason):
-    monkeypatch.setattr(golem, "GATE_TIMEOUT_SECONDS", 0.2)
-    write_task(ledger_path, golem.STATUS_NEEDS_REVIEW, gate=gate)
+def test_passing_gate_does_not_wait_for_its_background_processes(ledger_path, monkeypatch):
+    monkeypatch.setattr(golem, "GATE_TIMEOUT_SECONDS", 0.5)
+    write_task(ledger_path, golem.STATUS_NEEDS_REVIEW, gate="sleep 2 & exit 0")
 
-    assert golem.gate_stop_reason(TASK_ID, read_task(ledger_path)) == expected_reason
+    assert golem.gate_stop_reason(TASK_ID, read_task(ledger_path)) is None
 
 
-def test_timed_out_gate_kills_processes_it_started(ledger_path, monkeypatch, tmp_path):
+def test_timed_out_gate_stops_chain_and_kills_processes_it_started(
+    ledger_path, monkeypatch, tmp_path
+):
     monkeypatch.setattr(golem, "GATE_TIMEOUT_SECONDS", 0.2)
     pid_path = tmp_path / "gate-child-pid"
     write_task(
         ledger_path, golem.STATUS_NEEDS_REVIEW, gate=f"sleep 30 & echo $! > {pid_path}; wait"
     )
 
-    golem.gate_stop_reason(TASK_ID, read_task(ledger_path))
+    assert golem.gate_stop_reason(TASK_ID, read_task(ledger_path)) == "gate timed out after 0.2s"
 
     child_pid = int(pid_path.read_text(encoding="utf-8"))
     deadline = time.monotonic() + 5
@@ -1880,15 +1865,7 @@ def test_timed_out_gate_kills_processes_it_started(ledger_path, monkeypatch, tmp
 def test_executor_resuming_gated_task_skips_gate_while_directory_is_busy(
     installed_launch_agent, ledger_path, tmp_path
 ):
-    write_tasks(
-        ledger_path,
-        {
-            PARENT_ID: task_record(
-                golem.STATUS_NEEDS_REVIEW, task_id=PARENT_ID, gate=gate_command(tmp_path)
-            ),
-            CHILD_ID: task_record(golem.STATUS_WAITING, task_id=CHILD_ID, after=PARENT_ID),
-        },
-    )
+    write_parent_with_waiting_child(ledger_path, gate=gate_command(tmp_path))
     directory_lock_file = golem.acquire_lock(golem.directory_lock_path(str(Path.cwd())))
     assert directory_lock_file is not None
     try:
@@ -1903,24 +1880,9 @@ def test_executor_resuming_gated_task_skips_gate_while_directory_is_busy(
 def test_failing_gate_keeps_chain_stopped_when_task_is_closed_meanwhile(
     installed_launch_agent, fake_commands, ledger_path, tmp_path
 ):
-    mark_done = (
-        f"{shlex.quote(sys.executable)} -c "
-        + shlex.quote(
-            "import json, sys; p = sys.argv[1]; t = json.load(open(p)); "
-            f"t[{PARENT_ID!r}]['status'] = {golem.STATUS_DONE!r}; json.dump(t, open(p, 'w'))"
-        )
-        + f" {shlex.quote(str(ledger_path))}"
-    )
-    write_tasks(
-        ledger_path,
-        {
-            PARENT_ID: task_record(
-                golem.STATUS_NEEDS_REVIEW,
-                task_id=PARENT_ID,
-                gate=f"{mark_done}; echo {GATE_REASON} >&2; exit 1",
-            ),
-            CHILD_ID: task_record(golem.STATUS_WAITING, task_id=CHILD_ID, after=PARENT_ID),
-        },
+    close_parent = shlex.join([sys.executable, golem.__file__, "close", PARENT_ID])
+    write_parent_with_waiting_child(
+        ledger_path, gate=f"{close_parent}; echo {GATE_REASON} >&2; exit 1"
     )
 
     assert golem.main(["_execute", PARENT_ID, f"{PARENT_ID}-session"]) == 0
@@ -2000,48 +1962,70 @@ def started_executors(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("gate_exit_code", "is_forced", "is_gate_run", "is_continued"),
+    ("gate_exit_code", "continue_arguments", "expected_gate_run_count"),
     [
-        pytest.param(0, False, True, True, id="passing-gate"),
-        pytest.param(1, False, True, False, id="failing-gate"),
-        pytest.param(1, True, False, True, id="force"),
+        pytest.param(0, [], 1, id="passing-gate"),
+        pytest.param(1, ["--force"], 0, id="force"),
     ],
 )
-def test_continue_reruns_gate_then_releases_follow_ups(
+def test_continue_releases_stopped_task(
     ledger_path,
     tmp_path,
-    capsys,
     started_executors,
     gate_exit_code,
-    is_forced,
-    is_gate_run,
-    is_continued,
+    continue_arguments,
+    expected_gate_run_count,
 ):
-    write_stopped_chain(
-        ledger_path, gate=gate_command(tmp_path, exit_code=gate_exit_code, stderr="still missing")
+    write_parent_with_waiting_child(
+        ledger_path,
+        gate=gate_command(tmp_path, exit_code=gate_exit_code),
+        gate_reason=GATE_REASON,
     )
 
-    returncode = golem.main(["continue", PARENT_ID, *(["--force"] if is_forced else [])])
+    assert golem.main(["continue", PARENT_ID, *continue_arguments]) == 0
 
     parent = read_task(ledger_path, PARENT_ID)
-    assert (len(gate_inputs(tmp_path)) == 1) is is_gate_run
-    assert returncode == (0 if is_continued else 1)
-    assert started_executors == ([PARENT_ID] if is_continued else [])
-    assert parent["status"] == (golem.STATUS_DONE if is_continued else golem.STATUS_NEEDS_REVIEW)
-    assert ("gate_reason" not in parent) is is_continued
-    if not is_continued:
-        assert parent["gate_reason"] == "still missing"
-        assert "still missing" in capsys.readouterr().err
+    assert parent["status"] == golem.STATUS_DONE
+    assert "gate_reason" not in parent
+    assert len(gate_inputs(tmp_path)) == expected_gate_run_count
+    assert started_executors == [PARENT_ID]
 
 
-@pytest.mark.parametrize("status", [golem.STATUS_NEEDS_REVIEW, golem.STATUS_DONE])
-def test_continue_refuses_task_not_stopped_at_a_gate(ledger_path, started_executors, status):
-    write_task(ledger_path, status)
+def test_continue_with_failing_gate_keeps_task_stopped(
+    ledger_path, tmp_path, capsys, started_executors
+):
+    write_parent_with_waiting_child(
+        ledger_path,
+        gate=gate_command(tmp_path, exit_code=1, stderr="still missing"),
+        gate_reason=GATE_REASON,
+    )
+
+    assert golem.main(["continue", PARENT_ID]) == 1
+
+    parent = read_task(ledger_path, PARENT_ID)
+    assert parent["status"] == golem.STATUS_NEEDS_REVIEW
+    assert parent["gate_reason"] == "still missing"
+    assert "still missing" in capsys.readouterr().err
+    assert started_executors == []
+
+
+def test_continue_refuses_task_not_stopped_at_a_gate(ledger_path, started_executors):
+    write_task(ledger_path, golem.STATUS_NEEDS_REVIEW)
 
     with pytest.raises(SystemExit, match="not stopped at a gate"):
         golem.main(["continue", TASK_ID])
 
     assert started_executors == []
+
+
+def test_after_parent_with_pending_gate_waits_for_the_gate(
+    installed_launch_agent, ledger_path, monkeypatch
+):
+    monkeypatch.setattr(golem, "next_reset_time", lambda: RESET_TIME)
+    write_parent_with_waiting_child(ledger_path, gate="true")
+
+    assert golem.main(["run", SIBLING_ID, SIBLING_PROMPT, "--after", PARENT_ID]) == 0
+    assert read_task(ledger_path, SIBLING_ID)["status"] == golem.STATUS_WAITING
 
 
 def test_after_pending_auto_pickup_parent_passes_to_claude_only(
