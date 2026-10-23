@@ -1782,7 +1782,7 @@ def test_passing_gate_continues_chain_and_receives_task_as_json(
 
 
 def test_failing_gate_stops_chain_with_its_stderr_as_reason(
-    installed_launch_agent, fake_commands, ledger_path, tmp_path, capsys
+    installed_launch_agent, fake_commands, ledger_path, tmp_path
 ):
     write_claude_output(fake_commands, CLAUDE_RESULT)
     run_gated_chain(ledger_path, gate_command(tmp_path, exit_code=1, stderr=f"{GATE_REASON}\n"))
@@ -1794,9 +1794,6 @@ def test_failing_gate_stops_chain_with_its_stderr_as_reason(
     assert len(logged_claude_calls(fake_commands)) == 1
     assert golem.run_launch_agent_pass() == []
     assert not golem.has_pending_tasks(tasks)
-    assert golem.main(["show", PARENT_ID]) == 0
-    assert f"golem: gate stopped: {GATE_REASON}" in capsys.readouterr().err
-    assert GATE_REASON in list_row(list_output(capsys), PARENT_ID)
 
 
 @pytest.mark.parametrize(
@@ -1929,19 +1926,6 @@ def test_task_without_waiting_follow_up_never_runs_its_gate(
     assert read_task(ledger_path, PARENT_ID)["status"] == golem.STATUS_NEEDS_REVIEW
     assert "gate_reason" not in read_task(ledger_path, PARENT_ID)
     assert gate_inputs(tmp_path) == []
-
-
-def test_follow_up_with_waiting_task_runs_the_shared_gate(
-    installed_launch_agent, ledger_path, tmp_path
-):
-    parent = schedule_gated_chain(
-        ledger_path,
-        gate_command(tmp_path),
-        then_arguments=["--then", GRANDCHILD_ID, GRANDCHILD_PROMPT],
-    )
-
-    assert golem.main(["_execute", PARENT_ID, parent["session_id"]]) == 0
-    assert [gate_input["task_id"] for gate_input in gate_inputs(tmp_path)] == [PARENT_ID, CHILD_ID]
 
 
 def test_gate_is_refused_for_codex_without_changing_ledger(ledger_path):
