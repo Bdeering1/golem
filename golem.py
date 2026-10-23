@@ -117,7 +117,9 @@ HOOK_GATE_TIMEOUT_SECONDS = 20
 HOOK_STOP_TIMEOUT_SECONDS = 30
 HOOK_STOP = "stop"
 HOOK_PRE_TOOL_USE = "pre-tool-use"
-HOOK_EVENT_ARGUMENTS = {"Stop": HOOK_STOP, "PreToolUse": HOOK_PRE_TOOL_USE}
+HOOK_EVENT_STOP = "Stop"
+HOOK_EVENT_PRE_TOOL_USE = "PreToolUse"
+HOOK_EVENT_ARGUMENTS = {HOOK_EVENT_STOP: HOOK_STOP, HOOK_EVENT_PRE_TOOL_USE: HOOK_PRE_TOOL_USE}
 HOOK_COMMAND_SUFFIXES = tuple(f" _hook {argument}" for argument in HOOK_EVENT_ARGUMENTS.values())
 HOOK_TOOL_MATCHER = "Edit|Write|MultiEdit|NotebookEdit|Bash"
 PULL_REQUEST_STATE_OPEN = "OPEN"
@@ -2015,7 +2017,7 @@ def hook_group(event: str) -> dict[str, Any]:
         "type": "command",
         "command": hook_command_line(HOOK_EVENT_ARGUMENTS[event]),
     }
-    if event == "Stop":
+    if event == HOOK_EVENT_STOP:
         entry["timeout"] = HOOK_STOP_TIMEOUT_SECONDS
         return {"hooks": [entry]}
     return {"matcher": HOOK_TOOL_MATCHER, "hooks": [entry]}
@@ -2197,7 +2199,7 @@ def hook_pre_tool_use() -> int:
     running_ids = running_descendant_ids(tasks, task_id)
     if not running_ids:
         return 0
-    reason = f"golem is running {running_ids[0]} in this directory; wait for it to finish"
+    reason = f"golem is running {running_ids[0]}; wait for it to finish"
     output = {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
