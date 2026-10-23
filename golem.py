@@ -696,11 +696,17 @@ def record_created_worktree_owner(task_id: str, task: dict[str, Any]) -> None:
             print(f"golem: could not record worktree ownership: {error}", file=sys.stderr)
 
 
+def is_worktree_left_to_agent(task: dict[str, Any]) -> bool:
+    return bool(task.get("no_worktree")) or has_agent_argument(
+        task["agent_args"], WORKTREE_ARGUMENTS
+    )
+
+
 def resolved_worktree(tasks: dict[str, Any], task: dict[str, Any]) -> tuple[str | None, bool]:
     recorded = recorded_worktree(tasks, task)
     if recorded is not None:
         return recorded
-    if task.get("no_worktree") or has_agent_argument(task["agent_args"], WORKTREE_ARGUMENTS):
+    if is_worktree_left_to_agent(task):
         return None, False
     common_directory = git_common_directory(task["cwd"])
     if common_directory is None or not git_has_head(task["cwd"]):
@@ -2148,7 +2154,7 @@ def is_known_directory_busy(tasks: dict[str, Any], task: dict[str, Any]) -> bool
     recorded = recorded_worktree(tasks, task)
     if recorded is not None:
         directory = recorded[0]
-    elif task.get("no_worktree") or has_agent_argument(task["agent_args"], WORKTREE_ARGUMENTS):
+    elif is_worktree_left_to_agent(task):
         directory = task["cwd"]
     else:
         return False
@@ -3026,12 +3032,23 @@ def change_directory(directory: str | None) -> None:
         os.chdir(directory)
     except FileNotFoundError, NotADirectoryError:
         raise SystemExit(f"golem: directory not found: {directory}") from None
+    except OSError as error:
+        raise SystemExit(
+            f"golem: cannot change to directory: {directory}: {error.strerror}"
+        ) from None
 
 
 def args_after_directory_changes(golem_args: list[str]) -> list[str]:
-    while golem_args[:1] == ["-C"] and golem_args[1:]:
-        change_directory(golem_args[1])
-        golem_args = golem_args[2:]
+    while golem_args:
+        option = golem_args[0]
+        if option == "-C" and golem_args[1:]:
+            change_directory(golem_args[1])
+            golem_args = golem_args[2:]
+        elif option.startswith("-C") and option != "-C":
+            change_directory(option[2:].removeprefix("="))
+            golem_args = golem_args[1:]
+        else:
+            break
     return golem_args
 
 
