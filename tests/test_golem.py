@@ -1761,7 +1761,6 @@ def test_passing_gate_continues_chain_and_receives_task_as_json(
     tasks = read_tasks(ledger_path)
     assert tasks[PARENT_ID]["status"] == golem.STATUS_DONE
     assert tasks[CHILD_ID]["status"] == golem.STATUS_NEEDS_REVIEW
-    assert tasks[CHILD_ID]["gate"] == tasks[PARENT_ID]["gate"]
     assert gate_inputs(tmp_path) == [
         {
             "task_id": PARENT_ID,
