@@ -16,7 +16,7 @@ import time
 import tomllib
 import uuid
 from contextlib import ExitStack, contextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -605,6 +605,8 @@ def git_has_head(directory: str) -> bool:
 
 
 def recorded_worktree(tasks: dict[str, Any], task: dict[str, Any]) -> tuple[str, bool] | None:
+    if task.get("no_worktree"):
+        return None
     ancestor = task
     while True:
         if "worktree" in ancestor:
@@ -694,11 +696,17 @@ def record_created_worktree_owner(task_id: str, task: dict[str, Any]) -> None:
             print(f"golem: could not record worktree ownership: {error}", file=sys.stderr)
 
 
+def is_worktree_left_to_agent(task: dict[str, Any]) -> bool:
+    return bool(task.get("no_worktree")) or has_agent_argument(
+        task["agent_args"], WORKTREE_ARGUMENTS
+    )
+
+
 def resolved_worktree(tasks: dict[str, Any], task: dict[str, Any]) -> tuple[str | None, bool]:
     recorded = recorded_worktree(tasks, task)
     if recorded is not None:
         return recorded
-    if has_agent_argument(task["agent_args"], WORKTREE_ARGUMENTS):
+    if is_worktree_left_to_agent(task):
         return None, False
     common_directory = git_common_directory(task["cwd"])
     if common_directory is None or not git_has_head(task["cwd"]):
@@ -1009,18 +1017,24 @@ def run_codex(
     return returncode, result, is_usage_limit
 
 
+@dataclass(frozen=True)
+class RunPlacement:
+    cwd: str
+    is_auto_pickup: bool = False
+    is_no_worktree: bool = False
+
+
 def new_task_record(
-    cwd: str,
+    placement: RunPlacement,
     prompt: str,
     agent_args: tuple[str, ...],
     when: datetime | None,
     backend: str,
     *,
     after: str | None = None,
-    is_auto_pickup: bool = False,
 ) -> dict[str, Any]:
     record: dict[str, Any] = {
-        "cwd": cwd,
+        "cwd": placement.cwd,
         "prompt": prompt,
         "agent_args": list(agent_args),
         "status": STATUS_WAITING,
@@ -1030,8 +1044,10 @@ def new_task_record(
     }
     if after is not None:
         record["after"] = after
-    if is_auto_pickup:
+    if placement.is_auto_pickup:
         record["auto_pickup"] = True
+    if placement.is_no_worktree:
+        record["no_worktree"] = True
     if when is not None:
         record["status"] = STATUS_SCHEDULED
         record["due_at"] = when.isoformat()
@@ -1043,8 +1059,7 @@ def new_follow_up_records(
     follow_ups: list[list[str]],
     agent_args: tuple[str, ...],
     backend: str,
-    *,
-    is_auto_pickup: bool,
+    placement: RunPlacement,
 ) -> dict[str, Any]:
     records: dict[str, Any] = {}
     previous_task_id = run_task_id
@@ -1052,13 +1067,7 @@ def new_follow_up_records(
         if task_id == run_task_id or task_id in records:
             raise SystemExit(f"golem: task ID used more than once: {task_id}")
         records[task_id] = new_task_record(
-            str(Path.cwd()),
-            prompt,
-            agent_args,
-            None,
-            backend,
-            after=previous_task_id,
-            is_auto_pickup=is_auto_pickup,
+            placement, prompt, agent_args, None, backend, after=previous_task_id
         )
         previous_task_id = task_id
     return records
@@ -1582,19 +1591,11 @@ def schedule_new_task(
     after: str | None,
     *,
     backend: str,
-    is_auto_pickup: bool,
+    placement: RunPlacement,
     follow_up_records: dict[str, Any],
 ) -> int:
     due_time = when or datetime.now(UTC).astimezone()
-    record = new_task_record(
-        str(Path.cwd()),
-        prompt,
-        agent_args,
-        due_time,
-        backend,
-        after=after,
-        is_auto_pickup=is_auto_pickup,
-    )
+    record = new_task_record(placement, prompt, agent_args, due_time, backend, after=after)
     reserve_tasks({task_id: record, **follow_up_records})
     return wake_launch_agent_and_report(task_id, due_time)
 
@@ -1804,7 +1805,7 @@ def execute_task(task_id: str, task: dict[str, Any], lock_file_descriptors: tupl
         output = ""
         result = None
         is_usage_limit = False
-    if task_backend(task) == BACKEND_CLAUDE:
+    if task_backend(task) == BACKEND_CLAUDE and not task.get("no_worktree"):
         working_directory = claude_working_directory(output)
         if working_directory is not None and working_directory != task["cwd"]:
             record_worktree(task_id, working_directory)
@@ -2137,7 +2138,7 @@ def is_known_directory_busy(tasks: dict[str, Any], task: dict[str, Any]) -> bool
     recorded = recorded_worktree(tasks, task)
     if recorded is not None:
         directory = recorded[0]
-    elif has_agent_argument(task["agent_args"], WORKTREE_ARGUMENTS):
+    elif is_worktree_left_to_agent(task):
         directory = task["cwd"]
     else:
         return False
@@ -2676,14 +2677,20 @@ def retry_task(task_id: str, *, is_now: bool, at_text: str | None) -> int:
         task = retryable_task(tasks, task_id)
         reject_missing_worktree(task, worktrees)
         record = new_task_record(
-            cast("str", task["cwd"]),
+            RunPlacement(cast("str", task["cwd"])),
             cast("str", task["prompt"]),
             tuple(cast("list[str]", task["agent_args"])),
             when,
             task_backend(task),
             after=task.get("after"),
         )
-        for name in ("environment", "worktree", "worktree_pending", "auto_pickup"):
+        for name in (
+            "environment",
+            "worktree",
+            "worktree_pending",
+            "auto_pickup",
+            "no_worktree",
+        ):
             if name in task:
                 record[name] = task[name]
         tasks[task_id] = record
@@ -2748,16 +2755,11 @@ def schedule_run_task(
     prompt_text: str,
     task_args: tuple[str, ...],
     follow_up_records: dict[str, Any],
+    placement: RunPlacement,
 ) -> int:
     if arguments.after is not None:
         dependent_record = new_task_record(
-            str(Path.cwd()),
-            prompt_text,
-            task_args,
-            None,
-            arguments.backend,
-            after=arguments.after,
-            is_auto_pickup=arguments.auto_pickup,
+            placement, prompt_text, task_args, None, arguments.backend, after=arguments.after
         )
         if reserve_dependent_task(
             {arguments.id: dependent_record, **follow_up_records}, arguments.after
@@ -2772,7 +2774,7 @@ def schedule_run_task(
         when,
         arguments.after,
         backend=arguments.backend,
-        is_auto_pickup=arguments.auto_pickup,
+        placement=placement,
         follow_up_records=follow_up_records,
     )
 
@@ -2785,17 +2787,36 @@ def run_task_from_arguments(arguments: argparse.Namespace) -> int:
         Path(arguments.file).read_text(encoding="utf-8") if arguments.file else arguments.prompt
     )
     task_args = tuple(arguments.agent_args)
+    placement = RunPlacement(
+        str(Path.cwd()),
+        is_auto_pickup=arguments.auto_pickup,
+        is_no_worktree=arguments.no_worktree,
+    )
+    has_worktree_argument = has_agent_argument(list(task_args), WORKTREE_ARGUMENTS)
+    parent = (
+        cast("dict[str, Any]", load_tasks().get(arguments.after, {}))
+        if arguments.after is not None
+        else {}
+    )
+    if parent.get("no_worktree"):
+        placement = replace(placement, cwd=cast("str", parent["cwd"]), is_no_worktree=True)
+        if has_worktree_argument:
+            raise SystemExit(
+                f"golem: {arguments.after} runs in place; -w/--worktree is not allowed"
+            )
+    if placement.is_no_worktree and has_worktree_argument:
+        raise SystemExit("golem: --no-worktree does not accept -w/--worktree")
     follow_up_records = new_follow_up_records(
         arguments.id,
         arguments.then,
         task_args,
         arguments.backend,
-        is_auto_pickup=arguments.auto_pickup,
+        placement,
     )
     if arguments.backend == BACKEND_CODEX:
         reject_unsupported_codex_arguments(list(task_args), is_run=True)
         require_codex_subscription(os.environ.copy())
-    exit_code = schedule_run_task(arguments, prompt_text, task_args, follow_up_records)
+    exit_code = schedule_run_task(arguments, prompt_text, task_args, follow_up_records, placement)
     for task_id, record in follow_up_records.items():
         print(f"golem: {task_id} will run after {record['after']}")
     return exit_code
@@ -2863,6 +2884,11 @@ def add_run_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
         action="store_true",
         help="open the session in the Claude desktop app when the task succeeds; follow-ups get it too",
     )
+    run_command.add_argument(
+        "--no-worktree",
+        action="store_true",
+        help="run in the task directory instead of a new worktree; follow-ups get it too",
+    )
     run_schedule_group = run_command.add_mutually_exclusive_group()
     add_scheduling_arguments(run_schedule_group.add_argument)
     run_schedule_group.add_argument("--after", metavar="PARENT", help="run after PARENT succeeds")
@@ -2871,6 +2897,9 @@ def add_run_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
 
 def build_parser() -> tuple[argparse.ArgumentParser, dict[str, argparse.ArgumentParser]]:
     parser = argparse.ArgumentParser(prog="golem")
+    parser.add_argument(
+        "-C", dest="directory", metavar="DIR", help="run as if golem was started in DIR"
+    )
     commands = parser.add_subparsers(dest="command", required=True)
 
     add_run_command(commands.add_parser)
@@ -2967,6 +2996,33 @@ def build_parser() -> tuple[argparse.ArgumentParser, dict[str, argparse.Argument
     return parser, commands.choices
 
 
+def change_directory(directory: str | None) -> None:
+    if directory is None:
+        return
+    try:
+        os.chdir(directory)
+    except FileNotFoundError, NotADirectoryError:
+        raise SystemExit(f"golem: directory not found: {directory}") from None
+    except OSError as error:
+        raise SystemExit(
+            f"golem: cannot change to directory: {directory}: {error.strerror}"
+        ) from None
+
+
+def apply_leading_directory_options(golem_args: list[str]) -> list[str]:
+    while golem_args:
+        option = golem_args[0]
+        if option == "-C" and golem_args[1:]:
+            change_directory(golem_args[1])
+            golem_args = golem_args[2:]
+        elif option.startswith("-C") and option != "-C":
+            change_directory(option[2:].removeprefix("="))
+            golem_args = golem_args[1:]
+        else:
+            break
+    return golem_args
+
+
 def main(argv: list[str] | None = None) -> int:
     cast("io.TextIOWrapper", sys.stdout).reconfigure(encoding="utf-8")
     golem_args = sys.argv[1:] if argv is None else argv
@@ -2975,6 +3031,7 @@ def main(argv: list[str] | None = None) -> int:
         separator_index = golem_args.index("--")
         agent_args = golem_args[separator_index + 1 :]
         golem_args = golem_args[:separator_index]
+    golem_args = apply_leading_directory_options(golem_args)
 
     parser, command_parsers = build_parser()
     if golem_args and not golem_args[0].startswith("-") and golem_args[0] not in command_parsers:
@@ -2989,6 +3046,7 @@ def main(argv: list[str] | None = None) -> int:
                     "aliases cannot use other aliases"
                 )
     arguments = parser.parse_args(golem_args, argparse.Namespace(agent_args=agent_args))
+    change_directory(arguments.directory)
     if agent_args and arguments.command == "retry":
         parser.error("retry does not accept agent arguments")
     if agent_args and arguments.command == "reschedule":

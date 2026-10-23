@@ -1745,11 +1745,115 @@ def test_auto_pickup_rejects_codex_without_changing_ledger(ledger_path):
     assert read_tasks(ledger_path) == tasks
 
 
-def test_retry_keeps_auto_pickup(installed_launch_agent, ledger_path):
-    write_task(ledger_path, golem.STATUS_FAILED, auto_pickup=True)
+@pytest.mark.parametrize("fields", [{"auto_pickup": True}, {"no_worktree": True}])
+def test_retry_keeps_task_flags(installed_launch_agent, ledger_path, fields):
+    write_task(ledger_path, golem.STATUS_FAILED, **fields)
 
     assert golem.main(["retry", TASK_ID, "--now"]) == 0
-    assert read_task(ledger_path)["auto_pickup"] is True
+    assert read_task(ledger_path).items() >= fields.items()
+
+
+@pytest.mark.parametrize(
+    ("aliases", "command"),
+    [
+        pytest.param({}, ["run", CHILD_ID, CHILD_PROMPT], id="run"),
+        pytest.param({"impl": f'run {{1}} "{CHILD_PROMPT}"'}, ["impl", CHILD_ID], id="alias"),
+    ],
+)
+def test_directory_option_creates_then_chain_in_directory(
+    installed_launch_agent, ledger_path, monkeypatch, tmp_path, aliases, command
+):
+    write_aliases(aliases)
+    (tmp_path / "project").mkdir()
+    monkeypatch.chdir(tmp_path)
+
+    assert (
+        golem.main(["-C", "project", *command, "--now", "--then", GRANDCHILD_ID, GRANDCHILD_PROMPT])
+        == 0
+    )
+
+    tasks = read_tasks(ledger_path)
+    assert {tasks[task_id]["cwd"] for task_id in (CHILD_ID, GRANDCHILD_ID)} == {
+        str(tmp_path / "project")
+    }
+
+
+def test_directory_option_refuses_missing_directory_without_changing_ledger(ledger_path):
+    write_task(ledger_path, golem.STATUS_SCHEDULED)
+    tasks = read_tasks(ledger_path)
+
+    with pytest.raises(SystemExit, match="directory not found: missing"):
+        golem.main(["-C", "missing", "run", CHILD_ID, CHILD_PROMPT, "--now"])
+
+    assert read_tasks(ledger_path) == tasks
+
+
+def test_no_worktree_chain_runs_in_directory_without_worktree(
+    installed_launch_agent, fake_commands, git_repository, ledger_path, monkeypatch
+):
+    monkeypatch.chdir(git_repository)
+    golem.main(
+        [
+            "run",
+            PARENT_ID,
+            PARENT_PROMPT,
+            "--now",
+            "--no-worktree",
+            "--then",
+            CHILD_ID,
+            CHILD_PROMPT,
+        ]
+    )
+
+    assert golem.main(["_execute", PARENT_ID, read_task(ledger_path, PARENT_ID)["session_id"]]) == 0
+
+    tasks = read_tasks(ledger_path)
+    assert {task["status"] for task in tasks.values()} == {golem.STATUS_NEEDS_REVIEW}
+    assert logged_claude_cwds(fake_commands) == [str(git_repository)] * 2
+    assert not (git_repository / ".claude").exists()
+    assert golem.load_worktrees() == {}
+
+
+def test_after_in_place_parent_runs_in_parent_directory(
+    installed_launch_agent, git_repository, ledger_path
+):
+    write_task(
+        ledger_path,
+        golem.STATUS_SCHEDULED,
+        task_id=PARENT_ID,
+        cwd=str(git_repository),
+        no_worktree=True,
+    )
+
+    golem.main(["run", CHILD_ID, CHILD_PROMPT, "--after", PARENT_ID])
+
+    child = read_task(ledger_path, CHILD_ID)
+    assert child["cwd"] == str(git_repository)
+    assert child["no_worktree"] is True
+
+
+@pytest.mark.parametrize(
+    ("parent_fields", "run_arguments", "message"),
+    [
+        pytest.param({}, ["--now", "--no-worktree"], "--no-worktree does not accept", id="flag"),
+        pytest.param(
+            {"no_worktree": True},
+            ["--after", PARENT_ID],
+            f"{PARENT_ID} runs in place",
+            id="inherited",
+        ),
+    ],
+)
+def test_in_place_task_refuses_worktree_argument_without_changing_ledger(
+    installed_launch_agent, ledger_path, parent_fields, run_arguments, message
+):
+    write_task(ledger_path, golem.STATUS_SCHEDULED, task_id=PARENT_ID, **parent_fields)
+    tasks = read_tasks(ledger_path)
+
+    with pytest.raises(SystemExit, match=message):
+        golem.main(["run", CHILD_ID, CHILD_PROMPT, *run_arguments, "--", WORKTREE_FLAG, "custom"])
+
+    assert read_tasks(ledger_path) == tasks
 
 
 @pytest.mark.parametrize(
@@ -4038,6 +4142,23 @@ def test_prune_releases_worktree_after_its_last_task(owned_worktree):
     assert TASK_ID not in golem.load_tasks()
     assert worktree.is_dir()
     assert golem.load_worktrees()[str(worktree.resolve())]["released_at"]
+
+
+@pytest.mark.parametrize("command", [["delete", TASK_ID], ["prune", "--yes"]])
+def test_delete_and_prune_leave_in_place_directory_alone(
+    installed_launch_agent, git_repository, ledger_path, monkeypatch, command
+):
+    monkeypatch.chdir(git_repository)
+    golem.main(["run", TASK_ID, PROMPT, "--now", "--no-worktree"])
+    golem.main(["_execute", TASK_ID, read_task(ledger_path)["session_id"]])
+    tasks = read_tasks(ledger_path)
+    tasks[TASK_ID]["status"] = golem.STATUS_CANCELLED
+    write_tasks(ledger_path, tasks)
+
+    assert golem.main(command) == 0
+
+    assert TASK_ID not in golem.load_tasks()
+    assert golem.load_worktrees() == {}
 
 
 def attach_pickup(ledger_path, exit_stack):
