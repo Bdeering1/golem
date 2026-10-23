@@ -51,6 +51,14 @@ ANSI_COLOR = re.compile(r"\033\[38;5;\d+m|\033\[0m")
 WORKTREE_BRANCH = "worktree"
 DAY_SECONDS = 24 * 60 * 60
 GATE_REASON = "no pull request yet"
+PARENT_SESSION = f"{PARENT_ID}-session"
+USER_SETTINGS = {
+    "permissions": {"allow": ["Bash(ls:*)"]},
+    "hooks": {
+        "Stop": [{"hooks": [{"type": "command", "command": "echo user-stop"}]}],
+        "Notification": [{"hooks": [{"type": "command", "command": "echo user-notify"}]}],
+    },
+}
 
 
 @pytest.fixture(scope="session")
@@ -766,7 +774,7 @@ def test_launch_agent_pass_starts_due_tasks_and_fails_abandoned_ones(ledger_path
     )
     started_task_ids: list[str] = []
     monkeypatch.setattr(
-        golem, "start_task_executor", lambda task_id, task: started_task_ids.append(task_id)
+        golem, "start_task_executor", lambda task_id, task, **_: started_task_ids.append(task_id)
     )
 
     golem.run_launch_agent_pass()
@@ -1753,9 +1761,11 @@ def run_gated_chain(ledger_path, gate, *extra_arguments: str):
     return parent
 
 
-def write_parent_with_waiting_child(ledger_path, **parent_fields: object):
+def write_parent_with_waiting_child(
+    ledger_path, parent_status: str = golem.STATUS_NEEDS_REVIEW, **parent_fields: object
+):
     tasks = {
-        PARENT_ID: task_record(golem.STATUS_NEEDS_REVIEW, task_id=PARENT_ID, **parent_fields),
+        PARENT_ID: task_record(parent_status, task_id=PARENT_ID, **parent_fields),
         CHILD_ID: task_record(golem.STATUS_WAITING, task_id=CHILD_ID, after=PARENT_ID),
     }
     write_tasks(ledger_path, tasks)
@@ -1956,7 +1966,7 @@ def test_auto_pickup_opens_stopped_task_and_keeps_chain_stopped(
 def started_executors(monkeypatch):
     executors: list[str] = []
     monkeypatch.setattr(
-        golem, "start_task_executor", lambda task_id, task: executors.append(task_id)
+        golem, "start_task_executor", lambda task_id, task, **_: executors.append(task_id)
     )
     return executors
 
@@ -2016,6 +2026,230 @@ def test_continue_refuses_task_not_stopped_at_a_gate(ledger_path, started_execut
         golem.main(["continue", TASK_ID])
 
     assert started_executors == []
+
+
+def settings_file():
+    return golem.local_settings_path(str(Path.cwd()))
+
+
+def run_hook(monkeypatch, capsys, event, session_id):
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({"session_id": session_id})))
+    assert golem.main(["_hook", event]) == 0
+    return capsys.readouterr().out
+
+
+def stop_gated_chain(ledger_path, fake_commands, tmp_path, original_settings):
+    if original_settings is not None:
+        settings_file().parent.mkdir()
+        settings_file().write_text(json.dumps(original_settings), encoding="utf-8")
+    write_claude_output(fake_commands, CLAUDE_RESULT)
+    return run_gated_chain(ledger_path, gate_command(tmp_path, exit_code=1, stderr=GATE_REASON))
+
+
+def finish_chain(ledger_path, parent):
+    tasks = read_tasks(ledger_path)
+    tasks[PARENT_ID]["status"] = golem.STATUS_DONE
+    del tasks[PARENT_ID]["gate_reason"]
+    write_tasks(ledger_path, tasks)
+    assert golem.main(["_execute", PARENT_ID, parent["session_id"]]) == 0
+
+
+@pytest.mark.parametrize("original_settings", [None, USER_SETTINGS], ids=["no-file", "existing"])
+@pytest.mark.parametrize("action", ["cancel", "delete", "finish"])
+def test_hooks_are_seeded_when_chain_stops_and_removed_when_it_ends(
+    installed_launch_agent, fake_commands, ledger_path, tmp_path, original_settings, action
+):
+    parent = stop_gated_chain(ledger_path, fake_commands, tmp_path, original_settings)
+
+    seeded = json.loads(settings_file().read_text(encoding="utf-8"))
+    seeded_hooks = seeded["hooks"]
+    assert {
+        event: len(groups)
+        for event, groups in seeded_hooks.items()
+        if event in golem.HOOK_EVENT_ARGUMENTS
+    } == {
+        "Stop": 1 + (original_settings is not None),
+        "PreToolUse": 1,
+    }
+    assert seeded_hooks["PreToolUse"][0]["matcher"] == golem.HOOK_TOOL_MATCHER
+    if original_settings is not None:
+        assert seeded["permissions"] == original_settings["permissions"]
+        assert seeded_hooks["Stop"][0] == original_settings["hooks"]["Stop"][0]
+        assert seeded_hooks["Notification"] == original_settings["hooks"]["Notification"]
+
+    if action == "finish":
+        finish_chain(ledger_path, parent)
+    else:
+        assert golem.main([action, CHILD_ID]) == 0
+
+    if original_settings is None:
+        assert not settings_file().parent.exists()
+        return
+    assert json.loads(settings_file().read_text(encoding="utf-8")) == original_settings
+
+
+def test_hook_settings_that_are_not_json_are_left_alone(
+    installed_launch_agent, fake_commands, ledger_path, tmp_path, capsys
+):
+    settings_file().parent.mkdir()
+    settings_file().write_text("{not json", encoding="utf-8")
+    write_claude_output(fake_commands, CLAUDE_RESULT)
+    run_gated_chain(ledger_path, gate_command(tmp_path, exit_code=1, stderr=GATE_REASON))
+
+    assert settings_file().read_text(encoding="utf-8") == "{not json"
+    assert "hooks not installed" in capsys.readouterr().err
+
+
+def test_ungated_chain_gets_no_hooks(installed_launch_agent, fake_commands, ledger_path):
+    write_claude_output(fake_commands, CLAUDE_RESULT)
+    golem.main(["run", PARENT_ID, PARENT_PROMPT, "--now", "--then", CHILD_ID, CHILD_PROMPT])
+    parent = read_task(ledger_path, PARENT_ID)
+    golem.main(["_execute", PARENT_ID, parent["session_id"]])
+
+    assert not settings_file().parent.exists()
+
+
+@pytest.mark.parametrize(
+    "parent_status",
+    [golem.STATUS_NEEDS_REVIEW, golem.STATUS_DONE],
+    ids=["needs-review", "opened-in-app"],
+)
+def test_stop_hook_continues_stopped_chain_when_gate_passes(
+    ledger_path, tmp_path, started_executors, monkeypatch, capsys, parent_status
+):
+    write_parent_with_waiting_child(
+        ledger_path, parent_status, gate=gate_command(tmp_path), gate_reason=GATE_REASON
+    )
+
+    output = run_hook(monkeypatch, capsys, golem.HOOK_STOP, PARENT_SESSION)
+
+    assert json.loads(output)["systemMessage"].endswith(CHILD_ID)
+    assert read_task(ledger_path, PARENT_ID)["status"] == golem.STATUS_DONE
+    assert started_executors == [PARENT_ID]
+
+
+@pytest.mark.parametrize(
+    ("session_id", "gate_exit_code"),
+    [("unknown-session", 0), (PARENT_SESSION, 1)],
+    ids=["unknown-session", "failing-gate"],
+)
+def test_stop_hook_does_nothing(
+    ledger_path, tmp_path, started_executors, monkeypatch, capsys, session_id, gate_exit_code
+):
+    write_parent_with_waiting_child(
+        ledger_path, gate=gate_command(tmp_path, exit_code=gate_exit_code), gate_reason=GATE_REASON
+    )
+
+    assert run_hook(monkeypatch, capsys, golem.HOOK_STOP, session_id) == ""
+    assert read_task(ledger_path, PARENT_ID)["gate_reason"] == GATE_REASON
+    assert started_executors == []
+
+
+@pytest.mark.parametrize(
+    ("child_status", "session_id", "is_denied"),
+    [
+        (golem.STATUS_RUNNING, PARENT_SESSION, True),
+        (golem.STATUS_NEEDS_REVIEW, PARENT_SESSION, False),
+        (golem.STATUS_RUNNING, "unknown-session", False),
+    ],
+    ids=["follow-up-running", "follow-up-finished", "unknown-session"],
+)
+def test_pre_tool_use_hook_denies_while_follow_up_runs(
+    ledger_path, monkeypatch, capsys, child_status, session_id, is_denied
+):
+    write_tasks(
+        ledger_path,
+        {
+            PARENT_ID: task_record(golem.STATUS_DONE, task_id=PARENT_ID, gate="true"),
+            CHILD_ID: task_record(child_status, task_id=CHILD_ID, after=PARENT_ID),
+        },
+    )
+
+    output = run_hook(monkeypatch, capsys, golem.HOOK_PRE_TOOL_USE, session_id)
+
+    if not is_denied:
+        assert output == ""
+        return
+    decision = json.loads(output)["hookSpecificOutput"]
+    assert decision["permissionDecision"] == "deny"
+    assert CHILD_ID in decision["permissionDecisionReason"]
+
+
+def test_pre_tool_use_hook_denies_while_grandchild_runs(ledger_path, monkeypatch, capsys):
+    write_tasks(
+        ledger_path,
+        {
+            PARENT_ID: task_record(golem.STATUS_DONE, task_id=PARENT_ID, gate="true"),
+            CHILD_ID: task_record(golem.STATUS_DONE, task_id=CHILD_ID, after=PARENT_ID),
+            GRANDCHILD_ID: task_record(golem.STATUS_RUNNING, task_id=GRANDCHILD_ID, after=CHILD_ID),
+        },
+    )
+
+    output = run_hook(monkeypatch, capsys, golem.HOOK_PRE_TOOL_USE, PARENT_SESSION)
+
+    assert GRANDCHILD_ID in json.loads(output)["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_hook_commands_carry_state_home_and_stop_timeout():
+    stop = golem.hook_group("Stop")["hooks"][0]
+    pre_tool_use = golem.hook_group("PreToolUse")["hooks"][0]
+
+    state_home = f"XDG_STATE_HOME={golem.state_directory().parent}"
+    assert stop["command"].startswith(state_home)
+    assert stop["command"].endswith(" _hook stop")
+    assert stop["timeout"] == golem.HOOK_STOP_TIMEOUT_SECONDS
+    assert pre_tool_use["command"].endswith(" _hook pre-tool-use")
+
+
+def test_stop_hook_returns_while_follow_up_runs(ledger_path, tmp_path, monkeypatch):
+    hold_path = tmp_path / "hold"
+    started_path = tmp_path / "started"
+    hold_path.touch()
+    monkeypatch.setenv("GOLEM_CLAUDE_HOLD", str(hold_path))
+    monkeypatch.setenv("GOLEM_CLAUDE_STARTED", str(started_path))
+    write_parent_with_waiting_child(
+        ledger_path, gate=gate_command(tmp_path), gate_reason=GATE_REASON
+    )
+
+    result = golem.subprocess.run(
+        ["/bin/sh", "-c", golem.hook_command_line(golem.HOOK_STOP)],
+        input=json.dumps({"session_id": PARENT_SESSION}),
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=True,
+    )
+
+    try:
+        wait_until(started_path.exists)
+        assert CHILD_ID in json.loads(result.stdout)["systemMessage"]
+    finally:
+        hold_path.unlink()
+        wait_until(lambda: read_task(ledger_path, CHILD_ID)["status"] != golem.STATUS_RUNNING)
+
+
+def test_hook_commands_run_without_path_or_state_environment(ledger_path):
+    write_tasks(
+        ledger_path,
+        {
+            PARENT_ID: task_record(golem.STATUS_DONE, task_id=PARENT_ID, gate="true"),
+            CHILD_ID: task_record(golem.STATUS_RUNNING, task_id=CHILD_ID, after=PARENT_ID),
+        },
+    )
+    golem.sync_hooks(str(Path.cwd()))
+    hooks = json.loads(settings_file().read_text(encoding="utf-8"))["hooks"]
+    command = hooks["PreToolUse"][0]["hooks"][0]["command"]
+
+    result = golem.subprocess.run(
+        ["/bin/sh", "-c", command],
+        input=json.dumps({"session_id": PARENT_SESSION}),
+        env={},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert json.loads(result.stdout)["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
 def test_after_parent_with_pending_gate_waits_for_the_gate(
@@ -2952,7 +3186,7 @@ def test_agent_recovers_interrupted_dependent_draining_in_ledger_order(
 def started_task_ids(monkeypatch):
     task_ids: list[str] = []
     monkeypatch.setattr(
-        golem, "start_task_executor", lambda task_id, task: task_ids.append(task_id)
+        golem, "start_task_executor", lambda task_id, task, **_: task_ids.append(task_id)
     )
     return task_ids
 
