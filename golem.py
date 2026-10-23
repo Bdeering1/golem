@@ -2810,15 +2810,20 @@ def run_task_from_arguments(arguments: argparse.Namespace) -> int:
     task_args = tuple(arguments.agent_args)
     cwd = str(Path.cwd())
     is_in_place = arguments.no_worktree
-    parent = cast("dict[str, Any]", load_tasks().get(arguments.after or "", {}))
+    has_worktree_argument = has_agent_argument(list(task_args), WORKTREE_ARGUMENTS)
+    parent = (
+        cast("dict[str, Any]", load_tasks().get(arguments.after, {}))
+        if arguments.after is not None
+        else {}
+    )
     if parent.get("no_worktree"):
         cwd = cast("str", parent["cwd"])
         is_in_place = True
-        if has_agent_argument(list(task_args), WORKTREE_ARGUMENTS):
+        if has_worktree_argument:
             raise SystemExit(
                 f"golem: {arguments.after} runs in place; -w/--worktree is not allowed"
             )
-    if is_in_place and has_agent_argument(list(task_args), WORKTREE_ARGUMENTS):
+    if is_in_place and has_worktree_argument:
         raise SystemExit("golem: --no-worktree does not accept -w/--worktree")
     follow_up_records = new_follow_up_records(
         arguments.id,
