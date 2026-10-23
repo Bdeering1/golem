@@ -1751,21 +1751,29 @@ def write_stopped_chain(ledger_path, **parent_fields: object):
         CHILD_ID: task_record(golem.STATUS_WAITING, task_id=CHILD_ID, after=PARENT_ID),
     }
     write_tasks(ledger_path, tasks)
-    return tasks
 
 
 def test_passing_gate_continues_chain_and_receives_task_as_json(
     installed_launch_agent, fake_commands, ledger_path, tmp_path
 ):
     write_claude_output(fake_commands, CLAUDE_RESULT)
-    parent = schedule_gated_chain(ledger_path, gate_command(tmp_path))
+    parent = schedule_gated_chain(
+        ledger_path,
+        gate_command(tmp_path),
+        then_arguments=("--then", GRANDCHILD_ID, GRANDCHILD_PROMPT),
+    )
     write_transcript(parent["session_id"], 0)
     assert golem.main(["_execute", PARENT_ID, parent["session_id"]]) == 0
 
     tasks = read_tasks(ledger_path)
-    assert tasks[PARENT_ID]["status"] == golem.STATUS_DONE
-    assert tasks[CHILD_ID]["status"] == golem.STATUS_NEEDS_REVIEW
-    assert gate_inputs(tmp_path) == [
+    assert [tasks[task_id]["status"] for task_id in (PARENT_ID, CHILD_ID, GRANDCHILD_ID)] == [
+        golem.STATUS_DONE,
+        golem.STATUS_DONE,
+        golem.STATUS_NEEDS_REVIEW,
+    ]
+    parent_input, child_input = gate_inputs(tmp_path)
+    assert child_input["task_id"] == CHILD_ID
+    assert parent_input == (
         {
             "task_id": PARENT_ID,
             "session_id": parent["session_id"],
@@ -1777,8 +1785,8 @@ def test_passing_gate_continues_chain_and_receives_task_as_json(
                 Path.home() / ".claude" / "projects" / "project" / f"{parent['session_id']}.jsonl"
             ),
         }
-    ]
-    assert len(logged_claude_calls(fake_commands)) == 2
+    )
+    assert len(logged_claude_calls(fake_commands)) == 3
 
 
 def test_failing_gate_stops_chain_with_its_stderr_as_reason(
@@ -1797,19 +1805,11 @@ def test_failing_gate_stops_chain_with_its_stderr_as_reason(
 
 
 @pytest.mark.parametrize(
-    ("is_cwd_missing", "is_chain_released"),
-    [
-        pytest.param(False, True, id="passing-gate"),
-        pytest.param(True, False, id="gate-cannot-run"),
-    ],
+    "is_cwd_missing",
+    [pytest.param(False, id="passing-gate"), pytest.param(True, id="gate-cannot-run")],
 )
 def test_executor_resuming_unsettled_task_runs_gate_before_follow_up(
-    installed_launch_agent,
-    fake_commands,
-    ledger_path,
-    tmp_path,
-    is_cwd_missing,
-    is_chain_released,
+    installed_launch_agent, fake_commands, ledger_path, tmp_path, is_cwd_missing
 ):
     missing_directory = str(tmp_path / "missing")
     cwd_fields = {"cwd": missing_directory} if is_cwd_missing else {}
@@ -1829,8 +1829,8 @@ def test_executor_resuming_unsettled_task_runs_gate_before_follow_up(
     assert golem.main(["_execute", PARENT_ID, f"{PARENT_ID}-session"]) == 0
 
     tasks = read_tasks(ledger_path)
-    assert (tasks[CHILD_ID]["status"] == golem.STATUS_NEEDS_REVIEW) is is_chain_released
-    assert ("gate_reason" in tasks[PARENT_ID]) is not is_chain_released
+    assert (tasks[CHILD_ID]["status"] == golem.STATUS_NEEDS_REVIEW) is not is_cwd_missing
+    assert ("gate_reason" in tasks[PARENT_ID]) is is_cwd_missing
     assert len(gate_inputs(tmp_path)) == (0 if is_cwd_missing else 1)
     if is_cwd_missing:
         assert missing_directory in tasks[PARENT_ID]["gate_reason"]
@@ -1873,7 +1873,7 @@ def test_executor_resuming_unsettled_task_skips_gate_while_directory_is_busy(
     assert read_task(ledger_path, CHILD_ID)["status"] == golem.STATUS_WAITING
 
 
-def test_failing_gate_keeps_chain_stopped_when_task_is_picked_up_meanwhile(
+def test_failing_gate_keeps_chain_stopped_when_task_is_closed_meanwhile(
     installed_launch_agent, fake_commands, ledger_path, tmp_path
 ):
     mark_done = (
@@ -1904,14 +1904,34 @@ def test_failing_gate_keeps_chain_stopped_when_task_is_picked_up_meanwhile(
     assert tasks[CHILD_ID]["status"] == golem.STATUS_WAITING
 
 
-def test_failed_task_never_runs_its_gate(
-    installed_launch_agent, fake_commands, ledger_path, tmp_path, monkeypatch
+@pytest.mark.parametrize(
+    ("is_usage_limited", "expected_returncode", "expected_status"),
+    [
+        pytest.param(False, 1, golem.STATUS_FAILED, id="failed"),
+        pytest.param(True, 0, golem.STATUS_SCHEDULED, id="usage-limited"),
+    ],
+)
+def test_unsuccessful_task_never_runs_its_gate(
+    installed_launch_agent,
+    fake_commands,
+    ledger_path,
+    tmp_path,
+    monkeypatch,
+    is_usage_limited,
+    expected_returncode,
+    expected_status,
 ):
-    monkeypatch.setenv("GOLEM_CLAUDE_FAIL_TASK", PARENT_ID)
+    monkeypatch.setattr(golem, "next_reset_time", lambda: RESET_TIME)
+    if is_usage_limited:
+        write_claude_output(
+            fake_commands, USAGE_LIMIT_RESULT, api_error_status=golem.USAGE_LIMIT_HTTP_STATUS
+        )
+    else:
+        monkeypatch.setenv("GOLEM_CLAUDE_FAIL_TASK", PARENT_ID)
     parent = schedule_gated_chain(ledger_path, gate_command(tmp_path))
 
-    assert golem.main(["_execute", PARENT_ID, parent["session_id"]]) == 1
-    assert read_task(ledger_path, PARENT_ID)["status"] == golem.STATUS_FAILED
+    assert golem.main(["_execute", PARENT_ID, parent["session_id"]]) == expected_returncode
+    assert read_task(ledger_path, PARENT_ID)["status"] == expected_status
     assert gate_inputs(tmp_path) == []
 
 
@@ -1926,16 +1946,6 @@ def test_task_without_waiting_follow_up_never_runs_its_gate(
     assert read_task(ledger_path, PARENT_ID)["status"] == golem.STATUS_NEEDS_REVIEW
     assert "gate_reason" not in read_task(ledger_path, PARENT_ID)
     assert gate_inputs(tmp_path) == []
-
-
-def test_gate_is_refused_for_codex_without_changing_ledger(ledger_path):
-    write_task(ledger_path, golem.STATUS_SCHEDULED)
-    tasks = read_tasks(ledger_path)
-
-    with pytest.raises(SystemExit, match="--gate does not support Codex"):
-        golem.main(["run", CHILD_ID, CHILD_PROMPT, "--backend", "codex", "--gate", "true", "--now"])
-
-    assert read_tasks(ledger_path) == tasks
 
 
 def test_auto_pickup_opens_stopped_task_and_keeps_chain_stopped(
@@ -2040,18 +2050,21 @@ def test_after_succeeded_auto_pickup_parent_does_not_pass_to_child(
     assert "auto_pickup" not in read_task(ledger_path, CHILD_ID)
 
 
-def test_auto_pickup_rejects_codex_without_changing_ledger(ledger_path):
+@pytest.mark.parametrize("option_arguments", [["--auto-pickup"], ["--gate", "true"]])
+def test_claude_only_option_rejects_codex_without_changing_ledger(ledger_path, option_arguments):
     write_task(ledger_path, golem.STATUS_SCHEDULED)
     tasks = read_tasks(ledger_path)
 
-    with pytest.raises(SystemExit, match="--auto-pickup does not support Codex"):
-        golem.main(["run", CHILD_ID, CHILD_PROMPT, "--backend", "codex", "--auto-pickup", "--now"])
+    with pytest.raises(SystemExit, match=f"{option_arguments[0]} does not support Codex"):
+        golem.main(
+            ["run", CHILD_ID, CHILD_PROMPT, "--backend", "codex", *option_arguments, "--now"]
+        )
 
     assert read_tasks(ledger_path) == tasks
 
 
-@pytest.mark.parametrize("fields", [{"auto_pickup": True}, {"no_worktree": True}])
-def test_retry_keeps_task_flags(installed_launch_agent, ledger_path, fields):
+@pytest.mark.parametrize("fields", [{"auto_pickup": True}, {"no_worktree": True}, {"gate": "true"}])
+def test_retry_keeps_run_options(installed_launch_agent, ledger_path, fields):
     write_task(ledger_path, golem.STATUS_FAILED, **fields)
 
     assert golem.main(["retry", TASK_ID, "--now"]) == 0
@@ -2162,13 +2175,6 @@ def test_in_place_task_refuses_worktree_argument_without_changing_ledger(
         golem.main(["run", CHILD_ID, CHILD_PROMPT, *run_arguments, "--", WORKTREE_FLAG, "custom"])
 
     assert read_tasks(ledger_path) == tasks
-
-
-def test_retry_keeps_gate(installed_launch_agent, ledger_path):
-    write_task(ledger_path, golem.STATUS_FAILED, gate="true")
-
-    assert golem.main(["retry", TASK_ID, "--now"]) == 0
-    assert read_task(ledger_path)["gate"] == "true"
 
 
 @pytest.mark.parametrize(

@@ -1213,12 +1213,12 @@ def show_task_result(task_id: str) -> int:
     if task_id not in tasks:
         raise SystemExit(f"golem: task not found: {task_id}")
     task = cast("dict[str, Any]", tasks[task_id])
+    if "gate_reason" in task:
+        print(f"golem: gate stopped: {task['gate_reason']}", file=sys.stderr)
     result = task.get("result")
     if not isinstance(result, str):
         raise SystemExit(f"golem: task has no result: {task_id}")
     print_task_result(result)
-    if "gate_reason" in task:
-        print(f"golem: gate stopped: {task['gate_reason']}", file=sys.stderr)
     return 0
 
 
@@ -1909,7 +1909,7 @@ def is_unsettled(tasks: dict[str, Any], task_id: str) -> bool:
     )
 
 
-def task_directory_lock(task: dict[str, Any]) -> io.TextIOWrapper | None:
+def acquire_task_directory_lock(task: dict[str, Any]) -> io.TextIOWrapper | None:
     return acquire_lock(directory_lock_path(directory_to_lock(task, task.get("worktree"))))
 
 
@@ -1926,7 +1926,9 @@ def settle_succeeded_task(task_id: str) -> None:
         current = cast("dict[str, Any]", current_task)
         if stop_reason is not None and current.get("status") in SUCCEEDED_STATUSES:
             current["gate_reason"] = stop_reason
-        elif current.get("status") == STATUS_NEEDS_REVIEW:
+        elif current.get("status") == STATUS_NEEDS_REVIEW and waiting_dependent_ids(
+            locked_tasks_by_id, task_id
+        ):
             current["status"] = STATUS_DONE
 
 
@@ -1935,7 +1937,7 @@ def continue_task(task_id: str, *, is_forced: bool) -> int:
     if "gate_reason" not in task:
         raise SystemExit(f"golem: task is not stopped at a gate: {task_id}")
     if not is_forced:
-        directory_lock_file = task_directory_lock(task)
+        directory_lock_file = acquire_task_directory_lock(task)
         if directory_lock_file is None:
             raise SystemExit(f"golem: directory is busy: {task_id}")
         try:
@@ -1987,11 +1989,11 @@ def execute_scheduled_task(task_id: str, session_id: str) -> int:
     return execute_claimed_task(task_id, *claim)
 
 
-def settle_unsettled_task_locked(task_id: str) -> bool:
+def settle_under_directory_lock(task_id: str) -> bool:
     tasks = load_tasks()
     if not is_unsettled(tasks, task_id):
         return True
-    directory_lock_file = task_directory_lock(cast("dict[str, Any]", tasks[task_id]))
+    directory_lock_file = acquire_task_directory_lock(cast("dict[str, Any]", tasks[task_id]))
     if directory_lock_file is None:
         return False
     try:
@@ -2007,7 +2009,7 @@ def drain_succeeded_task(task_id: str, session_id: str) -> None:
     if run_lock_file is None:
         return
     try:
-        if not settle_unsettled_task_locked(task_id):
+        if not settle_under_directory_lock(task_id):
             return
         drain_dependents(task_id, session_id)
     finally:
