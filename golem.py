@@ -9,6 +9,7 @@ import re
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -375,15 +376,17 @@ def dependent_task_ids(tasks: dict[str, Any], parent_id: str) -> list[str]:
     )
 
 
-def running_descendant_ids(tasks: dict[str, Any], task_id: str) -> list[str]:
-    running_ids: list[str] = []
+def descendant_ids_with_status(
+    tasks: dict[str, Any], task_id: str, statuses: set[str]
+) -> list[str]:
+    matching_ids: list[str] = []
     pending_ids = [task_id]
     while pending_ids:
         for dependent_id in dependent_task_ids(tasks, pending_ids.pop()):
             pending_ids.append(dependent_id)
-            if tasks[dependent_id]["status"] == STATUS_RUNNING:
-                running_ids.append(dependent_id)
-    return running_ids
+            if tasks[dependent_id]["status"] in statuses:
+                matching_ids.append(dependent_id)
+    return matching_ids
 
 
 def has_running_dependent(tasks: dict[str, Any], parent_id: str) -> bool:
@@ -2042,6 +2045,13 @@ def local_settings_path(directory: str) -> Path:
     return Path(directory) / ".claude" / "settings.local.json"
 
 
+def save_local_settings(path: Path, settings: dict[str, Any]) -> None:
+    mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else None
+    save_json(path, settings)
+    if mode is not None:
+        path.chmod(mode)
+
+
 def read_local_settings(path: Path) -> dict[str, Any] | None:
     try:
         loaded_settings = cast("object", load_json(path))
@@ -2093,7 +2103,7 @@ def install_hooks(directory: str) -> None:
         return
     try:
         path.parent.mkdir(exist_ok=True)
-        save_json(path, settings)
+        save_local_settings(path, settings)
     except OSError as error:
         print(f"golem: hooks not installed: {error}", file=sys.stderr)
 
@@ -2121,16 +2131,23 @@ def remove_hooks(directory: str) -> None:
         return
     if not hooks:
         del settings["hooks"]
-    if settings:
-        save_json(path, settings)
+    try:
+        if settings:
+            save_local_settings(path, settings)
+            return
+        path.unlink()
+    except OSError as error:
+        print(f"golem: hooks not removed: {error}", file=sys.stderr)
         return
-    path.unlink()
     with suppress(OSError):
         path.parent.rmdir()
 
 
 def has_pending_follow_up(tasks: dict[str, Any], task_id: str) -> bool:
-    return bool(waiting_dependent_ids(tasks, task_id) or running_descendant_ids(tasks, task_id))
+    return bool(
+        waiting_dependent_ids(tasks, task_id)
+        or descendant_ids_with_status(tasks, task_id, {STATUS_SCHEDULED, STATUS_RUNNING})
+    )
 
 
 def is_hook_needed(tasks: dict[str, Any], directory: str) -> bool:
@@ -2208,7 +2225,7 @@ def hook_pre_tool_use() -> int:
     task_id = session_task_id(tasks, read_hook_session_id())
     if task_id is None:
         return 0
-    running_ids = running_descendant_ids(tasks, task_id)
+    running_ids = descendant_ids_with_status(tasks, task_id, {STATUS_RUNNING})
     if not running_ids:
         return 0
     reason = f"golem is running {running_ids[0]}; wait for it to finish"
@@ -3188,6 +3205,7 @@ def schedule_run_task(
         if reserve_dependent_task(
             {arguments.id: dependent_record, **follow_up_records}, arguments.after
         ):
+            sync_hooks(task_directory(existing_task(load_tasks(), arguments.after)))
             print(f"golem: {arguments.id} will run after {arguments.after}")
             return 0
     when = planned_execution_time(arguments.backend, is_now=arguments.now, at_text=arguments.at)

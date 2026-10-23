@@ -9,6 +9,7 @@ import select
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -51,6 +52,7 @@ ANSI_COLOR = re.compile(r"\033\[38;5;\d+m|\033\[0m")
 WORKTREE_BRANCH = "worktree"
 DAY_SECONDS = 24 * 60 * 60
 GATE_REASON = "no pull request yet"
+USER_SETTINGS_MODE = 0o644
 PARENT_SESSION = f"{PARENT_ID}-session"
 USER_SETTINGS = {
     "permissions": {"allow": ["Bash(ls:*)"]},
@@ -2046,6 +2048,7 @@ def stop_gated_chain(ledger_path, fake_commands, tmp_path, original_settings):
     if original_settings is not None:
         settings_file().parent.mkdir()
         settings_file().write_text(json.dumps(original_settings), encoding="utf-8")
+        settings_file().chmod(USER_SETTINGS_MODE)
     write_claude_output(fake_commands, CLAUDE_RESULT)
     return run_gated_chain(ledger_path, gate_command(tmp_path, exit_code=1, stderr=GATE_REASON))
 
@@ -2090,6 +2093,7 @@ def test_hooks_are_seeded_when_chain_stops_and_removed_when_it_ends(
         assert not settings_file().parent.exists()
         return
     assert json.loads(settings_file().read_text(encoding="utf-8")) == original_settings
+    assert stat.S_IMODE(settings_file().stat().st_mode) == USER_SETTINGS_MODE
 
 
 def test_hook_settings_that_are_not_json_are_left_alone(
@@ -2131,6 +2135,41 @@ def test_remove_hooks_keeps_user_entry_sharing_a_group():
     }
 
 
+@pytest.mark.parametrize(
+    ("child_status", "is_needed"),
+    [
+        (golem.STATUS_RUNNING, True),
+        (golem.STATUS_SCHEDULED, True),
+        (golem.STATUS_NEEDS_REVIEW, False),
+    ],
+    ids=["follow-up-running", "follow-up-paused", "follow-up-finished"],
+)
+def test_hooks_stay_until_follow_up_finishes(ledger_path, child_status, is_needed):
+    write_tasks(
+        ledger_path,
+        {
+            PARENT_ID: task_record(golem.STATUS_DONE, task_id=PARENT_ID, gate="true"),
+            CHILD_ID: task_record(child_status, task_id=CHILD_ID, after=PARENT_ID),
+        },
+    )
+
+    golem.sync_hooks(str(Path.cwd()))
+
+    assert settings_file().exists() == is_needed
+
+
+def test_follow_up_queued_after_stopped_task_seeds_hooks(
+    installed_launch_agent, fake_commands, ledger_path, tmp_path
+):
+    stop_gated_chain(ledger_path, fake_commands, tmp_path, None)
+    assert golem.main(["cancel", CHILD_ID]) == 0
+    assert not settings_file().exists()
+
+    assert golem.main(["run", GRANDCHILD_ID, CHILD_PROMPT, "--after", PARENT_ID]) == 0
+
+    assert settings_file().exists()
+
+
 def test_ungated_chain_gets_no_hooks(installed_launch_agent, fake_commands, ledger_path):
     write_claude_output(fake_commands, CLAUDE_RESULT)
     golem.main(["run", PARENT_ID, PARENT_PROMPT, "--now", "--then", CHILD_ID, CHILD_PROMPT])
@@ -2160,23 +2199,20 @@ def test_stop_hook_continues_stopped_chain_when_gate_passes(
 
 
 @pytest.mark.parametrize(
-    ("session_id", "gate_exit_code", "is_directory_busy"),
-    [("unknown-session", 0, False), (PARENT_SESSION, 1, False), (PARENT_SESSION, 0, True)],
-    ids=["unknown-session", "failing-gate", "busy-directory"],
+    ("session_id", "gate", "is_directory_busy"),
+    [
+        ("unknown-session", "true", False),
+        (PARENT_SESSION, "false", False),
+        (PARENT_SESSION, "sleep 5", False),
+        (PARENT_SESSION, "true", True),
+    ],
+    ids=["unknown-session", "failing-gate", "slow-gate", "busy-directory"],
 )
 def test_stop_hook_does_nothing(
-    ledger_path,
-    tmp_path,
-    started_executors,
-    monkeypatch,
-    capsys,
-    session_id,
-    gate_exit_code,
-    is_directory_busy,
+    ledger_path, started_executors, monkeypatch, capsys, session_id, gate, is_directory_busy
 ):
-    write_parent_with_waiting_child(
-        ledger_path, gate=gate_command(tmp_path, exit_code=gate_exit_code), gate_reason=GATE_REASON
-    )
+    monkeypatch.setattr(golem, "HOOK_GATE_TIMEOUT_SECONDS", 0.2)
+    write_parent_with_waiting_child(ledger_path, gate=gate, gate_reason=GATE_REASON)
     directory_lock_file = (
         golem.acquire_lock(golem.directory_lock_path(str(Path.cwd())))
         if is_directory_busy
