@@ -938,7 +938,7 @@ def run_claude(
                     with suppress(json.JSONDecodeError):
                         for progress in claude_event_progress(cast("object", json.loads(line))):
                             record_progress(progress)
-            except OSError:
+            except BaseException:
                 claude_process.kill()
                 claude_process.wait()
                 raise
@@ -1410,8 +1410,9 @@ def follow_progress_until_stopped(
         with suppress(FileNotFoundError):
             while path.stat().st_ino != os.fstat(progress_file.fileno()).st_ino:
                 print_new_progress(progress_file)
-                progress_file.close()
+                rotated_file = progress_file
                 progress_file = path.open("rb")
+                rotated_file.close()
                 print_new_progress(progress_file)
         if task.get("status") != STATUS_RUNNING:
             progress_file.close()
@@ -1430,10 +1431,10 @@ def watch_task(task_id: str) -> int:
         progress_file = path.open("rb")
     except FileNotFoundError:
         raise SystemExit(f"golem: task has no recorded progress: {task_id}") from None
-    with suppress(FileNotFoundError), rotated_path.open("rb") as rotated_file:
-        if os.fstat(rotated_file.fileno()).st_ino != os.fstat(progress_file.fileno()).st_ino:
-            print_new_progress(rotated_file)
     try:
+        with suppress(FileNotFoundError), rotated_path.open("rb") as rotated_file:
+            if os.fstat(rotated_file.fileno()).st_ino != os.fstat(progress_file.fileno()).st_ino:
+                print_new_progress(rotated_file)
         print(task_end_line(task_id, follow_progress_until_stopped(task_id, path, progress_file)))
     except KeyboardInterrupt:
         return 130
@@ -1850,7 +1851,9 @@ def schedule_new_task(
     return wake_launch_agent_and_report(task_id, due_time)
 
 
-def claude_stream_events(output: str) -> list[object]:
+def claude_output_events(output: str) -> object:
+    with suppress(json.JSONDecodeError):
+        return cast("object", json.loads(output))
     events: list[object] = []
     for line in output.splitlines():
         with suppress(json.JSONDecodeError):
@@ -1859,10 +1862,7 @@ def claude_stream_events(output: str) -> list[object]:
 
 
 def claude_result_and_usage_limit(output: str) -> tuple[str, bool]:
-    try:
-        parsed_response = cast("object", json.loads(output))
-    except json.JSONDecodeError:
-        parsed_response = claude_stream_events(output)
+    parsed_response = claude_output_events(output)
     if isinstance(parsed_response, list):
         parsed_response = next(
             (
@@ -1883,10 +1883,7 @@ def claude_result_and_usage_limit(output: str) -> tuple[str, bool]:
 
 
 def claude_working_directory(output: str) -> str | None:
-    try:
-        parsed_response = cast("object", json.loads(output))
-    except json.JSONDecodeError:
-        parsed_response = claude_stream_events(output)
+    parsed_response = claude_output_events(output)
     if not isinstance(parsed_response, list):
         return None
     for message in cast("list[object]", parsed_response):
