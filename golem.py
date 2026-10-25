@@ -828,14 +828,14 @@ def remove_progress(session_id: str) -> None:
 def progress_writer(session_id: str) -> Generator[Callable[[str], None]]:
     path = progress_path(session_id)
     path.parent.mkdir(parents=True, exist_ok=True)
-    progress_file = path.open("a", encoding="utf-8")
+    progress_file = path.open("a", encoding="utf-8", errors="replace")
 
     def record_progress(text: str) -> None:
         nonlocal progress_file
         if progress_file.tell() > AGENT_LOG_MAX_BYTES:
             progress_file.close()
             path.replace(rotated_progress_path(session_id))
-            progress_file = path.open("a", encoding="utf-8")
+            progress_file = path.open("a", encoding="utf-8", errors="replace")
         progress_file.write(text if text.endswith("\n") else f"{text}\n")
         progress_file.flush()
 
@@ -938,11 +938,11 @@ def run_claude(
                     with suppress(json.JSONDecodeError):
                         for progress in claude_event_progress(cast("object", json.loads(line))):
                             record_progress(progress)
+                returncode = claude_process.wait()
             except BaseException:
                 claude_process.kill()
                 claude_process.wait()
                 raise
-        returncode = claude_process.wait()
         stderr_file.seek(0)
         stderr = stderr_file.read()
     sys.stderr.write(stderr)
@@ -1174,8 +1174,13 @@ def run_codex(
         finally:
             with suppress(BrokenPipeError):
                 standard_input.close()
-        event_state = read_codex_events(process, task_id, session_id, record_progress)
-        returncode = process.wait()
+        try:
+            event_state = read_codex_events(process, task_id, session_id, record_progress)
+            returncode = process.wait()
+        except BaseException:
+            process.kill()
+            process.wait()
+            raise
     result = (
         event_state.failed_message
         or event_state.last_agent_message
@@ -1851,7 +1856,7 @@ def schedule_new_task(
     return wake_launch_agent_and_report(task_id, due_time)
 
 
-def claude_output_events(output: str) -> object:
+def parsed_claude_output(output: str) -> object:
     with suppress(json.JSONDecodeError):
         return cast("object", json.loads(output))
     events: list[object] = []
@@ -1862,7 +1867,7 @@ def claude_output_events(output: str) -> object:
 
 
 def claude_result_and_usage_limit(output: str) -> tuple[str, bool]:
-    parsed_response = claude_output_events(output)
+    parsed_response = parsed_claude_output(output)
     if isinstance(parsed_response, list):
         parsed_response = next(
             (
@@ -1883,7 +1888,7 @@ def claude_result_and_usage_limit(output: str) -> tuple[str, bool]:
 
 
 def claude_working_directory(output: str) -> str | None:
-    parsed_response = claude_output_events(output)
+    parsed_response = parsed_claude_output(output)
     if not isinstance(parsed_response, list):
         return None
     for message in cast("list[object]", parsed_response):
