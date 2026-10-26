@@ -5008,6 +5008,37 @@ def test_watch_follows_running_task_to_its_end(
     assert read_task(ledger_path)["result"] == CLAUDE_RESULT
 
 
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_progress_write_failure_keeps_task_result(
+    installed_launch_agent, fake_commands, ledger_path, monkeypatch, tmp_path, backend
+):
+    write_agent_run_and_expected_progress(
+        fake_commands, monkeypatch, tmp_path, backend, CLAUDE_RESULT
+    )
+    monkeypatch.setattr(golem, "AGENT_LOG_MAX_BYTES", 0)
+    monkeypatch.setattr(golem, "rotated_progress_path", lambda _: tmp_path / "missing" / "log")
+    task = run_now(ledger_path, backend)
+
+    golem.main(["_execute", TASK_ID, task["session_id"]])
+
+    task = read_task(ledger_path)
+    assert (task["status"], task["result"]) == (golem.STATUS_NEEDS_REVIEW, CLAUDE_RESULT)
+
+
+def test_watch_exits_130_on_interrupt(ledger_path, monkeypatch):
+    write_task(ledger_path, golem.STATUS_RUNNING)
+    path = golem.progress_path(read_task(ledger_path)["session_id"])
+    path.parent.mkdir(parents=True)
+    path.touch()
+
+    def interrupt(_seconds: float) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(golem.time, "sleep", interrupt)
+
+    assert golem.main(["watch", TASK_ID]) == 130
+
+
 def test_watch_takes_no_locks_and_leaves_ledger_unchanged(ledger_path):
     write_task(ledger_path, golem.STATUS_RUNNING)
     task = read_task(ledger_path)

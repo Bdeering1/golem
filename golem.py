@@ -832,12 +832,18 @@ def progress_writer(session_id: str) -> Generator[Callable[[str], None]]:
 
     def record_progress(text: str) -> None:
         nonlocal progress_file
-        if progress_file.tell() > AGENT_LOG_MAX_BYTES:
-            progress_file.close()
-            path.replace(rotated_progress_path(session_id))
-            progress_file = path.open("a", encoding="utf-8", errors="replace")
-        progress_file.write(text if text.endswith("\n") else f"{text}\n")
-        progress_file.flush()
+        if progress_file.closed:
+            return
+        try:
+            if progress_file.tell() > AGENT_LOG_MAX_BYTES:
+                progress_file.close()
+                path.replace(rotated_progress_path(session_id))
+                progress_file = path.open("a", encoding="utf-8", errors="replace")
+            progress_file.write(text if text.endswith("\n") else f"{text}\n")
+            progress_file.flush()
+        except OSError:
+            with suppress(OSError):
+                progress_file.close()
 
     try:
         yield record_progress
@@ -1409,20 +1415,22 @@ def print_new_progress(progress_file: BinaryIO) -> None:
 def follow_progress_until_stopped(
     task_id: str, path: Path, progress_file: BinaryIO
 ) -> dict[str, Any]:
-    while True:
-        task = existing_task(load_tasks(), task_id)
-        print_new_progress(progress_file)
-        with suppress(FileNotFoundError):
-            while path.stat().st_ino != os.fstat(progress_file.fileno()).st_ino:
-                print_new_progress(progress_file)
-                rotated_file = progress_file
-                progress_file = path.open("rb")
-                rotated_file.close()
-                print_new_progress(progress_file)
-        if task.get("status") != STATUS_RUNNING:
-            progress_file.close()
-            return task
-        time.sleep(WATCH_POLL_SECONDS)
+    try:
+        while True:
+            task = existing_task(load_tasks(), task_id)
+            print_new_progress(progress_file)
+            with suppress(FileNotFoundError):
+                while path.stat().st_ino != os.fstat(progress_file.fileno()).st_ino:
+                    print_new_progress(progress_file)
+                    rotated_file = progress_file
+                    progress_file = path.open("rb")
+                    rotated_file.close()
+                    print_new_progress(progress_file)
+            if task.get("status") != STATUS_RUNNING:
+                return task
+            time.sleep(WATCH_POLL_SECONDS)
+    finally:
+        progress_file.close()
 
 
 def watch_task(task_id: str) -> int:
@@ -2019,6 +2027,8 @@ def claim_task(
             else:
                 record_worktree_resource(worktrees, worktree, session_id)
     clear_worktree_release(tasks, worktrees, task)
+    progress_path(session_id).parent.mkdir(parents=True, exist_ok=True)
+    progress_path(session_id).touch()
     task["status"] = STATUS_RUNNING
     task["started_at"] = datetime.now(UTC).isoformat()
     return task.copy(), run_lock_file, directory_lock_file
