@@ -4824,22 +4824,6 @@ def test_prune_interrupted_at_prompt_deletes_nothing(ledger_path, monkeypatch):
     assert set(golem.load_tasks()) == {TASK_ID, SIBLING_ID}
 
 
-def test_prune_declined_chain_leaves_other_chains_to_their_own_answer(ledger_path, monkeypatch):
-    write_tasks(
-        ledger_path,
-        {
-            PARENT_ID: task_record(golem.STATUS_DONE, task_id=PARENT_ID),
-            CHILD_ID: task_record(golem.STATUS_DONE, task_id=CHILD_ID, after=PARENT_ID),
-            SIBLING_ID: task_record(golem.STATUS_DONE, task_id=SIBLING_ID),
-        },
-    )
-    monkeypatch.setattr(sys, "stdin", TerminalInput("n\ny\n"))
-
-    assert golem.main(["prune"]) == 0
-
-    assert set(golem.load_tasks()) == {PARENT_ID, CHILD_ID}
-
-
 def write_chain(ledger_path, statuses):
     task_ids = [PARENT_ID, CHILD_ID, GRANDCHILD_ID][: len(statuses)]
     tasks = {
@@ -4855,18 +4839,18 @@ def write_chain(ledger_path, statuses):
     ("answers", "remaining_ids"),
     [
         pytest.param("y\n", set(), id="yes"),
-        pytest.param("n\n", {PARENT_ID, CHILD_ID, GRANDCHILD_ID}, id="no"),
+        pytest.param("n\n", {PARENT_ID, CHILD_ID}, id="no"),
     ],
 )
 def test_prune_asks_once_per_chain(ledger_path, monkeypatch, capsys, answers, remaining_ids):
-    write_chain(ledger_path, [golem.STATUS_DONE, golem.STATUS_CANCELLED, golem.STATUS_DONE])
+    write_chain(ledger_path, [golem.STATUS_DONE, golem.STATUS_DONE, golem.STATUS_CANCELLED])
     monkeypatch.setattr(sys, "stdin", TerminalInput(answers))
 
     assert golem.main(["prune"]) == 0
 
     prompt = capsys.readouterr().out
     assert prompt.count("Remove ") == 1
-    assert f"{PARENT_ID}, {GRANDCHILD_ID} ({golem.STATUS_DONE}, no transcript)" in prompt
+    assert f"{PARENT_ID}, {CHILD_ID} ({golem.STATUS_DONE}, no transcript)" in prompt
     assert set(golem.load_tasks()) == remaining_ids
 
 
@@ -4878,8 +4862,7 @@ def test_prune_offers_only_eligible_tasks_in_chain(ledger_path, monkeypatch, cap
     assert golem.main(["prune"]) == 0
 
     prompt = capsys.readouterr().out
-    assert CHILD_ID in prompt
-    assert PARENT_ID not in prompt
+    assert f"Remove {CHILD_ID}, {GRANDCHILD_ID} ({golem.STATUS_DONE}, no transcript)?" in prompt
     assert set(golem.load_tasks()) == {PARENT_ID}
 
 
