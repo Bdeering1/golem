@@ -28,6 +28,7 @@ PARENT_ID = "parent"
 CHILD_ID = "child"
 GRANDCHILD_ID = "grandchild"
 SIBLING_ID = "sibling"
+SIBLING_CHILD_ID = "sibling-child"
 PARENT_PROMPT = "run the parent"
 CHILD_PROMPT = "run the child"
 GRANDCHILD_PROMPT = "run the grandchild"
@@ -4823,7 +4824,7 @@ def test_prune_interrupted_at_prompt_deletes_nothing(ledger_path, monkeypatch):
     assert set(golem.load_tasks()) == {TASK_ID, SIBLING_ID}
 
 
-def test_prune_offers_parent_only_after_its_dependents_are_removed(ledger_path, monkeypatch):
+def test_prune_declined_chain_leaves_other_chains_to_their_own_answer(ledger_path, monkeypatch):
     write_tasks(
         ledger_path,
         {
@@ -4863,7 +4864,9 @@ def test_prune_asks_once_per_chain(ledger_path, monkeypatch, capsys, answers, re
 
     assert golem.main(["prune"]) == 0
 
-    assert capsys.readouterr().out.count("Remove ") == 1
+    prompt = capsys.readouterr().out
+    assert prompt.count("Remove ") == 1
+    assert f"{PARENT_ID}, {GRANDCHILD_ID} ({golem.STATUS_DONE}, no transcript)" in prompt
     assert set(golem.load_tasks()) == remaining_ids
 
 
@@ -4897,7 +4900,7 @@ def test_prune_shows_each_reason_when_chain_reasons_differ(ledger_path, monkeypa
     ("answers", "prompt_count", "remaining_ids"),
     [
         pytest.param("a\n", 1, set(), id="all"),
-        pytest.param("y\nq\n", 2, {SIBLING_ID, "sibling-child"}, id="quit"),
+        pytest.param("y\nq\n", 2, {SIBLING_ID, SIBLING_CHILD_ID}, id="quit"),
     ],
 )
 def test_prune_applies_all_and_quit_per_chain(
@@ -4909,8 +4912,8 @@ def test_prune_applies_all_and_quit_per_chain(
             PARENT_ID: task_record(golem.STATUS_DONE, task_id=PARENT_ID),
             CHILD_ID: task_record(golem.STATUS_DONE, task_id=CHILD_ID, after=PARENT_ID),
             SIBLING_ID: task_record(golem.STATUS_DONE, task_id=SIBLING_ID),
-            "sibling-child": task_record(
-                golem.STATUS_DONE, task_id="sibling-child", after=SIBLING_ID
+            SIBLING_CHILD_ID: task_record(
+                golem.STATUS_DONE, task_id=SIBLING_CHILD_ID, after=SIBLING_ID
             ),
             TASK_ID: task_record(golem.STATUS_CANCELLED),
         },
