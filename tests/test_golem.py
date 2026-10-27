@@ -1,5 +1,6 @@
 import contextlib
 import io
+import itertools
 import json
 import multiprocessing
 import os
@@ -4836,6 +4837,90 @@ def test_prune_offers_parent_only_after_its_dependents_are_removed(ledger_path, 
     assert golem.main(["prune"]) == 0
 
     assert set(golem.load_tasks()) == {PARENT_ID, CHILD_ID}
+
+
+def write_chain(ledger_path, statuses):
+    task_ids = [PARENT_ID, CHILD_ID, GRANDCHILD_ID][: len(statuses)]
+    tasks = {
+        task_id: task_record(status, task_id=task_id)
+        for task_id, status in zip(task_ids, statuses, strict=True)
+    }
+    for parent_id, task_id in itertools.pairwise(task_ids):
+        tasks[task_id]["after"] = parent_id
+    write_tasks(ledger_path, tasks)
+
+
+@pytest.mark.parametrize(
+    ("answers", "remaining_ids"),
+    [
+        pytest.param("y\n", set(), id="yes"),
+        pytest.param("n\n", {PARENT_ID, CHILD_ID, GRANDCHILD_ID}, id="no"),
+    ],
+)
+def test_prune_asks_once_per_chain(ledger_path, monkeypatch, capsys, answers, remaining_ids):
+    write_chain(ledger_path, [golem.STATUS_DONE, golem.STATUS_CANCELLED, golem.STATUS_DONE])
+    monkeypatch.setattr(sys, "stdin", TerminalInput(answers))
+
+    assert golem.main(["prune"]) == 0
+
+    assert capsys.readouterr().out.count("Remove ") == 1
+    assert set(golem.load_tasks()) == remaining_ids
+
+
+def test_prune_offers_only_eligible_tasks_in_chain(ledger_path, monkeypatch, capsys):
+    write_chain(ledger_path, [golem.STATUS_DONE, golem.STATUS_DONE, golem.STATUS_DONE])
+    write_transcript(f"{PARENT_ID}-session", 0)
+    monkeypatch.setattr(sys, "stdin", TerminalInput("y\n"))
+
+    assert golem.main(["prune"]) == 0
+
+    prompt = capsys.readouterr().out
+    assert CHILD_ID in prompt
+    assert PARENT_ID not in prompt
+    assert set(golem.load_tasks()) == {PARENT_ID}
+
+
+def test_prune_shows_each_reason_when_chain_reasons_differ(ledger_path, monkeypatch, capsys):
+    write_chain(ledger_path, [golem.STATUS_DONE, golem.STATUS_DONE])
+    write_transcript(f"{PARENT_ID}-session", golem.PRUNE_IDLE_DAYS)
+    monkeypatch.setattr(sys, "stdin", TerminalInput("y\n"))
+
+    assert golem.main(["prune"]) == 0
+
+    prompt = capsys.readouterr().out
+    assert f"{PARENT_ID} ({golem.STATUS_DONE}, idle {golem.PRUNE_IDLE_DAYS}d)" in prompt
+    assert f"{CHILD_ID} ({golem.STATUS_DONE}, no transcript)" in prompt
+    assert not golem.load_tasks()
+
+
+@pytest.mark.parametrize(
+    ("answers", "prompt_count", "remaining_ids"),
+    [
+        pytest.param("a\n", 1, set(), id="all"),
+        pytest.param("y\nq\n", 2, {SIBLING_ID, "sibling-child"}, id="quit"),
+    ],
+)
+def test_prune_applies_all_and_quit_per_chain(
+    ledger_path, monkeypatch, capsys, answers, prompt_count, remaining_ids
+):
+    write_tasks(
+        ledger_path,
+        {
+            PARENT_ID: task_record(golem.STATUS_DONE, task_id=PARENT_ID),
+            CHILD_ID: task_record(golem.STATUS_DONE, task_id=CHILD_ID, after=PARENT_ID),
+            SIBLING_ID: task_record(golem.STATUS_DONE, task_id=SIBLING_ID),
+            "sibling-child": task_record(
+                golem.STATUS_DONE, task_id="sibling-child", after=SIBLING_ID
+            ),
+            TASK_ID: task_record(golem.STATUS_CANCELLED),
+        },
+    )
+    monkeypatch.setattr(sys, "stdin", TerminalInput(answers))
+
+    assert golem.main(["prune"]) == 0
+
+    assert capsys.readouterr().out.count("Remove ") == prompt_count
+    assert set(golem.load_tasks()) == remaining_ids
 
 
 def test_prune_keeps_parent_of_remaining_task(ledger_path):

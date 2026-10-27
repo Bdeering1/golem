@@ -3164,8 +3164,20 @@ def done_task_prune_reason(task: dict[str, Any], pull_requests: PullRequestCache
     return f"PR #{pull_request['number']} {pull_request['state'].lower()}"
 
 
-def prune_answer(task_id: str, reason: str) -> str:
-    prompt = f"Remove {task_id} ({STATUS_DONE}, {reason})? [{','.join(PRUNE_ANSWERS)}] "
+def prune_question(candidates: list[tuple[str, str]]) -> str:
+    reasons = {reason for _, reason in candidates}
+    if len(reasons) == 1:
+        task_ids = ", ".join(task_id for task_id, _ in candidates)
+        removals = f"{task_ids} ({STATUS_DONE}, {reasons.pop()})"
+    else:
+        removals = ", ".join(
+            f"{task_id} ({STATUS_DONE}, {reason})" for task_id, reason in candidates
+        )
+    return f"Remove {removals}? [{','.join(PRUNE_ANSWERS)}] "
+
+
+def prune_answer(candidates: list[tuple[str, str]]) -> str:
+    prompt = prune_question(candidates)
     while True:
         try:
             answer = input(prompt).strip().lower()
@@ -3174,6 +3186,31 @@ def prune_answer(task_id: str, reason: str) -> str:
             return PRUNE_ANSWER_QUIT
         if answer in PRUNE_ANSWERS:
             return answer
+
+
+def chain_prune_selection(
+    tasks: dict[str, Any], chain_ids: list[str], pull_requests: PullRequestCache | None
+) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
+    selected_tasks: dict[str, dict[str, Any]] = {}
+    done_reasons: dict[str, str] = {}
+    for task_id in chain_ids:
+        task = cast("dict[str, Any]", tasks[task_id])
+        if any(
+            dependent_id not in selected_tasks
+            for dependent_id in dependent_task_ids(tasks, task_id)
+        ):
+            continue
+        if task["status"] == STATUS_CANCELLED:
+            selected_tasks[task_id] = task
+            continue
+        if task["status"] != STATUS_DONE or pull_requests is None:
+            continue
+        reason = done_task_prune_reason(task, pull_requests)
+        if reason is None:
+            continue
+        done_reasons[task_id] = reason
+        selected_tasks[task_id] = task
+    return selected_tasks, done_reasons
 
 
 def prune_selection(
@@ -3189,27 +3226,20 @@ def prune_selection(
     root_task_ids = sorted(
         task_id for task_id, task in tasks.items() if task.get("after") not in tasks
     )
-    for task_id in dependents_first_task_ids(tasks, root_task_ids):
-        task = cast("dict[str, Any]", tasks[task_id])
-        if any(
-            dependent_id not in selected_tasks
-            for dependent_id in dependent_task_ids(tasks, task_id)
-        ):
-            continue
-        if task["status"] == STATUS_CANCELLED:
-            candidate_count += 1
-            selected_tasks[task_id] = task
-            continue
-        if task["status"] != STATUS_DONE or is_keeping_done_tasks or answer == PRUNE_ANSWER_QUIT:
-            continue
-        reason = done_task_prune_reason(task, pull_requests)
-        if reason is None:
-            continue
-        candidate_count += 1
-        if answer != PRUNE_ANSWER_ALL:
-            answer = prune_answer(task_id, reason)
-        if answer in {PRUNE_ANSWER_YES, PRUNE_ANSWER_ALL}:
-            selected_tasks[task_id] = task
+    for root_task_id in root_task_ids:
+        chain_ids = dependents_first_task_ids(tasks, [root_task_id])
+        is_offering_done_tasks = not is_keeping_done_tasks and answer != PRUNE_ANSWER_QUIT
+        chain_selected_tasks, done_reasons = chain_prune_selection(
+            tasks, chain_ids, pull_requests if is_offering_done_tasks else None
+        )
+        candidate_count += len(chain_selected_tasks)
+        if done_reasons and answer != PRUNE_ANSWER_ALL:
+            answer = prune_answer(
+                [(task_id, done_reasons[task_id]) for task_id in tasks if task_id in done_reasons]
+            )
+            if answer not in {PRUNE_ANSWER_YES, PRUNE_ANSWER_ALL}:
+                chain_selected_tasks, _ = chain_prune_selection(tasks, chain_ids, None)
+        selected_tasks |= chain_selected_tasks
     return selected_tasks, candidate_count
 
 
