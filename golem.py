@@ -861,9 +861,15 @@ def tool_call_progress(name: str, argument: object) -> str:
 
 
 def claude_event_progress(event: object) -> list[str]:
-    if not isinstance(event, dict) or cast("dict[str, object]", event).get("type") != "assistant":
+    if not isinstance(event, dict):
         return []
-    message = cast("dict[str, object]", event).get("message")
+    event_fields = cast("dict[str, object]", event)
+    if (
+        event_fields.get("type") != "assistant"
+        or event_fields.get("parent_tool_use_id") is not None
+    ):
+        return []
+    message = event_fields.get("message")
     content = (
         cast("dict[str, object]", message).get("content") if isinstance(message, dict) else None
     )

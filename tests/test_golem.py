@@ -4944,6 +4944,7 @@ def write_agent_run_and_expected_progress(
         return f"[tool] command {WATCHED_COMMAND}\n{message}\n"
     assistant = {
         "type": "assistant",
+        "parent_tool_use_id": None,
         "message": {
             "content": [
                 {"type": "tool_use", "name": "Bash", "input": {"command": command}},
@@ -4951,12 +4952,17 @@ def write_agent_run_and_expected_progress(
             ]
         },
     }
+    subagent_assistant = {
+        "type": "assistant",
+        "parent_tool_use_id": "toolu_agent",
+        "message": {"content": [{"type": "text", "text": "subagent text"}]},
+    }
     result = {
         "type": "result",
         "result": USAGE_LIMIT_RESULT if is_usage_limit else message,
         "api_error_status": golem.USAGE_LIMIT_HTTP_STATUS if is_usage_limit else None,
     }
-    write_claude_events(fake_commands, [assistant, result])
+    write_claude_events(fake_commands, [subagent_assistant, assistant, result])
     return f"[tool] Bash {WATCHED_COMMAND}\n{message}\n"
 
 
