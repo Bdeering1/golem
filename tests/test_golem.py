@@ -4980,6 +4980,13 @@ def watch_subprocess_output():
     assert watch.returncode == 0
 
 
+def write_progress(session_id, text=""):
+    path = golem.progress_path(session_id)
+    path.parent.mkdir(parents=True)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_watch_follows_running_task_to_its_end(
     installed_launch_agent, fake_commands, ledger_path, monkeypatch, tmp_path, backend
@@ -5027,9 +5034,7 @@ def test_progress_write_failure_keeps_task_result(
 
 def test_watch_exits_130_on_interrupt(ledger_path, monkeypatch):
     write_task(ledger_path, golem.STATUS_RUNNING)
-    path = golem.progress_path(read_task(ledger_path)["session_id"])
-    path.parent.mkdir(parents=True)
-    path.touch()
+    write_progress(read_task(ledger_path)["session_id"])
 
     def interrupt(_seconds: float) -> None:
         raise KeyboardInterrupt
@@ -5042,9 +5047,7 @@ def test_watch_exits_130_on_interrupt(ledger_path, monkeypatch):
 def test_watch_takes_no_locks_and_leaves_ledger_unchanged(ledger_path):
     write_task(ledger_path, golem.STATUS_RUNNING)
     task = read_task(ledger_path)
-    path = golem.progress_path(task["session_id"])
-    path.parent.mkdir(parents=True)
-    path.write_text("first\n", encoding="utf-8")
+    path = write_progress(task["session_id"], "first\n")
     run_lock_file = golem.acquire_run_lock(task["session_id"])
     directory_lock_file = golem.acquire_lock(golem.directory_lock_path(task["cwd"]))
     assert run_lock_file is not None
@@ -5069,9 +5072,7 @@ def test_watch_takes_no_locks_and_leaves_ledger_unchanged(ledger_path):
 def test_watch_follows_progress_across_rotation(ledger_path, monkeypatch):
     write_task(ledger_path, golem.STATUS_RUNNING)
     task = read_task(ledger_path)
-    path = golem.progress_path(task["session_id"])
-    path.parent.mkdir(parents=True)
-    path.write_text("first\n", encoding="utf-8")
+    write_progress(task["session_id"], "first\n")
     monkeypatch.setattr(golem, "AGENT_LOG_MAX_BYTES", len("first\n"))
 
     with watch_subprocess_output() as watch_output_file:
@@ -5183,10 +5184,8 @@ def test_pickup_suggests_watch_for_running_task(ledger_path):
 def test_delete_removes_recorded_progress(ledger_path):
     write_task(ledger_path, golem.STATUS_DONE)
     session_id = read_task(ledger_path)["session_id"]
-    paths = [golem.progress_path(session_id), golem.rotated_progress_path(session_id)]
-    paths[0].parent.mkdir(parents=True)
-    for path in paths:
-        path.touch()
+    paths = [write_progress(session_id), golem.rotated_progress_path(session_id)]
+    paths[1].touch()
 
     assert golem.main(["delete", TASK_ID]) == 0
     assert not any(path.exists() for path in paths)
