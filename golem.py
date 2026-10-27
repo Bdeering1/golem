@@ -21,7 +21,7 @@ from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, BinaryIO, cast
 
 if TYPE_CHECKING:
     import io
@@ -34,6 +34,7 @@ STATUS_NEEDS_REVIEW = "needs_review"
 STATUS_FAILED = "failed"
 STATUS_DONE = "done"
 STATUS_CANCELLED = "cancelled"
+NOT_STARTED_STATUSES = {STATUS_SCHEDULED, STATUS_WAITING, STATUS_CANCELLED}
 BACKEND_CLAUDE = "claude"
 BACKEND_CODEX = "codex"
 LIST_STATUS_ORDER = (
@@ -58,6 +59,9 @@ ANSI_RESET = "\033[0m"
 SUCCEEDED_STATUSES = {STATUS_NEEDS_REVIEW, STATUS_DONE}
 UNREVIEWED_STATUSES = {STATUS_SCHEDULED, STATUS_RUNNING, STATUS_WAITING, STATUS_NEEDS_REVIEW}
 AGENT_LOG_MAX_BYTES = 1024 * 1024
+PROGRESS_LINE_WIDTH = 120
+PROGRESS_TOOL_INPUT_KEYS = ("command", "file_path", "pattern", "url", "description")
+WATCH_POLL_SECONDS = 0.2
 USAGE_ERROR = "golem: usage lookup unavailable"
 CODEX_ACCOUNT_ERROR = "golem: Codex account lookup unavailable"
 CODEX_SUBSCRIPTION_ERROR = (
@@ -806,6 +810,97 @@ def is_usage_limit_resume(task: dict[str, Any]) -> bool:
     return cast("int", task.get("usage_limit_resume_count", 0)) > 0
 
 
+def progress_path(session_id: str) -> Path:
+    return state_directory() / "progress" / f"{session_id}.log"
+
+
+def rotated_progress_path(session_id: str) -> Path:
+    path = progress_path(session_id)
+    return path.with_name(f"{path.name}.1")
+
+
+def remove_progress(session_id: str) -> None:
+    progress_path(session_id).unlink(missing_ok=True)
+    rotated_progress_path(session_id).unlink(missing_ok=True)
+
+
+@contextmanager
+def progress_writer(session_id: str) -> Generator[Callable[[str], None]]:
+    path = progress_path(session_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    progress_file = path.open("a", encoding="utf-8", errors="replace")
+
+    def record_progress(text: str) -> None:
+        nonlocal progress_file
+        if progress_file.closed:
+            return
+        try:
+            if progress_file.tell() > AGENT_LOG_MAX_BYTES:
+                progress_file.close()
+                path.replace(rotated_progress_path(session_id))
+                progress_file = path.open("a", encoding="utf-8", errors="replace")
+            progress_file.write(text if text.endswith("\n") else f"{text}\n")
+            progress_file.flush()
+        except OSError:
+            with suppress(OSError):
+                progress_file.close()
+
+    try:
+        yield record_progress
+    finally:
+        progress_file.close()
+
+
+def tool_call_progress(name: str, argument: object) -> str:
+    line = (
+        f"[tool] {name} {first_line(argument)}"
+        if isinstance(argument, str) and argument
+        else f"[tool] {name}"
+    )
+    return line[:PROGRESS_LINE_WIDTH]
+
+
+def claude_event_progress(event: object) -> list[str]:
+    if not isinstance(event, dict):
+        return []
+    event_fields = cast("dict[str, object]", event)
+    if (
+        event_fields.get("type") != "assistant"
+        or event_fields.get("parent_tool_use_id") is not None
+    ):
+        return []
+    message = event_fields.get("message")
+    content = (
+        cast("dict[str, object]", message).get("content") if isinstance(message, dict) else None
+    )
+    if not isinstance(content, list):
+        return []
+    progress: list[str] = []
+    for item in cast("list[object]", content):
+        if not isinstance(item, dict):
+            continue
+        item_fields = cast("dict[str, object]", item)
+        text = item_fields.get("text")
+        name = item_fields.get("name")
+        if item_fields.get("type") == "text" and isinstance(text, str):
+            progress.append(text)
+        elif item_fields.get("type") == "tool_use" and isinstance(name, str):
+            tool_input = item_fields.get("input")
+            input_fields = (
+                cast("dict[str, object]", tool_input) if isinstance(tool_input, dict) else {}
+            )
+            argument = next(
+                (
+                    input_fields[key]
+                    for key in PROGRESS_TOOL_INPUT_KEYS
+                    if isinstance(input_fields.get(key), str)
+                ),
+                None,
+            )
+            progress.append(tool_call_progress(name, argument))
+    return progress
+
+
 def run_claude(
     task_id: str, task: dict[str, Any], lock_file_descriptors: tuple[int, ...]
 ) -> tuple[int, str, str]:
@@ -828,25 +923,44 @@ def run_claude(
         default_args += ["--worktree", Path(cast("str", worktree)).name]
     if not has_agent_argument(agent_args, PERMISSION_ARGUMENTS):
         default_args.append("--dangerously-skip-permissions")
-    claude_process = subprocess.run(
-        [
-            *command,
-            "--output-format",
-            "json",
-            *agent_args,
-            *default_args,
-        ],
-        cwd=task_directory(task),
-        env={**task_environment(task), BACKGROUND_WAIT_CEILING_VARIABLE: "0"},
-        capture_output=True,
-        encoding="utf-8",
-        pass_fds=lock_file_descriptors,
-        check=False,
-    )
-    sys.stderr.write(claude_process.stderr)
+    stdout_lines: list[str] = []
+    with (
+        progress_writer(session_id) as record_progress,
+        tempfile.TemporaryFile("w+", encoding="utf-8") as stderr_file,
+    ):
+        claude_process = subprocess.Popen(
+            [
+                *command,
+                "--output-format",
+                "stream-json",
+                *agent_args,
+                *default_args,
+            ],
+            cwd=task_directory(task),
+            env={**task_environment(task), BACKGROUND_WAIT_CEILING_VARIABLE: "0"},
+            stdout=subprocess.PIPE,
+            stderr=stderr_file,
+            encoding="utf-8",
+            pass_fds=lock_file_descriptors,
+        )
+        with cast("io.TextIOWrapper", claude_process.stdout) as output:
+            try:
+                for line in output:
+                    stdout_lines.append(line)
+                    with suppress(json.JSONDecodeError):
+                        for progress in claude_event_progress(cast("object", json.loads(line))):
+                            record_progress(progress)
+                returncode = claude_process.wait()
+            except BaseException:
+                claude_process.kill()
+                claude_process.wait()
+                raise
+        stderr_file.seek(0)
+        stderr = stderr_file.read()
+    sys.stderr.write(stderr)
     if is_creating_worktree:
         record_created_worktree_owner(task_id, task)
-    return claude_process.returncode, claude_process.stdout, claude_process.stderr
+    return returncode, "".join(stdout_lines), stderr
 
 
 def fetch_stale_default_branch(cwd: str) -> None:
@@ -958,8 +1072,36 @@ class CodexEventState:
     last_error_message: str | None = None
 
 
+def codex_item_progress(item: dict[str, object]) -> str | None:
+    item_type = item.get("type")
+    if item_type == "agent_message":
+        text = item.get("text")
+        return text if isinstance(text, str) else None
+    if item_type == "command_execution":
+        return tool_call_progress("command", item.get("command"))
+    if item_type == "file_change":
+        changes = item.get("changes")
+        paths = [
+            cast("dict[str, object]", change).get("path")
+            for change in (cast("list[object]", changes) if isinstance(changes, list) else [])
+            if isinstance(change, dict)
+        ]
+        return tool_call_progress(
+            "file_change", " ".join(path for path in paths if isinstance(path, str))
+        )
+    if item_type == "mcp_tool_call":
+        return tool_call_progress("mcp", item.get("tool"))
+    if item_type == "web_search":
+        return tool_call_progress("web_search", item.get("query"))
+    return None
+
+
 def update_codex_event_state(
-    event: dict[str, object], task_id: str, session_id: str, state: CodexEventState
+    event: dict[str, object],
+    task_id: str,
+    session_id: str,
+    state: CodexEventState,
+    record_progress: Callable[[str], None],
 ) -> None:
     event_type = event.get("type")
     if event_type == "thread.started":
@@ -972,6 +1114,8 @@ def update_codex_event_state(
         if not isinstance(item, dict):
             return
         item_fields = cast("dict[str, object]", item)
+        if progress := codex_item_progress(item_fields):
+            record_progress(progress)
         text = item_fields.get("text") if item_fields.get("type") == "agent_message" else None
         if isinstance(text, str):
             state.last_agent_message = text
@@ -986,7 +1130,10 @@ def update_codex_event_state(
 
 
 def read_codex_events(
-    process: subprocess.Popen[str], task_id: str, session_id: str
+    process: subprocess.Popen[str],
+    task_id: str,
+    session_id: str,
+    record_progress: Callable[[str], None],
 ) -> CodexEventState:
     state = CodexEventState()
     output = cast("io.TextIOWrapper", process.stdout)
@@ -998,7 +1145,7 @@ def read_codex_events(
                 continue
             if isinstance(event, dict):
                 update_codex_event_state(
-                    cast("dict[str, object]", event), task_id, session_id, state
+                    cast("dict[str, object]", event), task_id, session_id, state, record_progress
                 )
     finally:
         output.close()
@@ -1008,37 +1155,44 @@ def read_codex_events(
 def run_codex(
     task_id: str, task: dict[str, Any], lock_file_descriptors: tuple[int, ...]
 ) -> tuple[int, str | None, bool]:
-    try:
-        require_codex_subscription(task_environment(task))
-    except SystemExit as error:
-        return 1, str(error), False
-    worktree = task.get("worktree")
-    if worktree is not None and not Path(worktree).is_dir():
-        if task.get("worktree_pending") is not True:
-            return 1, f"golem: worktree is missing: {worktree}", False
-        if error := create_codex_worktree(task_id, task):
-            return 1, error, False
-    if is_usage_limit_resume(task) and not isinstance(task.get("thread_id"), str):
-        return 1, "golem: task has no Codex conversation", False
-    command, prompt = codex_command(task)
-    process = subprocess.Popen(
-        command,
-        cwd=task_directory(task),
-        env=codex_environment(task_environment(task)),
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        encoding="utf-8",
-        pass_fds=lock_file_descriptors,
-    )
-    standard_input = cast("io.TextIOWrapper", process.stdin)
-    try:
-        with suppress(BrokenPipeError):
-            standard_input.write(prompt)
-    finally:
-        with suppress(BrokenPipeError):
-            standard_input.close()
-    event_state = read_codex_events(process, task_id, cast("str", task["session_id"]))
-    returncode = process.wait()
+    session_id = cast("str", task["session_id"])
+    with progress_writer(session_id) as record_progress:
+        try:
+            require_codex_subscription(task_environment(task))
+        except SystemExit as error:
+            return 1, str(error), False
+        worktree = task.get("worktree")
+        if worktree is not None and not Path(worktree).is_dir():
+            if task.get("worktree_pending") is not True:
+                return 1, f"golem: worktree is missing: {worktree}", False
+            if error := create_codex_worktree(task_id, task):
+                return 1, error, False
+        if is_usage_limit_resume(task) and not isinstance(task.get("thread_id"), str):
+            return 1, "golem: task has no Codex conversation", False
+        command, prompt = codex_command(task)
+        process = subprocess.Popen(
+            command,
+            cwd=task_directory(task),
+            env=codex_environment(task_environment(task)),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            encoding="utf-8",
+            pass_fds=lock_file_descriptors,
+        )
+        standard_input = cast("io.TextIOWrapper", process.stdin)
+        try:
+            with suppress(BrokenPipeError):
+                standard_input.write(prompt)
+        finally:
+            with suppress(BrokenPipeError):
+                standard_input.close()
+        try:
+            event_state = read_codex_events(process, task_id, session_id, record_progress)
+            returncode = process.wait()
+        except BaseException:
+            process.kill()
+            process.wait()
+            raise
     result = (
         event_state.failed_message
         or event_state.last_agent_message
@@ -1128,11 +1282,15 @@ def pickup(task_id: str, *agent_args: str, is_app: bool, is_review_required: boo
         task = cast("dict[str, Any]", tasks[task_id])
         if is_review_required and task.get("status") != STATUS_NEEDS_REVIEW:
             return 0
-        if task.get("status") in {STATUS_SCHEDULED, STATUS_WAITING, STATUS_CANCELLED}:
+        if task.get("status") in NOT_STARTED_STATUSES:
             raise SystemExit(f"golem: task has not started: {task_id}")
         reject_missing_worktree(task, worktrees)
         directory = directory_to_lock(task, task.get("worktree"))
         directory_lock_file = acquire_lock(directory_lock_path(directory))
+        if directory_lock_file is None and task.get("status") == STATUS_RUNNING:
+            raise SystemExit(
+                f"golem: task is running: {task_id}; use golem watch {task_id} to follow it"
+            )
         if directory_lock_file is None:
             raise SystemExit(f"golem: directory is busy: {directory}")
         thread_id = task.get("thread_id")
@@ -1238,6 +1396,67 @@ def show_task_result(task_id: str) -> int:
     if not isinstance(result, str):
         raise SystemExit(f"golem: task has no result: {task_id}")
     print_task_result(result)
+    return 0
+
+
+def is_usage_limit_pause(task: dict[str, Any]) -> bool:
+    return task.get("status") == STATUS_SCHEDULED and is_usage_limit_resume(task)
+
+
+def task_end_line(task_id: str, task: dict[str, Any]) -> str:
+    if is_usage_limit_pause(task):
+        resume_time = display_due_at(task["due_at"], datetime.now().astimezone().date())
+        return f"golem: task paused at the usage limit, resumes {resume_time}: {task_id}"
+    return f"golem: task {task['status']}: {task_id}"
+
+
+def print_new_progress(progress_file: BinaryIO) -> None:
+    new_bytes = progress_file.read()
+    complete_lines = new_bytes[: new_bytes.rfind(b"\n") + 1]
+    progress_file.seek(len(complete_lines) - len(new_bytes), os.SEEK_CUR)
+    sys.stdout.write(complete_lines.decode("utf-8"))
+    sys.stdout.flush()
+
+
+def follow_progress_until_stopped(
+    task_id: str, path: Path, progress_file: BinaryIO
+) -> dict[str, Any]:
+    try:
+        while True:
+            task = existing_task(load_tasks(), task_id)
+            print_new_progress(progress_file)
+            with suppress(FileNotFoundError):
+                while path.stat().st_ino != os.fstat(progress_file.fileno()).st_ino:
+                    print_new_progress(progress_file)
+                    rotated_file = progress_file
+                    progress_file = path.open("rb")
+                    rotated_file.close()
+                    print_new_progress(progress_file)
+            if task.get("status") != STATUS_RUNNING:
+                return task
+            time.sleep(WATCH_POLL_SECONDS)
+    finally:
+        progress_file.close()
+
+
+def watch_task(task_id: str) -> int:
+    task = existing_task(load_tasks(), task_id)
+    if task.get("status") in NOT_STARTED_STATUSES and not is_usage_limit_pause(task):
+        raise SystemExit(f"golem: task has not started: {task_id}")
+    session_id = cast("str", task["session_id"])
+    rotated_path = rotated_progress_path(session_id)
+    path = progress_path(session_id)
+    try:
+        progress_file = path.open("rb")
+    except FileNotFoundError:
+        raise SystemExit(f"golem: task has no recorded progress: {task_id}") from None
+    try:
+        with suppress(FileNotFoundError), rotated_path.open("rb") as rotated_file:
+            if os.fstat(rotated_file.fileno()).st_ino != os.fstat(progress_file.fileno()).st_ino:
+                print_new_progress(rotated_file)
+        print(task_end_line(task_id, follow_progress_until_stopped(task_id, path, progress_file)))
+    except KeyboardInterrupt:
+        return 130
     return 0
 
 
@@ -1651,11 +1870,18 @@ def schedule_new_task(
     return wake_launch_agent_and_report(task_id, due_time)
 
 
+def parsed_claude_output(output: str) -> object:
+    with suppress(json.JSONDecodeError):
+        return cast("object", json.loads(output))
+    events: list[object] = []
+    for line in output.splitlines():
+        with suppress(json.JSONDecodeError):
+            events.append(cast("object", json.loads(line)))
+    return events
+
+
 def claude_result_and_usage_limit(output: str) -> tuple[str, bool]:
-    try:
-        parsed_response = cast("object", json.loads(output))
-    except json.JSONDecodeError:
-        return output, False
+    parsed_response = parsed_claude_output(output)
     if isinstance(parsed_response, list):
         parsed_response = next(
             (
@@ -1676,10 +1902,7 @@ def claude_result_and_usage_limit(output: str) -> tuple[str, bool]:
 
 
 def claude_working_directory(output: str) -> str | None:
-    try:
-        parsed_response = cast("object", json.loads(output))
-    except json.JSONDecodeError:
-        return None
+    parsed_response = parsed_claude_output(output)
     if not isinstance(parsed_response, list):
         return None
     for message in cast("list[object]", parsed_response):
@@ -1810,6 +2033,8 @@ def claim_task(
             else:
                 record_worktree_resource(worktrees, worktree, session_id)
     clear_worktree_release(tasks, worktrees, task)
+    progress_path(session_id).parent.mkdir(parents=True, exist_ok=True)
+    progress_path(session_id).touch()
     task["status"] = STATUS_RUNNING
     task["started_at"] = datetime.now(UTC).isoformat()
     return task.copy(), run_lock_file, directory_lock_file
@@ -2684,7 +2909,7 @@ def delete_task_and_release_worktrees(
         if any(task_uses_worktree(tasks, task, path) for task in selected_tasks)
     ]
     for task_id in task_ids:
-        tasks.pop(task_id)
+        remove_progress(cast("str", tasks.pop(task_id)["session_id"]))
     for path in worktree_paths:
         resource = cast("dict[str, Any]", worktrees[path])
         if (
@@ -3143,6 +3368,7 @@ def retry_task(task_id: str, *, is_now: bool, at_text: str | None) -> int:
             if name in task:
                 record[name] = task[name]
         tasks[task_id] = record
+        remove_progress(cast("str", task["session_id"]))
         clear_worktree_release(tasks, worktrees, record)
         directories = hook_affected_directories(tasks, record)
     for directory in directories:
@@ -3314,6 +3540,12 @@ def add_continue_command(add_parser: Callable[..., argparse.ArgumentParser]) -> 
     )
 
 
+def add_watch_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
+    watch_command = add_parser("watch")
+    watch_command.add_argument("id")
+    set_command_handler(watch_command, lambda arguments: watch_task(arguments.id))
+
+
 def add_hook_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
     hook_command = add_parser("_hook")
     hook_command.add_argument("event", choices=tuple(HOOK_EVENT_ARGUMENTS.values()))
@@ -3414,6 +3646,7 @@ def build_parser() -> tuple[argparse.ArgumentParser, dict[str, argparse.Argument
     show_command = commands.add_parser("show")
     show_command.add_argument("id")
     set_command_handler(show_command, lambda arguments: show_task_result(arguments.id))
+    add_watch_command(commands.add_parser)
     cancel_command = commands.add_parser("cancel")
     cancel_command.add_argument("id")
     set_command_handler(cancel_command, lambda arguments: cancel_task(arguments.id))

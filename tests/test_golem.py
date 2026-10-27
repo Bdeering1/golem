@@ -108,9 +108,6 @@ fi
 if [ -n "$GOLEM_CLAUDE_STRAY" ]; then
     (while [ -e "$GOLEM_CLAUDE_STRAY" ]; do sleep 0.05; done) < /dev/null > /dev/null 2>&1 &
 fi
-while [ -n "$GOLEM_CLAUDE_HOLD" ] && [ -e "$GOLEM_CLAUDE_HOLD" ]; do
-    sleep 0.05
-done
 if [ -n "${GOLEM_CLAUDE_BACKGROUND_STOP-}" ]; then
     ceiling="${GOLEM_CLAUDE_SETTINGS_CEILING-${CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS-600000}}"
     if [ "$ceiling" != 0 ]; then
@@ -122,6 +119,9 @@ if [ -f "$GOLEM_CLAUDE_STDOUT" ]; then
 else
     printf '%s' '{"result": "done"}'
 fi
+while [ -n "$GOLEM_CLAUDE_HOLD" ] && [ -e "$GOLEM_CLAUDE_HOLD" ]; do
+    sleep 0.05
+done
 if [ -n "${GOLEM_CLAUDE_FAIL_TASK:-}" ] && [ "$task_name" = "$GOLEM_CLAUDE_FAIL_TASK" ]; then
     exit 1
 fi
@@ -131,6 +131,7 @@ exit "${GOLEM_CLAUDE_EXIT:-0}"
 import json
 import os
 import sys
+import time
 
 prefix = os.environ["GOLEM_CODEX_"]
 
@@ -188,6 +189,9 @@ else:
     print(json.dumps({{"type": "thread.started", "thread_id": "thread"}}))
     print(json.dumps({{"type": "item.completed", "item": {{"type": "agent_message", "text": "done"}}}}))
     print(json.dumps({{"type": "turn.completed", "usage": {{}}}}))
+sys.stdout.flush()
+while os.environ.get("GOLEM_CODEX_HOLD") and os.path.exists(os.environ["GOLEM_CODEX_HOLD"]):
+    time.sleep(0.05)
 sys.exit(int(os.environ.get("GOLEM_CODEX_EXIT", "0")))
 """,
         "launchctl": """#!/bin/sh
@@ -595,7 +599,7 @@ def expected_claude_args(task, prompt=PROMPT, agent_args=AGENT_ARGS, task_id=TAS
         "--print",
         prompt,
         "--output-format",
-        "json",
+        "stream-json",
         *agent_args,
         golem.VERBOSE_ARGUMENT,
         "--name",
@@ -1139,6 +1143,12 @@ def test_detected_worktree_is_shared_with_dependents(
     assert resource["owner"] == golem.WORKTREE_OWNER_EXTERNAL
 
 
+def write_claude_events(fake_commands, events):
+    fake_commands["claude-stdout"].write_text(
+        "".join(f"{json.dumps(event)}\n" for event in events), encoding="utf-8"
+    )
+
+
 def write_claude_output(
     fake_commands, result, *, api_error_status=None, is_verbose=False, working_directory=None
 ):
@@ -1149,8 +1159,8 @@ def write_claude_output(
         "type": "result",
     }
     init_message = {"type": "system", "subtype": "init", "cwd": working_directory}
-    response = [init_message, output] if is_verbose else output
-    fake_commands["claude-stdout"].write_text(json.dumps(response), encoding="utf-8")
+    events = [init_message, output] if is_verbose else [output]
+    write_claude_events(fake_commands, events)
 
 
 @pytest.mark.parametrize(
@@ -1544,7 +1554,7 @@ def test_usage_limited_task_resumes_at_reset_in_same_session(
         "--print",
         golem.USAGE_LIMIT_RESUME_PROMPT,
         "--output-format",
-        "json",
+        "stream-json",
         *agent_args,
         *([] if is_verbose else [golem.VERBOSE_ARGUMENT]),
         "--name",
@@ -2898,7 +2908,7 @@ def test_reschedule_changes_only_due_time(
         "--print",
         golem.USAGE_LIMIT_RESUME_PROMPT,
         "--output-format",
-        "json",
+        "stream-json",
         golem.VERBOSE_ARGUMENT,
         "--name",
         TASK_ID,
@@ -4910,3 +4920,278 @@ def test_prune_keeps_only_task_that_changes_while_prompting(
     tasks = golem.load_tasks()
     assert TASK_ID in tasks
     assert SIBLING_ID not in tasks
+
+
+WATCHED_COMMAND = "ls -la"
+BACKENDS = [golem.BACKEND_CLAUDE, golem.BACKEND_CODEX]
+
+
+def write_agent_run_and_expected_progress(
+    fake_commands, monkeypatch, tmp_path, backend, message, *, is_usage_limit=False
+):
+    command = f"{WATCHED_COMMAND}\nsecond line"
+    if backend == golem.BACKEND_CODEX:
+        events = [
+            {"type": "thread.started", "thread_id": "codex-thread"},
+            {"type": "item.completed", "item": {"type": "command_execution", "command": command}},
+            {"type": "item.completed", "item": {"type": "agent_message", "text": message}},
+        ]
+        if is_usage_limit:
+            events.append(
+                {"type": "turn.failed", "error": {"message": "You've hit your usage limit"}}
+            )
+        write_codex_events(monkeypatch, tmp_path, events)
+        return f"[tool] command {WATCHED_COMMAND}\n{message}\n"
+    assistant = {
+        "type": "assistant",
+        "parent_tool_use_id": None,
+        "message": {
+            "content": [
+                {"type": "tool_use", "name": "Bash", "input": {"command": command}},
+                {"type": "text", "text": message},
+            ]
+        },
+    }
+    subagent_assistant = {
+        "type": "assistant",
+        "parent_tool_use_id": "toolu_agent",
+        "message": {"content": [{"type": "text", "text": "subagent text"}]},
+    }
+    result = {
+        "type": "result",
+        "result": USAGE_LIMIT_RESULT if is_usage_limit else message,
+        "api_error_status": golem.USAGE_LIMIT_HTTP_STATUS if is_usage_limit else None,
+    }
+    write_claude_events(fake_commands, [subagent_assistant, assistant, result])
+    return f"[tool] Bash {WATCHED_COMMAND}\n{message}\n"
+
+
+def run_now(ledger_path, backend):
+    golem.main(["run", TASK_ID, PROMPT, "--backend", backend, "--now"])
+    return read_task(ledger_path)
+
+
+def watch_output(capsys):
+    assert golem.main(["watch", TASK_ID]) == 0
+    return capsys.readouterr().out
+
+
+@contextlib.contextmanager
+def watch_subprocess_output():
+    with golem.subprocess.Popen(
+        [*golem.golem_command(), "watch", TASK_ID], stdout=subprocess.PIPE, text=True
+    ) as watch:
+        assert watch.stdout is not None
+        yield watch.stdout
+    assert watch.returncode == 0
+
+
+def write_progress(session_id, text=""):
+    path = golem.progress_path(session_id)
+    path.parent.mkdir(parents=True)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_watch_follows_running_task_to_its_end(
+    installed_launch_agent, fake_commands, ledger_path, monkeypatch, tmp_path, backend
+):
+    hold_path = tmp_path / "hold"
+    hold_path.touch()
+    monkeypatch.setenv("GOLEM_CLAUDE_HOLD", str(hold_path))
+    monkeypatch.setenv("GOLEM_CODEX_HOLD", str(hold_path))
+    progress = write_agent_run_and_expected_progress(
+        fake_commands, monkeypatch, tmp_path, backend, CLAUDE_RESULT
+    )
+    task = run_now(ledger_path, backend)
+    executor = golem.start_task_executor(TASK_ID, task)
+
+    try:
+        wait_until(golem.progress_path(task["session_id"]).exists)
+        with watch_subprocess_output() as watch_output_file:
+            first_line = watch_output_file.readline()
+            hold_path.unlink()
+            rest = watch_output_file.read()
+    finally:
+        hold_path.unlink(missing_ok=True)
+        executor.wait()
+
+    assert first_line + rest == f"{progress}golem: task needs_review: {TASK_ID}\n"
+    assert read_task(ledger_path)["result"] == CLAUDE_RESULT
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_progress_write_failure_keeps_task_result(
+    installed_launch_agent, fake_commands, ledger_path, monkeypatch, tmp_path, backend
+):
+    write_agent_run_and_expected_progress(
+        fake_commands, monkeypatch, tmp_path, backend, CLAUDE_RESULT
+    )
+    monkeypatch.setattr(golem, "AGENT_LOG_MAX_BYTES", 0)
+    monkeypatch.setattr(golem, "rotated_progress_path", lambda _: tmp_path / "missing" / "log")
+    task = run_now(ledger_path, backend)
+
+    golem.main(["_execute", TASK_ID, task["session_id"]])
+
+    task = read_task(ledger_path)
+    assert (task["status"], task["result"]) == (golem.STATUS_NEEDS_REVIEW, CLAUDE_RESULT)
+
+
+def test_watch_exits_130_on_interrupt(ledger_path, monkeypatch):
+    write_task(ledger_path, golem.STATUS_RUNNING)
+    write_progress(read_task(ledger_path)["session_id"])
+
+    def interrupt(_seconds: float) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(golem.time, "sleep", interrupt)
+
+    assert golem.main(["watch", TASK_ID]) == 130
+
+
+def test_watch_takes_no_locks_and_leaves_ledger_unchanged(ledger_path):
+    write_task(ledger_path, golem.STATUS_RUNNING)
+    task = read_task(ledger_path)
+    path = write_progress(task["session_id"], "first\n")
+    run_lock_file = golem.acquire_run_lock(task["session_id"])
+    directory_lock_file = golem.acquire_lock(golem.directory_lock_path(task["cwd"]))
+    assert run_lock_file is not None
+    assert directory_lock_file is not None
+
+    try:
+        with watch_subprocess_output() as watch_output_file:
+            first_line = watch_output_file.readline()
+            with path.open("a", encoding="utf-8") as progress_file:
+                progress_file.write("second\n")
+            golem.save_tasks({TASK_ID: task_record(golem.STATUS_FAILED)})
+            ledger_text = ledger_path.read_text(encoding="utf-8")
+            rest = watch_output_file.read()
+    finally:
+        golem.release_run_lock(run_lock_file, task["session_id"])
+        golem.release_lock(directory_lock_file)
+
+    assert first_line + rest == f"first\nsecond\ngolem: task failed: {TASK_ID}\n"
+    assert ledger_path.read_text(encoding="utf-8") == ledger_text
+
+
+def test_watch_follows_progress_across_rotation(ledger_path, monkeypatch):
+    write_task(ledger_path, golem.STATUS_RUNNING)
+    task = read_task(ledger_path)
+    write_progress(task["session_id"], "first\n")
+    monkeypatch.setattr(golem, "AGENT_LOG_MAX_BYTES", len("first\n"))
+
+    with watch_subprocess_output() as watch_output_file:
+        first_line = watch_output_file.readline()
+        with golem.progress_writer(task["session_id"]) as record_progress:
+            record_progress("second")
+            record_progress("third")
+        golem.save_tasks({TASK_ID: task_record(golem.STATUS_FAILED)})
+        rest = watch_output_file.read()
+
+    assert golem.rotated_progress_path(task["session_id"]).exists()
+    assert first_line + rest == f"first\nsecond\nthird\ngolem: task failed: {TASK_ID}\n"
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_watch_prints_usage_limit_pause_and_its_resume(
+    installed_launch_agent, fake_commands, ledger_path, monkeypatch, tmp_path, capsys, backend
+):
+    monkeypatch.setattr(golem, "next_reset_time", lambda: RESET_TIME)
+    monkeypatch.setattr(golem, "next_codex_reset_time", lambda: RESET_TIME)
+    paused_progress = write_agent_run_and_expected_progress(
+        fake_commands, monkeypatch, tmp_path, backend, "paused", is_usage_limit=True
+    )
+    task = run_now(ledger_path, backend)
+    golem.main(["_execute", TASK_ID, task["session_id"]])
+    assert read_task(ledger_path)["status"] == golem.STATUS_SCHEDULED
+    capsys.readouterr()
+
+    resume_time = golem.display_due_at(RESET_TIME.isoformat(), datetime.now().astimezone().date())
+    assert watch_output(capsys) == (
+        f"{paused_progress}golem: task paused at the usage limit, resumes {resume_time}: {TASK_ID}\n"
+    )
+
+    resumed_progress = write_agent_run_and_expected_progress(
+        fake_commands, monkeypatch, tmp_path, backend, "resumed"
+    )
+    set_task_due_now(ledger_path)
+    golem.main(["_execute", TASK_ID, task["session_id"]])
+    capsys.readouterr()
+
+    assert watch_output(capsys) == (
+        f"{paused_progress}{resumed_progress}golem: task needs_review: {TASK_ID}\n"
+    )
+
+
+def test_watch_shows_only_the_run_after_a_retry(
+    installed_launch_agent, fake_commands, ledger_path, monkeypatch, tmp_path, capsys
+):
+    write_agent_run_and_expected_progress(
+        fake_commands, monkeypatch, tmp_path, golem.BACKEND_CLAUDE, "first"
+    )
+    monkeypatch.setenv("GOLEM_CLAUDE_EXIT", "1")
+    first_task = run_now(ledger_path, golem.BACKEND_CLAUDE)
+    golem.main(["_execute", TASK_ID, first_task["session_id"]])
+    monkeypatch.delenv("GOLEM_CLAUDE_EXIT")
+    golem.main(["retry", TASK_ID, "--now"])
+    retried_task = read_task(ledger_path)
+    progress = write_agent_run_and_expected_progress(
+        fake_commands, monkeypatch, tmp_path, golem.BACKEND_CLAUDE, "second"
+    )
+    golem.main(["_execute", TASK_ID, retried_task["session_id"]])
+    capsys.readouterr()
+
+    assert watch_output(capsys) == f"{progress}golem: task needs_review: {TASK_ID}\n"
+    assert not golem.progress_path(first_task["session_id"]).exists()
+
+
+def test_watch_prints_rotated_progress_first(
+    installed_launch_agent, fake_commands, ledger_path, monkeypatch, tmp_path, capsys
+):
+    monkeypatch.setattr(golem, "AGENT_LOG_MAX_BYTES", 1)
+    progress = write_agent_run_and_expected_progress(
+        fake_commands, monkeypatch, tmp_path, golem.BACKEND_CLAUDE, "done"
+    )
+    task = run_now(ledger_path, golem.BACKEND_CLAUDE)
+    golem.main(["_execute", TASK_ID, task["session_id"]])
+    capsys.readouterr()
+
+    assert watch_output(capsys) == f"{progress}golem: task needs_review: {TASK_ID}\n"
+    assert golem.rotated_progress_path(task["session_id"]).exists()
+
+
+@pytest.mark.parametrize(
+    ("status", "message"),
+    [
+        (golem.STATUS_SCHEDULED, "task has not started"),
+        (golem.STATUS_DONE, "task has no recorded progress"),
+    ],
+)
+def test_watch_refuses_task_without_progress(ledger_path, status, message):
+    write_task(ledger_path, status)
+
+    with pytest.raises(SystemExit, match=f"golem: {message}: {TASK_ID}"):
+        golem.main(["watch", TASK_ID])
+
+
+def test_pickup_suggests_watch_for_running_task(ledger_path):
+    write_task(ledger_path, golem.STATUS_RUNNING)
+    directory_lock_file = golem.acquire_lock(golem.directory_lock_path(str(Path.cwd())))
+    assert directory_lock_file is not None
+
+    try:
+        with pytest.raises(SystemExit, match=f"golem watch {TASK_ID}"):
+            golem.main(["pickup", TASK_ID])
+    finally:
+        golem.release_lock(directory_lock_file)
+
+
+def test_delete_removes_recorded_progress(ledger_path):
+    write_task(ledger_path, golem.STATUS_DONE)
+    session_id = read_task(ledger_path)["session_id"]
+    paths = [write_progress(session_id), golem.rotated_progress_path(session_id)]
+    paths[1].touch()
+
+    assert golem.main(["delete", TASK_ID]) == 0
+    assert not any(path.exists() for path in paths)
