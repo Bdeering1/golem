@@ -6,18 +6,22 @@ import os
 import plistlib
 import queue
 import re
+import shlex
 import shutil
+import signal
+import stat
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+import tomllib
 import uuid
-from contextlib import contextmanager, suppress
-from dataclasses import dataclass
+from contextlib import ExitStack, contextmanager, suppress
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, NotRequired, TypedDict, cast
+from typing import TYPE_CHECKING, BinaryIO, NotRequired, TypedDict, cast
 
 if TYPE_CHECKING:
     import io
@@ -30,6 +34,7 @@ STATUS_NEEDS_REVIEW = "needs_review"
 STATUS_FAILED = "failed"
 STATUS_DONE = "done"
 STATUS_CANCELLED = "cancelled"
+NOT_STARTED_STATUSES = {STATUS_SCHEDULED, STATUS_WAITING, STATUS_CANCELLED}
 BACKEND_CLAUDE = "claude"
 BACKEND_CODEX = "codex"
 LIST_STATUS_ORDER = (
@@ -54,6 +59,9 @@ ANSI_RESET = "\033[0m"
 SUCCEEDED_STATUSES = {STATUS_NEEDS_REVIEW, STATUS_DONE}
 UNREVIEWED_STATUSES = {STATUS_SCHEDULED, STATUS_RUNNING, STATUS_WAITING, STATUS_NEEDS_REVIEW}
 AGENT_LOG_MAX_BYTES = 1024 * 1024
+PROGRESS_LINE_WIDTH = 120
+PROGRESS_TOOL_INPUT_KEYS = ("command", "file_path", "pattern", "url", "description")
+WATCH_POLL_SECONDS = 0.2
 USAGE_ERROR = "golem: usage lookup unavailable"
 CODEX_ACCOUNT_ERROR = "golem: Codex account lookup unavailable"
 CODEX_SUBSCRIPTION_ERROR = (
@@ -109,12 +117,30 @@ WORKTREE_OWNER_MARKER = "golem-owner"
 CLAUDE_LOCK_PATTERN = re.compile(r"claude session (\S+) \(pid (\d+) start .+\)")
 PRUNE_IDLE_DAYS = 7
 PULL_REQUEST_TIMEOUT_SECONDS = 30
+GATE_TIMEOUT_SECONDS = 300
+HOOK_GATE_TIMEOUT_SECONDS = 20
+HOOK_STOP_TIMEOUT_SECONDS = 30
+HOOK_ARGUMENT_STOP = "stop"
+HOOK_ARGUMENT_PRE_TOOL_USE = "pre-tool-use"
+HOOK_EVENT_STOP = "Stop"
+HOOK_EVENT_PRE_TOOL_USE = "PreToolUse"
+HOOK_EVENT_ARGUMENTS = {
+    HOOK_EVENT_STOP: HOOK_ARGUMENT_STOP,
+    HOOK_EVENT_PRE_TOOL_USE: HOOK_ARGUMENT_PRE_TOOL_USE,
+}
+# Claude Code treats exit status 2 as blocking, which a missing golem.py would return.
+HOOK_FAILURE_SUFFIX = " || exit 1"
+HOOK_COMMAND_SUFFIXES = tuple(
+    f" _hook {argument}{HOOK_FAILURE_SUFFIX}" for argument in HOOK_EVENT_ARGUMENTS.values()
+)
+HOOK_TOOL_MATCHER = "Edit|Write|MultiEdit|NotebookEdit|Bash"
 PULL_REQUEST_STATE_OPEN = "OPEN"
 PRUNE_ANSWER_YES = "y"
 PRUNE_ANSWER_NO = "n"
 PRUNE_ANSWER_ALL = "a"
 PRUNE_ANSWER_QUIT = "q"
 PRUNE_ANSWERS = (PRUNE_ANSWER_YES, PRUNE_ANSWER_NO, PRUNE_ANSWER_ALL, PRUNE_ANSWER_QUIT)
+ALIAS_PLACEHOLDER_PATTERN = re.compile(r"\{(\d+)\}")
 
 
 class Task(TypedDict):
@@ -133,6 +159,11 @@ class Task(TypedDict):
     result: NotRequired[str]
     returncode: NotRequired[int]
     usage_limit_resume_count: NotRequired[int]
+    started_at: NotRequired[str]
+    auto_pickup: NotRequired[bool]
+    no_worktree: NotRequired[bool]
+    gate: NotRequired[str]
+    gate_reason: NotRequired[str]
 
 
 class WorktreeResource(TypedDict):
@@ -143,6 +174,10 @@ class WorktreeResource(TypedDict):
     released_at: NotRequired[str]
     removed_at: NotRequired[str]
     removal_error: NotRequired[str]
+
+
+class LocalSettings(TypedDict):
+    hooks: NotRequired[dict[str, list[object]]]
 
 
 class Settings(TypedDict):
@@ -172,6 +207,15 @@ class Arguments(argparse.Namespace):
     action: str
     session_id: str
     remove_worktree: bool
+    then: list[list[str]]
+    auto_pickup: bool
+    no_worktree: bool
+    gate: str | None
+    force: bool
+    event: str
+    ids: list[str]
+    chain: bool
+    directory: str | None
 
 
 class ClaudeRateLimit(TypedDict):
@@ -203,13 +247,77 @@ type AppServerRequests = list[JsonObject]
 type AppServerResponses = dict[int, JsonObject]
 
 
-def state_directory() -> Path:
-    state_home = Path(os.environ.get("XDG_STATE_HOME", ""))
-    golem_state_directory = (
-        state_home / "golem"
-        if state_home.is_absolute()
-        else Path.home() / ".local" / "state" / "golem"
+def xdg_golem_directory(variable: str, fallback: Path) -> Path:
+    base_directory = Path(os.environ.get(variable, ""))
+    return (base_directory if base_directory.is_absolute() else fallback) / "golem"
+
+
+def config_path() -> Path:
+    return xdg_golem_directory("XDG_CONFIG_HOME", Path.home() / ".config") / "config.toml"
+
+
+def load_aliases() -> dict[str, str]:
+    path = config_path()
+    if not path.exists():
+        return {}
+    invalid_config_error = f"golem: invalid config file {path}"
+    try:
+        config = tomllib.loads(path.read_text(encoding="utf-8"))
+    except tomllib.TOMLDecodeError as error:
+        raise SystemExit(f"{invalid_config_error}: {error}") from error
+    aliases = config.get("aliases")
+    if aliases is None:
+        return {}
+    if not isinstance(aliases, dict):
+        raise SystemExit(f"{invalid_config_error}: aliases must be a table")
+    alias_table = cast("dict[str, object]", aliases)
+    validated_aliases: dict[str, str] = {}
+    for name, template in alias_table.items():
+        if not isinstance(template, str):
+            raise SystemExit(f"{invalid_config_error}: alias {name} must be a string")
+        validated_aliases[name] = template
+    return validated_aliases
+
+
+def expand_alias(
+    name: str, template: str, alias_args: list[str], command_line_agent_args: list[str]
+) -> tuple[list[str], list[str]]:
+    try:
+        template_args = shlex.split(template)
+    except ValueError as error:
+        raise SystemExit(f"golem: invalid alias {name}: {error}") from error
+    separator_index = template_args.index("--") if "--" in template_args else len(template_args)
+    command_args = template_args[:separator_index]
+    template_agent_args = template_args[separator_index + 1 :]
+    placeholder_numbers = [
+        int(match.group(1))
+        for argument in template_args
+        for match in ALIAS_PLACEHOLDER_PATTERN.finditer(argument)
+    ]
+    if 0 in placeholder_numbers:
+        raise SystemExit(f"golem: alias {name} has placeholder {{0}}; placeholders start at {{1}}")
+    required_arguments = max(placeholder_numbers, default=0)
+    if len(alias_args) < required_arguments:
+        raise SystemExit(
+            f"golem: alias {name} needs {required_arguments} arguments, got {len(alias_args)}"
+        )
+
+    def substitute(argument: str) -> str:
+        return ALIAS_PLACEHOLDER_PATTERN.sub(
+            lambda match: alias_args[int(match.group(1)) - 1], argument
+        )
+
+    return (
+        [*(substitute(argument) for argument in command_args), *alias_args[required_arguments:]],
+        [
+            *(substitute(argument) for argument in template_agent_args),
+            *command_line_agent_args,
+        ],
     )
+
+
+def state_directory() -> Path:
+    golem_state_directory = xdg_golem_directory("XDG_STATE_HOME", Path.home() / ".local" / "state")
     golem_state_directory.mkdir(parents=True, exist_ok=True)
     return golem_state_directory
 
@@ -353,11 +461,16 @@ def directory_lock_path(directory: str) -> Path:
     return lock_directory / f"{lock_name}.lock"
 
 
-def reserve_task(task_id: str, record: Task) -> None:
+def reserve_tasks(records: Tasks) -> None:
     with locked_tasks() as tasks:
-        if task_id in tasks:
-            raise SystemExit(f"golem: task already exists: {task_id}")
-        tasks[task_id] = record
+        for task_id in records:
+            if task_id in tasks:
+                raise SystemExit(f"golem: task already exists: {task_id}")
+        tasks.update(records)
+
+
+def can_start_dependents(task: Task) -> bool:
+    return task.get("status") in SUCCEEDED_STATUSES and "gate_reason" not in task
 
 
 def waiting_dependent_ids(tasks: Tasks, parent_id: str) -> list[str]:
@@ -374,6 +487,17 @@ def dependent_task_ids(tasks: Tasks, parent_id: str) -> list[str]:
         for dependent_id, dependent in tasks.items()
         if dependent.get("after") == parent_id
     )
+
+
+def descendant_ids_with_status(tasks: Tasks, task_id: str, statuses: set[str]) -> list[str]:
+    matching_ids: list[str] = []
+    pending_ids = [task_id]
+    while pending_ids:
+        for dependent_id in dependent_task_ids(tasks, pending_ids.pop()):
+            pending_ids.append(dependent_id)
+            if tasks[dependent_id]["status"] in statuses:
+                matching_ids.append(dependent_id)
+    return matching_ids
 
 
 def has_running_dependent(tasks: Tasks, parent_id: str) -> bool:
@@ -399,22 +523,43 @@ def mark_ancestors_done(tasks: Tasks, task: Task) -> None:
         ancestor = tasks.get(parent.get("after", ""))
 
 
-def reserve_dependent_task(
-    task_id: str,
-    record: Task,
-    parent_id: str,
-) -> bool:
+def mark_task_done(tasks: Tasks, task: Task) -> None:
+    if task.get("status") != STATUS_NEEDS_REVIEW:
+        return
+    task["status"] = STATUS_DONE
+    mark_ancestors_done(tasks, task)
+
+
+def open_app_session_and_mark_done(task_id: str, session_id: str) -> int:
+    returncode = subprocess.run(
+        ["open", f"claude://resume?session={session_id}"], check=False
+    ).returncode
+    if returncode != 0:
+        return returncode
     with locked_tasks() as tasks:
-        if task_id in tasks:
-            raise SystemExit(f"golem: task already exists: {task_id}")
+        current_task = tasks.get(task_id)
+        if current_task is not None:
+            mark_task_done(tasks, current_task)
+    return 0
+
+
+def reserve_dependent_task(records: Tasks, parent_id: str) -> bool:
+    with locked_tasks() as tasks:
+        for task_id in records:
+            if task_id in tasks:
+                raise SystemExit(f"golem: task already exists: {task_id}")
         if parent_id not in tasks:
             raise SystemExit(f"golem: task not found: {parent_id}")
         parent_status = tasks[parent_id]["status"]
         if parent_status == STATUS_CANCELLED:
             raise SystemExit(f"golem: parent task is cancelled: {parent_id}")
-        if parent_status in SUCCEEDED_STATUSES:
+        if can_start_dependents(tasks[parent_id]) and not is_gate_pending(tasks, parent_id):
             return False
-        tasks[task_id] = record
+        if tasks[parent_id].get("auto_pickup"):
+            for record in records.values():
+                if record.get("backend") == BACKEND_CLAUDE:
+                    record["auto_pickup"] = True
+        tasks.update(records)
         return True
 
 
@@ -603,6 +748,8 @@ def git_has_head(directory: str) -> bool:
 
 
 def recorded_worktree(tasks: Tasks, task: Task) -> tuple[str, bool] | None:
+    if task.get("no_worktree"):
+        return None
     ancestor = task
     while True:
         if "worktree" in ancestor:
@@ -692,11 +839,17 @@ def record_created_worktree_owner(task_id: str, task: Task) -> None:
             print(f"golem: could not record worktree ownership: {error}", file=sys.stderr)
 
 
+def is_worktree_left_to_agent(task: Task) -> bool:
+    return bool(task.get("no_worktree")) or has_agent_argument(
+        task["agent_args"], WORKTREE_ARGUMENTS
+    )
+
+
 def resolved_worktree(tasks: Tasks, task: Task) -> tuple[str | None, bool]:
     recorded = recorded_worktree(tasks, task)
     if recorded is not None:
         return recorded
-    if has_agent_argument(task["agent_args"], WORKTREE_ARGUMENTS):
+    if is_worktree_left_to_agent(task):
         return None, False
     common_directory = git_common_directory(task["cwd"])
     if common_directory is None or not git_has_head(task["cwd"]):
@@ -760,6 +913,97 @@ def is_usage_limit_resume(task: Task) -> bool:
     return task.get("usage_limit_resume_count", 0) > 0
 
 
+def progress_path(session_id: str) -> Path:
+    return state_directory() / "progress" / f"{session_id}.log"
+
+
+def rotated_progress_path(session_id: str) -> Path:
+    path = progress_path(session_id)
+    return path.with_name(f"{path.name}.1")
+
+
+def remove_progress(session_id: str) -> None:
+    progress_path(session_id).unlink(missing_ok=True)
+    rotated_progress_path(session_id).unlink(missing_ok=True)
+
+
+@contextmanager
+def progress_writer(session_id: str) -> Generator[Callable[[str], None]]:
+    path = progress_path(session_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    progress_file = path.open("a", encoding="utf-8", errors="replace")
+
+    def record_progress(text: str) -> None:
+        nonlocal progress_file
+        if progress_file.closed:
+            return
+        try:
+            if progress_file.tell() > AGENT_LOG_MAX_BYTES:
+                progress_file.close()
+                path.replace(rotated_progress_path(session_id))
+                progress_file = path.open("a", encoding="utf-8", errors="replace")
+            progress_file.write(text if text.endswith("\n") else f"{text}\n")
+            progress_file.flush()
+        except OSError:
+            with suppress(OSError):
+                progress_file.close()
+
+    try:
+        yield record_progress
+    finally:
+        progress_file.close()
+
+
+def tool_call_progress(name: str, argument: object) -> str:
+    line = (
+        f"[tool] {name} {first_line(argument)}"
+        if isinstance(argument, str) and argument
+        else f"[tool] {name}"
+    )
+    return line[:PROGRESS_LINE_WIDTH]
+
+
+def claude_event_progress(event: object) -> list[str]:
+    if not isinstance(event, dict):
+        return []
+    event_fields = cast("dict[str, object]", event)
+    if (
+        event_fields.get("type") != "assistant"
+        or event_fields.get("parent_tool_use_id") is not None
+    ):
+        return []
+    message = event_fields.get("message")
+    content = (
+        cast("dict[str, object]", message).get("content") if isinstance(message, dict) else None
+    )
+    if not isinstance(content, list):
+        return []
+    progress: list[str] = []
+    for item in cast("list[object]", content):
+        if not isinstance(item, dict):
+            continue
+        item_fields = cast("dict[str, object]", item)
+        text = item_fields.get("text")
+        name = item_fields.get("name")
+        if item_fields.get("type") == "text" and isinstance(text, str):
+            progress.append(text)
+        elif item_fields.get("type") == "tool_use" and isinstance(name, str):
+            tool_input = item_fields.get("input")
+            input_fields = (
+                cast("dict[str, object]", tool_input) if isinstance(tool_input, dict) else {}
+            )
+            argument = next(
+                (
+                    input_fields[key]
+                    for key in PROGRESS_TOOL_INPUT_KEYS
+                    if isinstance(input_fields.get(key), str)
+                ),
+                None,
+            )
+            progress.append(tool_call_progress(name, argument))
+    return progress
+
+
 def run_claude(
     task_id: str, task: Task, lock_file_descriptors: tuple[int, ...]
 ) -> tuple[int, str, str]:
@@ -782,25 +1026,44 @@ def run_claude(
         default_args += ["--worktree", Path(worktree).name]
     if not has_agent_argument(agent_args, PERMISSION_ARGUMENTS):
         default_args.append("--dangerously-skip-permissions")
-    claude_process = subprocess.run(
-        [
-            *command,
-            "--output-format",
-            "json",
-            *agent_args,
-            *default_args,
-        ],
-        cwd=task_directory(task),
-        env={**task_environment(task), BACKGROUND_WAIT_CEILING_VARIABLE: "0"},
-        capture_output=True,
-        encoding="utf-8",
-        pass_fds=lock_file_descriptors,
-        check=False,
-    )
-    sys.stderr.write(claude_process.stderr)
+    stdout_lines: list[str] = []
+    with (
+        progress_writer(session_id) as record_progress,
+        tempfile.TemporaryFile("w+", encoding="utf-8") as stderr_file,
+    ):
+        claude_process = subprocess.Popen(
+            [
+                *command,
+                "--output-format",
+                "stream-json",
+                *agent_args,
+                *default_args,
+            ],
+            cwd=task_directory(task),
+            env={**task_environment(task), BACKGROUND_WAIT_CEILING_VARIABLE: "0"},
+            stdout=subprocess.PIPE,
+            stderr=stderr_file,
+            encoding="utf-8",
+            pass_fds=lock_file_descriptors,
+        )
+        with cast("io.TextIOWrapper", claude_process.stdout) as output:
+            try:
+                for line in output:
+                    stdout_lines.append(line)
+                    with suppress(json.JSONDecodeError):
+                        for progress in claude_event_progress(cast("object", json.loads(line))):
+                            record_progress(progress)
+                returncode = claude_process.wait()
+            except BaseException:
+                claude_process.kill()
+                claude_process.wait()
+                raise
+        stderr_file.seek(0)
+        stderr = stderr_file.read()
+    sys.stderr.write(stderr)
     if is_creating_worktree:
         record_created_worktree_owner(task_id, task)
-    return claude_process.returncode, claude_process.stdout, claude_process.stderr
+    return returncode, "".join(stdout_lines), stderr
 
 
 def fetch_stale_default_branch(cwd: str) -> None:
@@ -917,8 +1180,36 @@ class CodexEventState:
     last_error_message: str | None = None
 
 
+def codex_item_progress(item: dict[str, object]) -> str | None:
+    item_type = item.get("type")
+    if item_type == "agent_message":
+        text = item.get("text")
+        return text if isinstance(text, str) else None
+    if item_type == "command_execution":
+        return tool_call_progress("command", item.get("command"))
+    if item_type == "file_change":
+        changes = item.get("changes")
+        paths = [
+            cast("dict[str, object]", change).get("path")
+            for change in (cast("list[object]", changes) if isinstance(changes, list) else [])
+            if isinstance(change, dict)
+        ]
+        return tool_call_progress(
+            "file_change", " ".join(path for path in paths if isinstance(path, str))
+        )
+    if item_type == "mcp_tool_call":
+        return tool_call_progress("mcp", item.get("tool"))
+    if item_type == "web_search":
+        return tool_call_progress("web_search", item.get("query"))
+    return None
+
+
 def update_codex_event_state(
-    event: dict[str, object], task_id: str, session_id: str, state: CodexEventState
+    event: dict[str, object],
+    task_id: str,
+    session_id: str,
+    state: CodexEventState,
+    record_progress: Callable[[str], None],
 ) -> None:
     event_type = event.get("type")
     if event_type == "thread.started":
@@ -931,6 +1222,8 @@ def update_codex_event_state(
         if not isinstance(item, dict):
             return
         item_fields = cast("dict[str, object]", item)
+        if progress := codex_item_progress(item_fields):
+            record_progress(progress)
         text = item_fields.get("text") if item_fields.get("type") == "agent_message" else None
         if isinstance(text, str):
             state.last_agent_message = text
@@ -945,7 +1238,10 @@ def update_codex_event_state(
 
 
 def read_codex_events(
-    process: subprocess.Popen[str], task_id: str, session_id: str
+    process: subprocess.Popen[str],
+    task_id: str,
+    session_id: str,
+    record_progress: Callable[[str], None],
 ) -> CodexEventState:
     state = CodexEventState()
     output = cast("io.TextIOWrapper", process.stdout)
@@ -957,7 +1253,7 @@ def read_codex_events(
                 continue
             if isinstance(event, dict):
                 update_codex_event_state(
-                    cast("dict[str, object]", event), task_id, session_id, state
+                    cast("dict[str, object]", event), task_id, session_id, state, record_progress
                 )
     finally:
         output.close()
@@ -967,37 +1263,44 @@ def read_codex_events(
 def run_codex(
     task_id: str, task: Task, lock_file_descriptors: tuple[int, ...]
 ) -> tuple[int, str | None, bool]:
-    try:
-        require_codex_subscription(task_environment(task))
-    except SystemExit as error:
-        return 1, str(error), False
-    worktree = task.get("worktree")
-    if worktree is not None and not Path(worktree).is_dir():
-        if task.get("worktree_pending") is not True:
-            return 1, f"golem: worktree is missing: {worktree}", False
-        if error := create_codex_worktree(task_id, task):
-            return 1, error, False
-    if is_usage_limit_resume(task) and not isinstance(task.get("thread_id"), str):
-        return 1, "golem: task has no Codex conversation", False
-    command, prompt = codex_command(task)
-    process = subprocess.Popen(
-        command,
-        cwd=task_directory(task),
-        env=codex_environment(task_environment(task)),
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        encoding="utf-8",
-        pass_fds=lock_file_descriptors,
-    )
-    standard_input = cast("io.TextIOWrapper", process.stdin)
-    try:
-        with suppress(BrokenPipeError):
-            standard_input.write(prompt)
-    finally:
-        with suppress(BrokenPipeError):
-            standard_input.close()
-    event_state = read_codex_events(process, task_id, task["session_id"])
-    returncode = process.wait()
+    session_id = task["session_id"]
+    with progress_writer(session_id) as record_progress:
+        try:
+            require_codex_subscription(task_environment(task))
+        except SystemExit as error:
+            return 1, str(error), False
+        worktree = task.get("worktree")
+        if worktree is not None and not Path(worktree).is_dir():
+            if task.get("worktree_pending") is not True:
+                return 1, f"golem: worktree is missing: {worktree}", False
+            if error := create_codex_worktree(task_id, task):
+                return 1, error, False
+        if is_usage_limit_resume(task) and not isinstance(task.get("thread_id"), str):
+            return 1, "golem: task has no Codex conversation", False
+        command, prompt = codex_command(task)
+        process = subprocess.Popen(
+            command,
+            cwd=task_directory(task),
+            env=codex_environment(task_environment(task)),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            encoding="utf-8",
+            pass_fds=lock_file_descriptors,
+        )
+        standard_input = cast("io.TextIOWrapper", process.stdin)
+        try:
+            with suppress(BrokenPipeError):
+                standard_input.write(prompt)
+        finally:
+            with suppress(BrokenPipeError):
+                standard_input.close()
+        try:
+            event_state = read_codex_events(process, task_id, session_id, record_progress)
+            returncode = process.wait()
+        except BaseException:
+            process.kill()
+            process.wait()
+            raise
     result = (
         event_state.failed_message
         or event_state.last_agent_message
@@ -1012,8 +1315,16 @@ def run_codex(
     return returncode, result, is_usage_limit
 
 
+@dataclass(frozen=True)
+class RunPlacement:
+    cwd: str
+    is_auto_pickup: bool = False
+    is_no_worktree: bool = False
+    gate: str | None = None
+
+
 def new_task_record(
-    cwd: str,
+    placement: RunPlacement,
     prompt: str,
     agent_args: tuple[str, ...],
     when: datetime | None,
@@ -1022,7 +1333,7 @@ def new_task_record(
     after: str | None = None,
 ) -> Task:
     record: Task = {
-        "cwd": cwd,
+        "cwd": placement.cwd,
         "prompt": prompt,
         "agent_args": list(agent_args),
         "status": STATUS_WAITING,
@@ -1032,10 +1343,35 @@ def new_task_record(
     }
     if after is not None:
         record["after"] = after
+    if placement.is_auto_pickup:
+        record["auto_pickup"] = True
+    if placement.is_no_worktree:
+        record["no_worktree"] = True
+    if placement.gate is not None:
+        record["gate"] = placement.gate
     if when is not None:
         record["status"] = STATUS_SCHEDULED
         record["due_at"] = when.isoformat()
     return record
+
+
+def new_follow_up_records(
+    run_task_id: str,
+    follow_ups: list[list[str]],
+    agent_args: tuple[str, ...],
+    backend: str,
+    placement: RunPlacement,
+) -> Tasks:
+    records: Tasks = {}
+    previous_task_id = run_task_id
+    for task_id, prompt in follow_ups:
+        if task_id == run_task_id or task_id in records:
+            raise SystemExit(f"golem: task ID used more than once: {task_id}")
+        records[task_id] = new_task_record(
+            placement, prompt, agent_args, None, backend, after=previous_task_id
+        )
+        previous_task_id = task_id
+    return records
 
 
 def pickup(task_id: str, *agent_args: str, is_app: bool, is_review_required: bool = False) -> int:
@@ -1052,11 +1388,15 @@ def pickup(task_id: str, *agent_args: str, is_app: bool, is_review_required: boo
         task = tasks[task_id]
         if is_review_required and task.get("status") != STATUS_NEEDS_REVIEW:
             return 0
-        if task.get("status") in {STATUS_SCHEDULED, STATUS_WAITING, STATUS_CANCELLED}:
+        if task.get("status") in NOT_STARTED_STATUSES:
             raise SystemExit(f"golem: task has not started: {task_id}")
         reject_missing_worktree(task, worktrees)
         directory = directory_to_lock(task, task.get("worktree"))
         directory_lock_file = acquire_lock(directory_lock_path(directory))
+        if directory_lock_file is None and task.get("status") == STATUS_RUNNING:
+            raise SystemExit(
+                f"golem: task is running: {task_id}; use golem watch {task_id} to follow it"
+            )
         if directory_lock_file is None:
             raise SystemExit(f"golem: directory is busy: {directory}")
         thread_id = task.get("thread_id")
@@ -1064,16 +1404,13 @@ def pickup(task_id: str, *agent_args: str, is_app: bool, is_review_required: boo
             release_lock(directory_lock_file)
             raise SystemExit(f"golem: task has no Codex conversation: {task_id}")
         clear_worktree_release(tasks, worktrees, task)
-        if task.get("status") == STATUS_NEEDS_REVIEW:
-            task["status"] = STATUS_DONE
-            mark_ancestors_done(tasks, task)
+        if not is_app:
+            mark_task_done(tasks, task)
         cwd = task_directory(task)
         session_id = task["session_id"]
     if is_app:
         release_lock(directory_lock_file)
-        return subprocess.run(
-            ["open", f"claude://resume?session={session_id}"], check=False
-        ).returncode
+        return open_app_session_and_mark_done(task_id, session_id)
     try:
         if is_codex:
             return subprocess.run(
@@ -1099,14 +1436,16 @@ def pickup(task_id: str, *agent_args: str, is_app: bool, is_review_required: boo
         release_lock(directory_lock_file)
 
 
+def is_ready_for_review(tasks: Tasks, task_id: str) -> bool:
+    task = tasks[task_id]
+    return task.get("status") == STATUS_NEEDS_REVIEW and (
+        "gate_reason" in task or not has_unreviewed_dependent(tasks, task_id)
+    )
+
+
 def pickup_all() -> int:
     tasks = load_tasks()
-    task_ids = [
-        task_id
-        for task_id, task in tasks.items()
-        if task.get("status") == STATUS_NEEDS_REVIEW
-        and not has_unreviewed_dependent(tasks, task_id)
-    ]
+    task_ids = [task_id for task_id in tasks if is_ready_for_review(tasks, task_id)]
     if not task_ids:
         print("golem: no tasks ready for review")
         return 0
@@ -1119,6 +1458,25 @@ def pickup_all() -> int:
             print(error, file=sys.stderr)
             has_failure = True
     return int(has_failure)
+
+
+def auto_pickup_task(task_id: str) -> None:
+    tasks = load_tasks()
+    task = tasks.get(task_id)
+    if task is None:
+        return
+    if task.get("status") == STATUS_FAILED:
+        auto_pickup_task(task.get("after", ""))
+        return
+    if not task.get("auto_pickup") or not is_ready_for_review(tasks, task_id):
+        return
+    try:
+        returncode = pickup(task_id, is_app=True, is_review_required=True)
+    except SystemExit as error:
+        print(error, file=sys.stderr)
+        return
+    if returncode != 0:
+        print(f"golem: could not open {task_id} in the desktop app", file=sys.stderr)
 
 
 def close(task_id: str) -> int:
@@ -1137,10 +1495,72 @@ def show_task_result(task_id: str) -> int:
     if task_id not in tasks:
         raise SystemExit(f"golem: task not found: {task_id}")
     task = tasks[task_id]
+    if "gate_reason" in task:
+        print(f"golem: gate stopped: {task['gate_reason']}", file=sys.stderr)
     result = task.get("result")
     if not isinstance(result, str):
         raise SystemExit(f"golem: task has no result: {task_id}")
     print_task_result(result)
+    return 0
+
+
+def is_usage_limit_pause(task: Task) -> bool:
+    return task.get("status") == STATUS_SCHEDULED and is_usage_limit_resume(task)
+
+
+def task_end_line(task_id: str, task: Task) -> str:
+    due_at = task.get("due_at")
+    if due_at is not None and is_usage_limit_pause(task):
+        resume_time = display_due_at(due_at, datetime.now().astimezone().date())
+        return f"golem: task paused at the usage limit, resumes {resume_time}: {task_id}"
+    return f"golem: task {task['status']}: {task_id}"
+
+
+def print_new_progress(progress_file: BinaryIO) -> None:
+    new_bytes = progress_file.read()
+    complete_lines = new_bytes[: new_bytes.rfind(b"\n") + 1]
+    progress_file.seek(len(complete_lines) - len(new_bytes), os.SEEK_CUR)
+    sys.stdout.write(complete_lines.decode("utf-8"))
+    sys.stdout.flush()
+
+
+def follow_progress_until_stopped(task_id: str, path: Path, progress_file: BinaryIO) -> Task:
+    try:
+        while True:
+            task = existing_task(load_tasks(), task_id)
+            print_new_progress(progress_file)
+            with suppress(FileNotFoundError):
+                while path.stat().st_ino != os.fstat(progress_file.fileno()).st_ino:
+                    print_new_progress(progress_file)
+                    rotated_file = progress_file
+                    progress_file = path.open("rb")
+                    rotated_file.close()
+                    print_new_progress(progress_file)
+            if task.get("status") != STATUS_RUNNING:
+                return task
+            time.sleep(WATCH_POLL_SECONDS)
+    finally:
+        progress_file.close()
+
+
+def watch_task(task_id: str) -> int:
+    task = existing_task(load_tasks(), task_id)
+    if task.get("status") in NOT_STARTED_STATUSES and not is_usage_limit_pause(task):
+        raise SystemExit(f"golem: task has not started: {task_id}")
+    session_id = task["session_id"]
+    rotated_path = rotated_progress_path(session_id)
+    path = progress_path(session_id)
+    try:
+        progress_file = path.open("rb")
+    except FileNotFoundError:
+        raise SystemExit(f"golem: task has no recorded progress: {task_id}") from None
+    try:
+        with suppress(FileNotFoundError), rotated_path.open("rb") as rotated_file:
+            if os.fstat(rotated_file.fileno()).st_ino != os.fstat(progress_file.fileno()).st_ino:
+                print_new_progress(rotated_file)
+        print(task_end_line(task_id, follow_progress_until_stopped(task_id, path, progress_file)))
+    except KeyboardInterrupt:
+        return 130
     return 0
 
 
@@ -1159,6 +1579,9 @@ def cancel_task(task_id: str) -> int:
                 waiting_task = tasks[waiting_task_id]
                 waiting_task["status"] = STATUS_CANCELLED
                 pending_task_ids.append(waiting_task_id)
+        directories = hook_affected_directories(tasks, task)
+    for directory in directories:
+        sync_hooks(directory)
     return 0
 
 
@@ -1191,24 +1614,29 @@ def display_status(status: str, width: int, *, is_color: bool) -> str:
     return f"\033[38;5;{STATUS_COLORS[status]}m{padded_status}{ANSI_RESET}"
 
 
+def first_line(text: str) -> str:
+    return next(iter(text.splitlines()), "")
+
+
 def list_tasks() -> int:
     tasks = load_tasks()
     if not tasks:
         print("golem: no tasks")
         return 0
     today = datetime.now().astimezone().date()
-    rows: list[tuple[str, str, str, str, str]] = [
+    rows: list[tuple[str, str, str, str, str, str]] = [
         (
             task_id,
             task["status"],
             display_directory(task["cwd"]),
             display_due_at(task["due_at"], today) if "due_at" in task else "",
             task.get("after", "") if task["status"] == STATUS_WAITING else "",
+            first_line(task.get("gate_reason", "")),
         )
         for task_id, task in tasks.items()
     ]
     rows.sort(key=lambda row: (LIST_STATUS_ORDER.index(row[1]), row[0]))
-    headers = ("ID", "STATUS", "DIRECTORY", "DUE AT", "AFTER")
+    headers = ("ID", "STATUS", "DIRECTORY", "DUE AT", "AFTER", "REASON")
     widths = [
         max(len(header), *(len(row[index]) for row in rows)) for index, header in enumerate(headers)
     ]
@@ -1216,7 +1644,7 @@ def list_tasks() -> int:
     print(
         "  ".join(value.ljust(width) for value, width in zip(headers, widths, strict=True)).rstrip()
     )
-    for task_id, status, directory, due_at, after in rows:
+    for task_id, status, directory, due_at, after, reason in rows:
         print(
             "  ".join(
                 (
@@ -1225,6 +1653,7 @@ def list_tasks() -> int:
                     directory.ljust(widths[2]),
                     due_at.ljust(widths[3]),
                     after.ljust(widths[4]),
+                    reason.ljust(widths[5]),
                 )
             ).rstrip()
         )
@@ -1539,18 +1968,27 @@ def schedule_new_task(
     after: str | None,
     *,
     backend: str,
+    placement: RunPlacement,
+    follow_up_records: Tasks,
 ) -> int:
     due_time = when or datetime.now(UTC).astimezone()
-    record = new_task_record(str(Path.cwd()), prompt, agent_args, due_time, backend, after=after)
-    reserve_task(task_id, record)
+    record = new_task_record(placement, prompt, agent_args, due_time, backend, after=after)
+    reserve_tasks({task_id: record, **follow_up_records})
     return wake_launch_agent_and_report(task_id, due_time)
 
 
+def parsed_claude_output(output: str) -> object:
+    with suppress(json.JSONDecodeError):
+        return cast("object", json.loads(output))
+    events: list[object] = []
+    for line in output.splitlines():
+        with suppress(json.JSONDecodeError):
+            events.append(cast("object", json.loads(line)))
+    return events
+
+
 def claude_result_and_usage_limit(output: str) -> tuple[str, bool]:
-    try:
-        parsed_response = cast("object", json.loads(output))
-    except json.JSONDecodeError:
-        return output, False
+    parsed_response = parsed_claude_output(output)
     if isinstance(parsed_response, list):
         parsed_response = next(
             (
@@ -1571,10 +2009,7 @@ def claude_result_and_usage_limit(output: str) -> tuple[str, bool]:
 
 
 def claude_working_directory(output: str) -> str | None:
-    try:
-        parsed_response = cast("object", json.loads(output))
-    except json.JSONDecodeError:
-        return None
+    parsed_response = parsed_claude_output(output)
     if not isinstance(parsed_response, list):
         return None
     for message in cast("list[object]", parsed_response):
@@ -1649,6 +2084,12 @@ def finish_task(
             else STATUS_FAILED
         )
         task_record["returncode"] = returncode
+        stored_parent = tasks.get(task_record.get("after", ""))
+        if task_record["status"] != STATUS_NEEDS_REVIEW or stored_parent is None:
+            return
+        parent = stored_parent
+        if parent.get("status") == STATUS_NEEDS_REVIEW:
+            parent["status"] = STATUS_DONE
 
 
 def claim_task(
@@ -1700,7 +2141,10 @@ def claim_task(
             else:
                 record_worktree_resource(worktrees, worktree, session_id)
     clear_worktree_release(tasks, worktrees, task)
+    progress_path(session_id).parent.mkdir(parents=True, exist_ok=True)
+    progress_path(session_id).touch()
     task["status"] = STATUS_RUNNING
+    task["started_at"] = datetime.now(UTC).isoformat()
     return task.copy(), run_lock_file, directory_lock_file
 
 
@@ -1712,10 +2156,7 @@ def claim_next_dependent(
         if parent_record is None:
             return None
         parent = parent_record
-        if (
-            parent.get("session_id") != parent_session_id
-            or parent.get("status") not in SUCCEEDED_STATUSES
-        ):
+        if parent.get("session_id") != parent_session_id or not can_start_dependents(parent):
             return None
         for dependent_id in waiting_dependent_ids(tasks, task_id):
             dependent_session_id = tasks[dependent_id]["session_id"]
@@ -1734,6 +2175,10 @@ def print_task_result(result: str) -> None:
 def drain_dependents(task_id: str, session_id: str) -> None:
     while next_dependent := claim_next_dependent(task_id, session_id):
         execute_claimed_task(*next_dependent)
+    auto_pickup_task(task_id)
+    drained_task = load_tasks().get(task_id)
+    if drained_task is not None:
+        sync_hooks(task_directory(drained_task))
 
 
 def execute_task(task_id: str, task: Task, lock_file_descriptors: tuple[int, ...]) -> int:
@@ -1751,7 +2196,7 @@ def execute_task(task_id: str, task: Task, lock_file_descriptors: tuple[int, ...
         output = ""
         result = None
         is_usage_limit = False
-    if task_backend(task) == BACKEND_CLAUDE:
+    if task_backend(task) == BACKEND_CLAUDE and not task.get("no_worktree"):
         working_directory = claude_working_directory(output)
         if working_directory is not None and working_directory != task["cwd"]:
             record_worktree(task_id, working_directory)
@@ -1779,6 +2224,361 @@ def execute_task(task_id: str, task: Task, lock_file_descriptors: tuple[int, ...
     return returncode
 
 
+def gate_input_json(task_id: str, task: Task) -> str:
+    transcript_path = next(iter(transcript_paths(task)), None)
+    return json.dumps(
+        {
+            "task_id": task_id,
+            "session_id": task["session_id"],
+            "directory": task_directory(task),
+            "started_at": task.get("started_at"),
+            "exit_code": task.get("returncode"),
+            "result": task.get("result"),
+            "transcript_path": None if transcript_path is None else str(transcript_path),
+        }
+    )
+
+
+def gate_stop_reason(task_id: str, task: Task, timeout_seconds: int | None = None) -> str | None:
+    gate = task.get("gate")
+    if gate is None:
+        return None
+    if timeout_seconds is None:
+        timeout_seconds = GATE_TIMEOUT_SECONDS
+    # A file, not a pipe: a background process the gate starts can hold stderr open after it exits.
+    with tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as stderr_file:
+        try:
+            gate_process = subprocess.Popen(
+                ["/bin/sh", "-c", gate],
+                cwd=task_directory(task),
+                env=task_environment(task),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=stderr_file,
+                encoding="utf-8",
+                errors="replace",
+                process_group=0,
+            )
+        except OSError as error:
+            return str(error)
+        with gate_process:
+            try:
+                gate_process.communicate(gate_input_json(task_id, task), timeout=timeout_seconds)
+            except subprocess.TimeoutExpired:
+                return f"gate timed out after {timeout_seconds}s"
+            finally:
+                # Unreaped, so the group ID is still ours; macOS fails with EPERM once only zombies remain.
+                if gate_process.returncode is None:
+                    with suppress(OSError):
+                        os.killpg(gate_process.pid, signal.SIGKILL)
+        if gate_process.returncode == 0:
+            return None
+        stderr_file.seek(0)
+        return stderr_file.read().strip() or f"gate exited with status {gate_process.returncode}"
+
+
+def is_gate_pending(tasks: Tasks, task_id: str) -> bool:
+    task = tasks.get(task_id)
+    if task is None:
+        return False
+    return (
+        task.get("status") == STATUS_NEEDS_REVIEW
+        and "gate" in task
+        and "gate_reason" not in task
+        and bool(waiting_dependent_ids(tasks, task_id))
+    )
+
+
+def acquire_task_directory_lock(task: Task) -> io.TextIOWrapper | None:
+    return acquire_lock(directory_lock_path(directory_to_lock(task, task.get("worktree"))))
+
+
+def run_pending_gate(task_id: str) -> None:
+    tasks = load_tasks()
+    if not is_gate_pending(tasks, task_id):
+        return
+    stop_reason = gate_stop_reason(task_id, tasks[task_id])
+    if stop_reason is None:
+        return
+    with locked_tasks() as locked_tasks_by_id:
+        current = locked_tasks_by_id.get(task_id)
+        if current is None:
+            return
+        if current.get("status") not in SUCCEEDED_STATUSES:
+            return
+        current["gate_reason"] = stop_reason
+        directory = task_directory(current)
+    sync_hooks(directory)
+
+
+def continue_task(task_id: str, *, is_forced: bool) -> int:
+    task = existing_task(load_tasks(), task_id)
+    if "gate_reason" not in task:
+        raise SystemExit(f"golem: task is not stopped at a gate: {task_id}")
+    if not is_forced:
+        directory_lock_file = acquire_task_directory_lock(task)
+        if directory_lock_file is None:
+            raise SystemExit(f"golem: directory is busy: {task_id}")
+        try:
+            stop_reason = gate_stop_reason(task_id, task)
+        finally:
+            release_lock(directory_lock_file)
+        if stop_reason is not None:
+            with locked_tasks() as tasks:
+                stopped_task = existing_task(tasks, task_id)
+                if "gate_reason" in stopped_task:
+                    stopped_task["gate_reason"] = stop_reason
+            print(stop_reason, file=sys.stderr)
+            return 1
+    if not release_gate_stop(task_id):
+        raise SystemExit(f"golem: task is not stopped at a gate: {task_id}")
+    return 0
+
+
+def release_gate_stop(task_id: str, *, stderr: int | None = None) -> bool:
+    with locked_tasks() as tasks:
+        task = tasks.get(task_id)
+        if task is None:
+            return False
+        if "gate_reason" not in task:
+            return False
+        del task["gate_reason"]
+        task["status"] = STATUS_DONE
+    start_task_executor(task_id, task, stderr=stderr)
+    return True
+
+
+def hook_command_line(argument: str) -> str:
+    state_home = shlex.quote(str(state_directory().parent))
+    command = shlex.join([*golem_command(), "_hook", argument])
+    return f"XDG_STATE_HOME={state_home} {command}{HOOK_FAILURE_SUFFIX}"
+
+
+def hook_group(event: str) -> JsonObject:
+    entry: JsonObject = {
+        "type": "command",
+        "command": hook_command_line(HOOK_EVENT_ARGUMENTS[event]),
+    }
+    if event == HOOK_EVENT_STOP:
+        entry["timeout"] = HOOK_STOP_TIMEOUT_SECONDS
+        return {"hooks": [entry]}
+    return {"matcher": HOOK_TOOL_MATCHER, "hooks": [entry]}
+
+
+def group_entries(group: object) -> list[object]:
+    entries = cast("JsonObject", group).get("hooks") if isinstance(group, dict) else None
+    return cast("list[object]", entries) if isinstance(entries, list) else []
+
+
+def is_golem_hook_entry(entry: object) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    command = cast("JsonObject", entry).get("command")
+    return isinstance(command, str) and command.endswith(HOOK_COMMAND_SUFFIXES)
+
+
+def local_settings_path(directory: str) -> Path:
+    return Path(directory) / ".claude" / "settings.local.json"
+
+
+def save_local_settings(path: Path, settings: LocalSettings) -> None:
+    mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else None
+    save_json(path, settings)
+    if mode is not None:
+        path.chmod(mode)
+
+
+def read_local_settings(path: Path) -> LocalSettings | None:
+    if path.is_symlink():
+        return None
+    try:
+        loaded_settings = cast("object", load_json(path))
+    except ValueError, OSError:
+        return None
+    if not isinstance(loaded_settings, dict):
+        return None
+    settings = cast("JsonObject", loaded_settings)
+    hooks = settings.get("hooks", {})
+    if not isinstance(hooks, dict):
+        return None
+    hooks_by_event = cast("JsonObject", hooks)
+    if not all(isinstance(hooks_by_event.get(event, []), list) for event in HOOK_EVENT_ARGUMENTS):
+        return None
+    return cast("LocalSettings", settings)
+
+
+def groups_without_golem_entries(groups: list[object]) -> list[object]:
+    kept_groups: list[object] = []
+    for group in groups:
+        entries = group_entries(group)
+        kept_entries = [entry for entry in entries if not is_golem_hook_entry(entry)]
+        if len(kept_entries) == len(entries):
+            kept_groups.append(group)
+        elif kept_entries:
+            kept_groups.append({**cast("JsonObject", group), "hooks": kept_entries})
+    return kept_groups
+
+
+def install_hooks(directory: str) -> None:
+    if not Path(directory).is_dir():
+        return
+    path = local_settings_path(directory)
+    settings = read_local_settings(path)
+    if settings is None:
+        print(f"golem: hooks not installed: {path} is not usable settings", file=sys.stderr)
+        return
+    hooks = settings.setdefault("hooks", {})
+    is_changed = False
+    for event in HOOK_EVENT_ARGUMENTS:
+        groups = hooks.get(event, [])
+        current_group = hook_group(event)
+        current_entry = group_entries(current_group)[0]
+        if any(entry == current_entry for group in groups for entry in group_entries(group)):
+            continue
+        hooks[event] = [*groups_without_golem_entries(groups), current_group]
+        is_changed = True
+    if not is_changed:
+        return
+    try:
+        path.parent.mkdir(exist_ok=True)
+        save_local_settings(path, settings)
+    except OSError as error:
+        print(f"golem: hooks not installed: {error}", file=sys.stderr)
+
+
+def remove_hooks(directory: str) -> None:
+    path = local_settings_path(directory)
+    if not path.exists():
+        return
+    settings = read_local_settings(path)
+    if settings is None:
+        return
+    hooks = settings.get("hooks", {})
+    is_changed = False
+    for event in HOOK_EVENT_ARGUMENTS:
+        groups = hooks.get(event, [])
+        kept_groups = groups_without_golem_entries(groups)
+        if kept_groups == groups:
+            continue
+        is_changed = True
+        if kept_groups:
+            hooks[event] = kept_groups
+        else:
+            del hooks[event]
+    if not is_changed:
+        return
+    if not hooks:
+        del settings["hooks"]
+    try:
+        if settings:
+            save_local_settings(path, settings)
+            return
+        path.unlink()
+    except OSError as error:
+        print(f"golem: hooks not removed: {error}", file=sys.stderr)
+        return
+    with suppress(OSError):
+        path.parent.rmdir()
+
+
+def has_pending_follow_up(tasks: Tasks, task_id: str) -> bool:
+    return bool(
+        waiting_dependent_ids(tasks, task_id)
+        or descendant_ids_with_status(tasks, task_id, {STATUS_SCHEDULED, STATUS_RUNNING})
+    )
+
+
+def is_hook_needed(tasks: Tasks, directory: str) -> bool:
+    return any(
+        "gate" in task
+        and task["status"] in SUCCEEDED_STATUSES
+        and task_directory(task) == directory
+        and has_pending_follow_up(tasks, task_id)
+        for task_id, task in tasks.items()
+    )
+
+
+def hook_affected_directories(tasks: Tasks, task: Task) -> set[str]:
+    directories = {task_directory(task)}
+    parent = tasks.get(task.get("after", ""))
+    if parent is not None:
+        directories.add(task_directory(parent))
+    return directories
+
+
+def sync_hooks(directory: str) -> None:
+    with locked_tasks() as tasks:
+        if is_hook_needed(tasks, directory):
+            install_hooks(directory)
+        else:
+            remove_hooks(directory)
+
+
+def read_hook_session_id() -> str | None:
+    try:
+        payload = cast("object", json.load(sys.stdin))
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    session_id = cast("JsonObject", payload).get("session_id")
+    return session_id if isinstance(session_id, str) and session_id else None
+
+
+def session_task_id(tasks: Tasks, session_id: str | None) -> str | None:
+    if session_id is None:
+        return None
+    return next(
+        (task_id for task_id, task in tasks.items() if task.get("session_id") == session_id),
+        None,
+    )
+
+
+def hook_stop() -> int:
+    tasks = load_tasks()
+    task_id = session_task_id(tasks, read_hook_session_id())
+    if task_id is None:
+        return 0
+    task = tasks[task_id]
+    next_ids = waiting_dependent_ids(tasks, task_id)
+    if "gate_reason" not in task or not next_ids:
+        return 0
+    directory_lock_file = acquire_task_directory_lock(task)
+    if directory_lock_file is None:
+        return 0
+    try:
+        stop_reason = gate_stop_reason(task_id, task, HOOK_GATE_TIMEOUT_SECONDS)
+    finally:
+        release_lock(directory_lock_file)
+    if stop_reason is not None:
+        return 0
+    with agent_log_path().open("a", encoding="utf-8") as log_file:
+        if not release_gate_stop(task_id, stderr=log_file.fileno()):
+            return 0
+    print(json.dumps({"systemMessage": f"golem: continuing chain with {next_ids[0]}"}))
+    return 0
+
+
+def hook_pre_tool_use() -> int:
+    tasks = load_tasks()
+    task_id = session_task_id(tasks, read_hook_session_id())
+    if task_id is None:
+        return 0
+    running_ids = descendant_ids_with_status(tasks, task_id, {STATUS_RUNNING})
+    if not running_ids:
+        return 0
+    reason = f"golem is running {running_ids[0]}; wait for it to finish"
+    output = {
+        "hookSpecificOutput": {
+            "hookEventName": HOOK_EVENT_PRE_TOOL_USE,
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    }
+    print(json.dumps(output))
+    return 0
+
+
 def execute_claimed_task(
     task_id: str,
     task: Task,
@@ -1792,6 +2592,7 @@ def execute_claimed_task(
                 task,
                 (run_lock_file.fileno(), directory_lock_file.fileno()),
             )
+            run_pending_gate(task_id)
         finally:
             release_lock(directory_lock_file)
         drain_dependents(task_id, task["session_id"])
@@ -1808,12 +2609,28 @@ def execute_scheduled_task(task_id: str, session_id: str) -> int:
     return execute_claimed_task(task_id, *claim)
 
 
+def run_pending_gate_under_directory_lock(task_id: str) -> bool:
+    tasks = load_tasks()
+    if not is_gate_pending(tasks, task_id):
+        return True
+    directory_lock_file = acquire_task_directory_lock(tasks[task_id])
+    if directory_lock_file is None:
+        return False
+    try:
+        run_pending_gate(task_id)
+    finally:
+        release_lock(directory_lock_file)
+    return True
+
+
 def drain_succeeded_task(task_id: str, session_id: str) -> None:
     with locked_tasks():
         run_lock_file = acquire_run_lock(session_id)
     if run_lock_file is None:
         return
     try:
+        if not run_pending_gate_under_directory_lock(task_id):
+            return
         drain_dependents(task_id, session_id)
     finally:
         release_run_lock(run_lock_file, session_id)
@@ -1827,13 +2644,16 @@ def execute_or_drain_task(task_id: str, session_id: str) -> int:
     return 0
 
 
-def start_task_executor(task_id: str, task: Task) -> subprocess.Popen[bytes]:
+def start_task_executor(
+    task_id: str, task: Task, *, stderr: int | None = None
+) -> subprocess.Popen[bytes]:
     return subprocess.Popen(
         [*golem_command(), "_execute", task_id, task["session_id"]],
         env=task_environment(task),
         start_new_session=True,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
+        stderr=stderr,
     )
 
 
@@ -2010,6 +2830,32 @@ def record_worktree_removal_error(resource: WorktreeResource, error: str) -> tup
     return False, [error]
 
 
+def remove_inspected_worktree_resource(
+    resource: WorktreeResource, entry: list[str], worktree: str
+) -> tuple[bool, list[str]]:
+    repository = resource.get("repository")
+    if repository is None:
+        return False, []
+    commands = ["remove"]
+    if git_worktree_lock_reason(entry) is not None:
+        commands.insert(0, "unlock")
+    for command in commands:
+        result = run_git(
+            repository,
+            "-c",
+            "status.showUntrackedFiles=all",
+            "worktree",
+            command,
+            worktree,
+        )
+        if result.returncode:
+            error = result.stderr.strip() or result.stdout.strip() or "git worktree command failed"
+            return record_worktree_removal_error(resource, error)
+    resource["removed_at"] = datetime.now(UTC).isoformat()
+    resource.pop("removal_error", None)
+    return True, []
+
+
 @contextmanager
 def locked_worktree_inspection(
     tasks: Tasks, worktrees: Worktrees, worktree: str, *, is_released: bool = False
@@ -2047,33 +2893,14 @@ def remove_worktree_resource(
         repository = resource.get("repository")
         if repository is None:
             return False, reasons
-        commands = ["remove"]
-        if git_worktree_lock_reason(entry) is not None:
-            commands.insert(0, "unlock")
-        for command in commands:
-            result = run_git(
-                repository,
-                "-c",
-                "status.showUntrackedFiles=all",
-                "worktree",
-                command,
-                worktree,
-            )
-            if result.returncode:
-                error = (
-                    result.stderr.strip() or result.stdout.strip() or "git worktree command failed"
-                )
-                return record_worktree_removal_error(resource, error)
-        resource["removed_at"] = datetime.now(UTC).isoformat()
-        resource.pop("removal_error", None)
-        return True, []
+        return remove_inspected_worktree_resource(resource, entry, worktree)
 
 
 def is_known_directory_busy(tasks: Tasks, task: Task) -> bool:
     recorded = recorded_worktree(tasks, task)
     if recorded is not None:
         directory = recorded[0]
-    elif has_agent_argument(task["agent_args"], WORKTREE_ARGUMENTS):
+    elif is_worktree_left_to_agent(task):
         directory = task["cwd"]
     else:
         return False
@@ -2092,6 +2919,7 @@ def run_launch_agent_pass() -> list[subprocess.Popen[bytes]]:
     rotate_agent_log()
     now = datetime.now(UTC)
     due_tasks: list[tuple[str, Task]] = []
+    hook_directories: set[str] = set()
     with locked_tasks() as tasks:
         remove_orphan_run_locks()
         remove_interrupted_ledger_writes()
@@ -2099,19 +2927,22 @@ def run_launch_agent_pass() -> list[subprocess.Popen[bytes]]:
             if task["status"] == STATUS_RUNNING:
                 if is_run_lock_free(task["session_id"]):
                     task["status"] = STATUS_FAILED
+                    hook_directories |= hook_affected_directories(tasks, task)
             elif (
                 task["status"] == STATUS_SCHEDULED
                 and (due_at := task.get("due_at")) is not None
                 and datetime.fromisoformat(due_at) <= now
                 and not is_known_directory_busy(tasks, task)
             ) or (
-                task["status"] in SUCCEEDED_STATUSES
+                can_start_dependents(task)
                 and (dependent_ids := waiting_dependent_ids(tasks, task_id))
                 and not has_running_dependent(tasks, task_id)
                 and not is_known_directory_busy(tasks, tasks[dependent_ids[0]])
                 and is_run_lock_free(task["session_id"])
             ):
                 due_tasks.append((task_id, task.copy()))
+    for directory in hook_directories:
+        sync_hooks(directory)
     processes: list[subprocess.Popen[bytes]] = []
     for task_id, task in due_tasks:
         processes.append(start_task_executor(task_id, task))
@@ -2124,7 +2955,7 @@ def has_pending_tasks(tasks: Tasks) -> bool:
         or (
             task["status"] == STATUS_WAITING
             and (parent := tasks.get(task.get("after", ""))) is not None
-            and parent.get("status") in SUCCEEDED_STATUSES
+            and can_start_dependents(parent)
         )
         for task in tasks.values()
     )
@@ -2172,48 +3003,165 @@ def list_worktrees() -> int:
     return 0
 
 
-def delete_task_and_release_worktrees(tasks: Tasks, worktrees: Worktrees, task_id: str) -> None:
-    task = tasks.pop(task_id)
-    for path, resource in worktrees.items():
+def delete_task_and_release_worktrees(
+    tasks: Tasks, worktrees: Worktrees, task_ids: list[str]
+) -> None:
+    selected_tasks = [tasks[task_id] for task_id in task_ids]
+    worktree_paths = [
+        path
+        for path in worktrees
+        if any(task_uses_worktree(tasks, task, path) for task in selected_tasks)
+    ]
+    for task_id in task_ids:
+        remove_progress(tasks.pop(task_id)["session_id"])
+    for path in worktree_paths:
+        resource = worktrees[path]
         if (
-            task_uses_worktree(tasks, task, path)
-            and resource.get("owner") == WORKTREE_OWNER_GOLEM
+            resource.get("owner") == WORKTREE_OWNER_GOLEM
             and resource.get("removed_at") is None
             and not worktree_task_ids(tasks, path)
         ):
             resource.setdefault("released_at", datetime.now(UTC).isoformat())
 
 
-def delete_task(task_id: str, *, is_removing_worktree: bool) -> int:
-    with locked_ledger() as (tasks, worktrees):
-        stored_task = tasks.get(task_id)
-        if stored_task is None:
-            raise SystemExit(f"golem: task not found: {task_id}")
-        task = stored_task
-        if task.get("status") == STATUS_RUNNING:
-            raise SystemExit(f"golem: task is running: {task_id}")
-        dependent_ids = dependent_task_ids(tasks, task_id)
-        if dependent_ids:
-            raise SystemExit(f"golem: task has dependents: {task_id}: {', '.join(dependent_ids)}")
-        remaining_tasks = {id_: record for id_, record in tasks.items() if id_ != task_id}
+def chain_task_ids(tasks: Tasks, task_id: str) -> set[str]:
+    chain_ids = {task_id}
+    pending_ids = [task_id]
+    while pending_ids:
+        current_id = pending_ids.pop()
+        current_task = tasks[current_id]
+        adjacent_ids = dependent_task_ids(tasks, current_id)
+        parent_id = current_task.get("after")
+        if parent_id is not None and parent_id in tasks:
+            adjacent_ids.append(parent_id)
+        for adjacent_id in adjacent_ids:
+            if adjacent_id not in chain_ids:
+                chain_ids.add(adjacent_id)
+                pending_ids.append(adjacent_id)
+    return chain_ids
+
+
+def selected_delete_task_ids(
+    tasks: Tasks, task_ids: list[str], *, is_chain: bool
+) -> tuple[list[str], list[str]]:
+    selected_ids: set[str] = set()
+    messages: list[str] = []
+    for task_id in task_ids:
+        if task_id not in tasks:
+            messages.append(f"golem: task not found: {task_id}")
+        elif is_chain:
+            selected_ids.update(chain_task_ids(tasks, task_id))
+        else:
+            selected_ids.add(task_id)
+    return [task_id for task_id in tasks if task_id in selected_ids], messages
+
+
+def task_worktrees_and_refusals(
+    tasks: Tasks, task_ids: list[str], *, is_removing_worktree: bool
+) -> tuple[dict[str, str | None], list[str]]:
+    selected_id_set = set(task_ids)
+    worktrees_by_task: dict[str, str | None] = {}
+    messages: list[str] = []
+    for task_id in task_ids:
+        task = tasks[task_id]
         recorded = recorded_worktree(tasks, task)
         worktree = resolved_path(recorded[0]) if recorded is not None else None
-        is_removed = False
+        worktrees_by_task[task_id] = worktree
+        if task.get("status") == STATUS_RUNNING:
+            messages.append(f"golem: task is running: {task_id}")
+        dependent_ids = [
+            dependent_id
+            for dependent_id in dependent_task_ids(tasks, task_id)
+            if dependent_id not in selected_id_set
+        ]
+        if dependent_ids:
+            messages.append(f"golem: task has dependents: {task_id}: {', '.join(dependent_ids)}")
+        if is_removing_worktree and worktree is None:
+            messages.append(f"golem: task has no worktree: {task_id}")
+    return worktrees_by_task, messages
+
+
+def print_retained_worktree(worktree: str, reasons: list[str]) -> None:
+    print(f"golem: retained worktree: {worktree}: {'; '.join(reasons)}", file=sys.stderr)
+
+
+def remove_selected_worktrees(
+    tasks: Tasks,
+    worktrees: Worktrees,
+    worktrees_by_task: dict[str, str | None],
+) -> set[str] | None:
+    selected_worktrees = list(
+        dict.fromkeys(
+            worktree
+            for worktree in worktrees_by_task.values()
+            if worktree is not None
+            and (
+                (resource := worktree_resource(worktrees, worktree)) is None
+                or resource.get("removed_at") is None
+            )
+        )
+    )
+    selected_id_set = set(worktrees_by_task)
+    remaining_tasks = {
+        task_id: task for task_id, task in tasks.items() if task_id not in selected_id_set
+    }
+    with ExitStack() as stack:
+        inspections = [
+            (
+                worktree,
+                *stack.enter_context(
+                    locked_worktree_inspection(remaining_tasks, worktrees, worktree)
+                ),
+            )
+            for worktree in selected_worktrees
+        ]
+        refusals = [(worktree, reasons) for worktree, _, _, reasons in inspections if reasons]
+        if refusals:
+            for worktree, reasons in refusals:
+                print_retained_worktree(worktree, reasons)
+            return None
+        removed_worktrees: set[str] = set()
+        for worktree, resource, entry, _ in inspections:
+            if resource is None or entry is None:
+                continue
+            is_removed, reasons = remove_inspected_worktree_resource(resource, entry, worktree)
+            if not is_removed:
+                for removed_worktree in removed_worktrees:
+                    print(f"golem: removed worktree: {removed_worktree}")
+                print_retained_worktree(worktree, reasons)
+                return None
+            removed_worktrees.add(worktree)
+    return removed_worktrees
+
+
+def delete_tasks(task_ids: list[str], *, is_chain: bool, is_removing_worktree: bool) -> int:
+    directories: set[str] = set()
+    with locked_ledger() as (tasks, worktrees):
+        selected_task_ids, messages = selected_delete_task_ids(tasks, task_ids, is_chain=is_chain)
+        worktrees_by_task, check_messages = task_worktrees_and_refusals(
+            tasks, selected_task_ids, is_removing_worktree=is_removing_worktree
+        )
+        if messages or check_messages:
+            raise SystemExit("\n".join([*messages, *check_messages]))
+        for task_id in selected_task_ids:
+            directories |= hook_affected_directories(tasks, tasks[task_id])
+        removed_worktrees: set[str] | None = set()
         if is_removing_worktree:
-            if worktree is None:
-                raise SystemExit(f"golem: task has no worktree: {task_id}")
-            resource = worktree_resource(worktrees, worktree)
-            if resource is None or resource.get("removed_at") is None:
-                is_removed, reasons = remove_worktree_resource(remaining_tasks, worktrees, worktree)
-                if not is_removed:
-                    print(
-                        f"golem: retained worktree: {worktree}: {'; '.join(reasons)}",
-                        file=sys.stderr,
-                    )
-                    return 1
-        delete_task_and_release_worktrees(tasks, worktrees, task_id)
-        print_deleted_task(task_id, task, worktree, is_removed=is_removed)
-    return 0
+            # golem's own settings file would otherwise count as local changes.
+            for task_id in selected_task_ids:
+                remove_hooks(task_directory(tasks[task_id]))
+            removed_worktrees = remove_selected_worktrees(tasks, worktrees, worktrees_by_task)
+        if removed_worktrees is not None:
+            selected_tasks = [(task_id, tasks[task_id]) for task_id in selected_task_ids]
+            delete_task_and_release_worktrees(tasks, worktrees, selected_task_ids)
+            for task_id, task in selected_tasks:
+                worktree = worktrees_by_task[task_id]
+                print_deleted_task(
+                    task_id, task, worktree, is_removed=worktree in removed_worktrees
+                )
+    for directory in directories:
+        sync_hooks(directory)
+    return 0 if removed_worktrees is not None else 1
 
 
 def print_deleted_task(task_id: str, task: Task, worktree: str | None, *, is_removed: bool) -> None:
@@ -2381,7 +3329,7 @@ def delete_pruned_tasks(
             ):
                 print(f"golem: kept {task_id}: no longer eligible", file=sys.stderr)
                 continue
-            delete_task_and_release_worktrees(tasks, worktrees, task_id)
+            delete_task_and_release_worktrees(tasks, worktrees, [task_id])
             print(f"golem: deleted task: {task_id}")
 
 
@@ -2458,10 +3406,7 @@ def auto_remove_worktrees() -> None:
                     file=sys.stderr,
                 )
             elif resource.get("removal_error") in reasons:
-                print(
-                    f"golem: retained worktree: {worktree}: {'; '.join(reasons)}",
-                    file=sys.stderr,
-                )
+                print_retained_worktree(worktree, reasons)
 
 
 def reap_finished_executors(
@@ -2507,7 +3452,7 @@ def retry_task(task_id: str, *, is_now: bool, at_text: str | None) -> int:
         task = retryable_task(tasks, task_id)
         reject_missing_worktree(task, worktrees)
         record = new_task_record(
-            task["cwd"],
+            RunPlacement(task["cwd"]),
             task["prompt"],
             tuple(task["agent_args"]),
             when,
@@ -2520,8 +3465,18 @@ def retry_task(task_id: str, *, is_now: bool, at_text: str | None) -> int:
             record["worktree"] = task["worktree"]
         if "worktree_pending" in task:
             record["worktree_pending"] = task["worktree_pending"]
+        if "auto_pickup" in task:
+            record["auto_pickup"] = task["auto_pickup"]
+        if "no_worktree" in task:
+            record["no_worktree"] = task["no_worktree"]
+        if "gate" in task:
+            record["gate"] = task["gate"]
         tasks[task_id] = record
+        remove_progress(task["session_id"])
         clear_worktree_release(tasks, worktrees, record)
+        directories = hook_affected_directories(tasks, record)
+    for directory in directories:
+        sync_hooks(directory)
     return wake_launch_agent_and_report(task_id, when)
 
 
@@ -2583,7 +3538,41 @@ def task_id_from_arguments(arguments: Arguments) -> str:
     return arguments.id
 
 
+def schedule_run_task(
+    arguments: Arguments,
+    task_id: str,
+    prompt_text: str,
+    task_args: tuple[str, ...],
+    follow_up_records: Tasks,
+    placement: RunPlacement,
+) -> int:
+    after = arguments.after if isinstance(arguments.after, str) else None
+    if after is not None:
+        dependent_record = new_task_record(
+            placement, prompt_text, task_args, None, arguments.backend, after=after
+        )
+        if reserve_dependent_task({task_id: dependent_record, **follow_up_records}, after):
+            sync_hooks(task_directory(existing_task(load_tasks(), after)))
+            print(f"golem: {task_id} will run after {after}")
+            return 0
+    when = planned_execution_time(arguments.backend, is_now=arguments.now, at_text=arguments.at)
+    return schedule_new_task(
+        task_id,
+        prompt_text,
+        task_args,
+        when,
+        after,
+        backend=arguments.backend,
+        placement=placement,
+        follow_up_records=follow_up_records,
+    )
+
+
 def run_task_from_arguments(arguments: Arguments) -> int:
+    if arguments.auto_pickup and arguments.backend == BACKEND_CODEX:
+        raise SystemExit("golem: --auto-pickup does not support Codex tasks")
+    if arguments.gate is not None and arguments.backend == BACKEND_CODEX:
+        raise SystemExit("golem: --gate does not support Codex tasks")
     require_launch_agent()
     task_id = task_id_from_arguments(arguments)
     prompt_text = (
@@ -2592,21 +3581,38 @@ def run_task_from_arguments(arguments: Arguments) -> int:
     if prompt_text is None:
         raise SystemExit("golem: a prompt is required")
     task_args = tuple(arguments.agent_args)
+    placement = RunPlacement(
+        str(Path.cwd()),
+        is_auto_pickup=arguments.auto_pickup,
+        is_no_worktree=arguments.no_worktree,
+        gate=arguments.gate,
+    )
+    has_worktree_argument = has_agent_argument(list(task_args), WORKTREE_ARGUMENTS)
+    parent = load_tasks().get(arguments.after) if isinstance(arguments.after, str) else None
+    if parent is not None and parent.get("no_worktree"):
+        placement = replace(placement, cwd=parent["cwd"], is_no_worktree=True)
+        if has_worktree_argument:
+            raise SystemExit(
+                f"golem: {arguments.after} runs in place; -w/--worktree is not allowed"
+            )
+    if placement.is_no_worktree and has_worktree_argument:
+        raise SystemExit("golem: --no-worktree does not accept -w/--worktree")
+    follow_up_records = new_follow_up_records(
+        task_id,
+        arguments.then,
+        task_args,
+        arguments.backend,
+        placement,
+    )
     if arguments.backend == BACKEND_CODEX:
         reject_unsupported_codex_arguments(list(task_args), is_run=True)
         require_codex_subscription(os.environ.copy())
-    after = arguments.after if isinstance(arguments.after, str) else None
-    if after is not None:
-        dependent_record = new_task_record(
-            str(Path.cwd()), prompt_text, task_args, None, arguments.backend, after=after
-        )
-        if reserve_dependent_task(task_id, dependent_record, after):
-            print(f"golem: {task_id} will run after {after}")
-            return 0
-    when = planned_execution_time(arguments.backend, is_now=arguments.now, at_text=arguments.at)
-    return schedule_new_task(
-        task_id, prompt_text, task_args, when, after, backend=arguments.backend
+    exit_code = schedule_run_task(
+        arguments, task_id, prompt_text, task_args, follow_up_records, placement
     )
+    for task_id, record in follow_up_records.items():
+        print(f"golem: {task_id} will run after {record.get('after')}")
+    return exit_code
 
 
 def add_worktree_commands(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
@@ -2634,6 +3640,51 @@ def add_prune_command(add_parser: Callable[..., argparse.ArgumentParser]) -> Non
     set_command_handler(prune_command, lambda arguments: prune_tasks(is_confirmed=arguments.yes))
 
 
+def add_continue_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
+    continue_command = add_parser(
+        "continue", description="Re-run a stopped task's gate and start its follow-ups."
+    )
+    continue_command.add_argument("id")
+    continue_command.add_argument("--force", action="store_true", help="skip the gate")
+    set_command_handler(
+        continue_command,
+        lambda arguments: continue_task(
+            task_id_from_arguments(arguments), is_forced=arguments.force
+        ),
+    )
+
+
+def add_watch_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
+    watch_command = add_parser("watch")
+    watch_command.add_argument("id")
+    set_command_handler(
+        watch_command, lambda arguments: watch_task(task_id_from_arguments(arguments))
+    )
+
+
+def add_hook_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
+    hook_command = add_parser("_hook")
+    hook_command.add_argument("event", choices=tuple(HOOK_EVENT_ARGUMENTS.values()))
+    set_command_handler(
+        hook_command,
+        lambda arguments: (
+            hook_stop() if arguments.event == HOOK_ARGUMENT_STOP else hook_pre_tool_use()
+        ),
+    )
+
+
+def list_aliases(command_parsers: dict[str, argparse.ArgumentParser]) -> int:
+    aliases = load_aliases()
+    if not aliases:
+        print("golem: no aliases")
+        return 0
+    widest_name = max(map(len, aliases))
+    for name, template in aliases.items():
+        shadowed_suffix = "  (shadowed by built-in command)" if name in command_parsers else ""
+        print(f"{name:<{widest_name}}  {template}{shadowed_suffix}")
+    return 0
+
+
 def add_run_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
     run_command = add_parser(
         "run",
@@ -2646,14 +3697,43 @@ def add_run_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
     prompt_group = run_command.add_mutually_exclusive_group(required=True)
     prompt_group.add_argument("prompt", nargs="?")
     prompt_group.add_argument("--file")
+    run_command.add_argument(
+        "--then",
+        action="append",
+        nargs=2,
+        default=[],
+        metavar=("ID", "PROMPT"),
+        help="run PROMPT as task ID after the previous task succeeds; repeatable",
+    )
+    run_command.add_argument(
+        "--auto-pickup",
+        action="store_true",
+        help="open the session in the Claude desktop app when the task succeeds; follow-ups get it too",
+    )
+    run_command.add_argument(
+        "--no-worktree",
+        action="store_true",
+        help="run in the task directory instead of a new worktree; follow-ups get it too",
+    )
+    run_command.add_argument(
+        "--gate",
+        metavar="CMD",
+        help=(
+            "shell command run after the task succeeds with a waiting follow-up; "
+            "a non-zero exit stops the chain; follow-ups get it too"
+        ),
+    )
     run_schedule_group = run_command.add_mutually_exclusive_group()
     add_scheduling_arguments(run_schedule_group.add_argument)
     run_schedule_group.add_argument("--after", metavar="PARENT", help="run after PARENT succeeds")
     set_command_handler(run_command, run_task_from_arguments)
 
 
-def build_parser() -> argparse.ArgumentParser:
+def build_parser() -> tuple[argparse.ArgumentParser, dict[str, argparse.ArgumentParser]]:
     parser = argparse.ArgumentParser(prog="golem")
+    parser.add_argument(
+        "-C", dest="directory", metavar="DIR", help="run as if golem was started in DIR"
+    )
     commands = parser.add_subparsers(dest="command", required=True)
 
     add_run_command(commands.add_parser)
@@ -2680,11 +3760,13 @@ def build_parser() -> argparse.ArgumentParser:
     close_command = commands.add_parser("close")
     close_command.add_argument("id")
     set_command_handler(close_command, lambda arguments: close(task_id_from_arguments(arguments)))
+    add_continue_command(commands.add_parser)
     show_command = commands.add_parser("show")
     show_command.add_argument("id")
     set_command_handler(
         show_command, lambda arguments: show_task_result(task_id_from_arguments(arguments))
     )
+    add_watch_command(commands.add_parser)
     cancel_command = commands.add_parser("cancel")
     cancel_command.add_argument("id")
     set_command_handler(
@@ -2717,16 +3799,22 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     delete_command = commands.add_parser("delete")
-    delete_command.add_argument("id")
+    delete_command.add_argument("ids", nargs="+")
+    delete_command.add_argument("--chain", action="store_true")
     delete_command.add_argument("--remove-worktree", action="store_true")
     set_command_handler(
         delete_command,
-        lambda arguments: delete_task(
-            task_id_from_arguments(arguments), is_removing_worktree=arguments.remove_worktree
+        lambda arguments: delete_tasks(
+            arguments.ids,
+            is_chain=arguments.chain,
+            is_removing_worktree=arguments.remove_worktree,
         ),
     )
     add_prune_command(commands.add_parser)
     set_command_handler(commands.add_parser("list"), lambda _: list_tasks())
+    alias_command = commands.add_parser("alias")
+    alias_commands = alias_command.add_subparsers(dest="alias_command", required=True)
+    set_command_handler(alias_commands.add_parser("list"), lambda _: list_aliases(commands.choices))
     add_worktree_commands(commands.add_parser)
     launch_agent_command = commands.add_parser(
         "agent",
@@ -2753,7 +3841,35 @@ def build_parser() -> argparse.ArgumentParser:
             task_id_from_arguments(arguments), arguments.session_id
         ),
     )
-    return parser
+    add_hook_command(commands.add_parser)
+    return parser, commands.choices
+
+
+def change_directory(directory: str | None) -> None:
+    if directory is None:
+        return
+    try:
+        os.chdir(directory)
+    except FileNotFoundError, NotADirectoryError:
+        raise SystemExit(f"golem: directory not found: {directory}") from None
+    except OSError as error:
+        raise SystemExit(
+            f"golem: cannot change to directory: {directory}: {error.strerror}"
+        ) from None
+
+
+def apply_leading_directory_options(golem_args: list[str]) -> list[str]:
+    while golem_args:
+        option = golem_args[0]
+        if option == "-C" and golem_args[1:]:
+            change_directory(golem_args[1])
+            golem_args = golem_args[2:]
+        elif option.startswith("-C") and option != "-C":
+            change_directory(option[2:].removeprefix("="))
+            golem_args = golem_args[1:]
+        else:
+            break
+    return golem_args
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -2764,9 +3880,22 @@ def main(argv: list[str] | None = None) -> int:
         separator_index = golem_args.index("--")
         agent_args = golem_args[separator_index + 1 :]
         golem_args = golem_args[:separator_index]
+    golem_args = apply_leading_directory_options(golem_args)
 
-    parser = build_parser()
+    parser, command_parsers = build_parser()
+    if golem_args and not golem_args[0].startswith("-") and golem_args[0] not in command_parsers:
+        aliases = load_aliases()
+        alias_name = golem_args[0]
+        template = aliases.get(alias_name)
+        if template is not None:
+            golem_args, agent_args = expand_alias(alias_name, template, golem_args[1:], agent_args)
+            if golem_args and golem_args[0] not in command_parsers and golem_args[0] in aliases:
+                raise SystemExit(
+                    f"golem: alias {alias_name} expands to alias {golem_args[0]}; "
+                    "aliases cannot use other aliases"
+                )
     arguments = parser.parse_args(golem_args, Arguments(agent_args=agent_args))
+    change_directory(arguments.directory)
     if agent_args and arguments.command == "retry":
         parser.error("retry does not accept agent arguments")
     if agent_args and arguments.command == "reschedule":
