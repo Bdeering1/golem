@@ -4854,6 +4854,16 @@ def test_prune_asks_once_per_chain(ledger_path, monkeypatch, capsys, answers, re
     assert set(golem.load_tasks()) == remaining_ids
 
 
+def test_prune_keeps_cancelled_parent_of_declined_task(ledger_path, monkeypatch, capsys):
+    write_chain(ledger_path, [golem.STATUS_CANCELLED, golem.STATUS_DONE])
+    monkeypatch.setattr(sys, "stdin", TerminalInput("n\n"))
+
+    assert golem.main(["prune"]) == 0
+
+    assert "no longer eligible" not in capsys.readouterr().err
+    assert set(golem.load_tasks()) == {PARENT_ID, CHILD_ID}
+
+
 def test_prune_offers_only_eligible_tasks_in_chain(ledger_path, monkeypatch, capsys):
     write_chain(ledger_path, [golem.STATUS_DONE, golem.STATUS_DONE, golem.STATUS_DONE])
     write_transcript(f"{PARENT_ID}-session", 0)
