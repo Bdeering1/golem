@@ -3264,8 +3264,20 @@ def done_task_prune_reason(task: Task, pull_requests: PullRequestCache) -> str |
     return f"PR #{pull_request['number']} {pull_request['state'].lower()}"
 
 
-def prune_answer(task_id: str, reason: str) -> str:
-    prompt = f"Remove {task_id} ({STATUS_DONE}, {reason})? [{','.join(PRUNE_ANSWERS)}] "
+def prune_question(candidates: list[tuple[str, str]]) -> str:
+    reasons = {reason for _, reason in candidates}
+    if len(reasons) == 1:
+        task_ids = ", ".join(task_id for task_id, _ in candidates)
+        removals = f"{task_ids} ({STATUS_DONE}, {reasons.pop()})"
+    else:
+        removals = ", ".join(
+            f"{task_id} ({STATUS_DONE}, {reason})" for task_id, reason in candidates
+        )
+    return f"Remove {removals}? [{','.join(PRUNE_ANSWERS)}] "
+
+
+def prune_answer(candidates: list[tuple[str, str]]) -> str:
+    prompt = prune_question(candidates)
     while True:
         try:
             answer = input(prompt).strip().lower()
@@ -3276,20 +3288,16 @@ def prune_answer(task_id: str, reason: str) -> str:
             return answer
 
 
-def prune_selection(
+def chain_prune_selection(
     tasks: Tasks,
+    chain_ids: list[str],
     pull_requests: PullRequestCache,
     *,
-    is_confirmed: bool,
-    is_keeping_done_tasks: bool,
-) -> tuple[Tasks, int]:
+    is_offering_done_tasks: bool,
+) -> tuple[Tasks, dict[str, str]]:
     selected_tasks: Tasks = {}
-    candidate_count = 0
-    answer = PRUNE_ANSWER_ALL if is_confirmed else None
-    root_task_ids = sorted(
-        task_id for task_id, task in tasks.items() if task.get("after") not in tasks
-    )
-    for task_id in dependents_first_task_ids(tasks, root_task_ids):
+    done_reasons: dict[str, str] = {}
+    for task_id in chain_ids:
         task = tasks[task_id]
         if any(
             dependent_id not in selected_tasks
@@ -3297,20 +3305,48 @@ def prune_selection(
         ):
             continue
         if task["status"] == STATUS_CANCELLED:
-            candidate_count += 1
             selected_tasks[task_id] = task
             continue
-        if task["status"] != STATUS_DONE or is_keeping_done_tasks or answer == PRUNE_ANSWER_QUIT:
+        if task["status"] != STATUS_DONE or not is_offering_done_tasks:
             continue
         reason = done_task_prune_reason(task, pull_requests)
         if reason is None:
             continue
-        candidate_count += 1
-        if answer != PRUNE_ANSWER_ALL:
-            answer = prune_answer(task_id, reason)
-        if answer in {PRUNE_ANSWER_YES, PRUNE_ANSWER_ALL}:
-            selected_tasks[task_id] = task
-    return selected_tasks, candidate_count
+        done_reasons[task_id] = reason
+        selected_tasks[task_id] = task
+    return selected_tasks, done_reasons
+
+
+def prune_selection(
+    tasks: Tasks,
+    pull_requests: PullRequestCache,
+    *,
+    is_confirmed: bool,
+    is_keeping_done_tasks: bool,
+) -> tuple[Tasks, bool]:
+    selected_tasks: Tasks = {}
+    has_candidates = False
+    answer = PRUNE_ANSWER_ALL if is_confirmed else None
+    root_task_ids = sorted(
+        task_id for task_id, task in tasks.items() if task.get("after") not in tasks
+    )
+    for root_task_id in root_task_ids:
+        chain_ids = dependents_first_task_ids(tasks, [root_task_id])
+        is_offering_done_tasks = not is_keeping_done_tasks and answer != PRUNE_ANSWER_QUIT
+        chain_selected_tasks, done_reasons = chain_prune_selection(
+            tasks, chain_ids, pull_requests, is_offering_done_tasks=is_offering_done_tasks
+        )
+        has_candidates = has_candidates or bool(chain_selected_tasks)
+        if done_reasons and answer != PRUNE_ANSWER_ALL:
+            answer = prune_answer(
+                [(task_id, done_reasons[task_id]) for task_id in tasks if task_id in done_reasons]
+            )
+            if answer not in {PRUNE_ANSWER_YES, PRUNE_ANSWER_ALL}:
+                chain_selected_tasks, _ = chain_prune_selection(
+                    tasks, chain_ids, pull_requests, is_offering_done_tasks=False
+                )
+        selected_tasks |= chain_selected_tasks
+    return selected_tasks, has_candidates
 
 
 def delete_pruned_tasks(
@@ -3338,7 +3374,7 @@ def prune_tasks(*, is_confirmed: bool) -> int:
     is_keeping_done_tasks = not is_confirmed and not sys.stdin.isatty()
     pull_requests: PullRequestCache = {}
     try:
-        selected_tasks, candidate_count = prune_selection(
+        selected_tasks, has_candidates = prune_selection(
             tasks,
             pull_requests,
             is_confirmed=is_confirmed,
@@ -3349,7 +3385,7 @@ def prune_tasks(*, is_confirmed: bool) -> int:
         return 130
     if is_keeping_done_tasks and any(task["status"] == STATUS_DONE for task in tasks.values()):
         print("golem: kept done tasks without a terminal; use --yes to prune them", file=sys.stderr)
-    elif not candidate_count:
+    elif not has_candidates:
         print("golem: no tasks to prune")
         return 0
     delete_pruned_tasks(selected_tasks, pull_requests)
