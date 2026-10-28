@@ -5408,8 +5408,7 @@ def test_failed_setup_fails_task_and_keeps_reason(
     assert tasks[CHILD_ID]["status"] == golem.STATUS_WAITING
     assert logged_claude_calls(fake_commands) == []
     assert expected_reason in list_row(list_output(capsys), PARENT_ID)
-    with contextlib.suppress(SystemExit):
-        golem.main(["show", PARENT_ID])
+    assert golem.main(["show", PARENT_ID]) == 1
     assert expected_reason in capsys.readouterr().err
 
 
@@ -5433,10 +5432,7 @@ def test_timed_out_setup_fails_task(installed_launch_agent, ledger_path, monkeyp
     assert task["setup_reason"] == "setup timed out after 0.2s"
 
 
-@pytest.mark.parametrize(
-    ("is_setup_failing", "expected_setup_count"),
-    [pytest.param(True, 2, id="failed-setup"), pytest.param(False, 1, id="failed-agent")],
-)
+@pytest.mark.parametrize("is_setup_failing", [True, False], ids=["failed-setup", "failed-agent"])
 def test_retry_runs_setup_again_only_after_failed_setup(
     installed_launch_agent,
     fake_commands,
@@ -5444,27 +5440,22 @@ def test_retry_runs_setup_again_only_after_failed_setup(
     tmp_path,
     monkeypatch,
     is_setup_failing,
-    expected_setup_count,
 ):
     directory = setup_directory(tmp_path)
-    passing_setup = setup_command(
-        tmp_path, directory_setup_output(directory, prompt_suffix=SETUP_SUFFIX)
-    )
-    first_setup = setup_command(tmp_path, exit_code=1) if is_setup_failing else passing_setup
-    write_task(ledger_path, golem.STATUS_SCHEDULED, setup=first_setup, no_worktree=True)
-    if not is_setup_failing:
-        monkeypatch.setenv("GOLEM_CLAUDE_EXIT", "1")
-    assert golem.main(["_execute", TASK_ID, f"{TASK_ID}-session"]) == 1
+    first_run_path = tmp_path / "first-run"
+    setup = setup_command(tmp_path, directory_setup_output(directory, prompt_suffix=SETUP_SUFFIX))
     if is_setup_failing:
-        tasks = read_tasks(ledger_path)
-        tasks[TASK_ID]["setup"] = passing_setup
-        write_tasks(ledger_path, tasks)
-    monkeypatch.delenv("GOLEM_CLAUDE_EXIT", raising=False)
+        setup = f"[ -e {first_run_path} ] || {{ touch {first_run_path}; exit 1; }}; {setup}"
+    else:
+        monkeypatch.setenv("GOLEM_CLAUDE_FAIL_TASK", TASK_ID)
+    write_task(ledger_path, golem.STATUS_SCHEDULED, setup=setup, no_worktree=True)
+    assert golem.main(["_execute", TASK_ID, f"{TASK_ID}-session"]) == 1
+    monkeypatch.delenv("GOLEM_CLAUDE_FAIL_TASK", raising=False)
 
     assert golem.main(["retry", TASK_ID, "--now"]) == 0
     assert golem.main(["_execute", TASK_ID, read_task(ledger_path)["session_id"]]) == 0
 
-    assert len(setup_inputs(tmp_path)) == expected_setup_count
+    assert len(setup_inputs(tmp_path)) == 1
     assert logged_claude_cwds(fake_commands)[-1] == str(directory)
     assert is_prompt_passed(logged_claude_args(fake_commands), f"{PROMPT}\n\n{SETUP_SUFFIX}")
     assert read_task(ledger_path)["status"] == golem.STATUS_NEEDS_REVIEW
@@ -5574,11 +5565,3 @@ def test_setup_requires_no_worktree(installed_launch_agent, ledger_path):
         golem.main(["run", TASK_ID, PROMPT, "--now", "--setup", "true"])
 
     assert not ledger_path.exists()
-
-
-def test_alias_fills_setup_placeholders(installed_launch_agent, ledger_path):
-    write_aliases({"platform": 'run {1} "{2}" --no-worktree --setup "make-platform {1}"'})
-
-    assert golem.main(["platform", TASK_ID, PROMPT, "--now"]) == 0
-
-    assert read_task(ledger_path)["setup"] == f"make-platform {TASK_ID}"

@@ -1510,6 +1510,7 @@ def show_task_result(task_id: str) -> int:
         print(f"golem: gate stopped: {task['gate_reason']}", file=sys.stderr)
     if "setup_reason" in task:
         print(f"golem: setup failed: {task['setup_reason']}", file=sys.stderr)
+        return 1
     if task.get("setup_complete"):
         print(f"golem: directory: {task['cwd']}", file=sys.stderr)
         print(f"golem: prompt:\n{task['prompt']}", file=sys.stderr)
@@ -2353,16 +2354,15 @@ def fail_setup(task_id: str, reason: str) -> None:
         task["setup_reason"] = reason
 
 
-def record_setup(task_id: str, directory: str, prompt: str) -> None:
+def record_setup(task_id: str, task: Task, directory: str, prompt: str) -> Task:
     with locked_tasks() as tasks:
-        task = tasks.get(task_id)
-        if task is None:
-            return
-        task["cwd"] = directory
-        task["prompt"] = prompt
-        task["setup_complete"] = True
+        stored_task = tasks.get(task_id, task)
+        stored_task["cwd"] = directory
+        stored_task["prompt"] = prompt
+        stored_task["setup_complete"] = True
         for descendant_id in descendant_ids_with_status(tasks, task_id, set(LIST_STATUS_ORDER)):
             tasks[descendant_id]["cwd"] = directory
+        return stored_task.copy()
 
 
 def prepared_task(
@@ -2383,12 +2383,7 @@ def prepared_task(
             return None
         release_lock(directory_lock_file)
         directory_lock_file = moved_lock_file
-    record_setup(task_id, directory, prompt)
-    prepared = task.copy()
-    prepared["cwd"] = directory
-    prepared["prompt"] = prompt
-    prepared["setup_complete"] = True
-    return prepared, directory_lock_file
+    return record_setup(task_id, task, directory, prompt), directory_lock_file
 
 
 def is_gate_pending(tasks: Tasks, task_id: str) -> bool:
