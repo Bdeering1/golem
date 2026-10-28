@@ -207,6 +207,11 @@ esac
 printf '%s\\n' "$*" >> "$GOLEM_OPEN_ARGS"
 exit "${GOLEM_OPEN_EXIT:-0}"
 """,
+        "osascript": """#!/bin/sh
+printf '\036\\n' >> "$GOLEM_OSASCRIPT_ARGS"
+printf '%s\\n' "$@" >> "$GOLEM_OSASCRIPT_ARGS"
+exit "${GOLEM_OSASCRIPT_EXIT:-0}"
+""",
         "gh": """#!/bin/sh
 head=''
 state=''
@@ -249,6 +254,7 @@ def fake_commands(monkeypatch, tmp_path, fake_bin_path):
             "codex-home",
             "launchctl-args",
             "open-args",
+            "osascript-args",
         )
     }
     for path in paths.values():
@@ -552,6 +558,15 @@ def logged_claude_calls(fake_commands):
 def logged_claude_args(fake_commands):
     calls = logged_claude_calls(fake_commands)
     return calls[-1] if calls else []
+
+
+def logged_osascript_calls(fake_commands):
+    calls: list[list[str]] = []
+    for call in fake_commands["osascript-args"].read_text(encoding="utf-8").split("\x1e\n"):
+        arguments = call.splitlines()
+        if arguments:
+            calls.append(arguments)
+    return calls
 
 
 def logged_codex_calls(fake_commands):
@@ -1415,6 +1430,67 @@ def test_run_now_records_claude_result(
     assert capsys.readouterr().out == f"{expected_result}\n"
 
 
+@pytest.mark.parametrize(
+    ("exit_code", "title"),
+    [
+        pytest.param(0, f"golem: {TASK_ID} needs review", id="needs-review"),
+        pytest.param(1, f"golem: {TASK_ID} failed", id="failed"),
+    ],
+)
+def test_finished_task_notifies_with_result(
+    installed_launch_agent, fake_commands, ledger_path, monkeypatch, exit_code, title
+):
+    result = "finished the task\nwith details"
+    monkeypatch.setenv("GOLEM_CLAUDE_EXIT", str(exit_code))
+    write_claude_output(fake_commands, result)
+    golem.main(["run", TASK_ID, PROMPT, "--now"])
+    task = read_task(ledger_path)
+
+    assert golem.main(["_execute", TASK_ID, task["session_id"]]) == exit_code
+
+    notification = logged_osascript_calls(fake_commands)
+    assert notification[0][:6] == [
+        "-e",
+        "on run argv",
+        "-e",
+        "display notification (item 2 of argv) with title (item 1 of argv)",
+        "-e",
+        "end run",
+    ]
+    assert notification[0][-2:] == [title, "finished the task"]
+
+
+def test_only_final_chain_task_notifies_when_ready_for_review(
+    installed_launch_agent, fake_commands, ledger_path
+):
+    golem.main(["run", PARENT_ID, PARENT_PROMPT, "--now", "--then", CHILD_ID, CHILD_PROMPT])
+    parent = read_task(ledger_path, PARENT_ID)
+
+    assert golem.main(["_execute", PARENT_ID, parent["session_id"]]) == 0
+    assert [notification[-2] for notification in logged_osascript_calls(fake_commands)] == [
+        f"golem: {CHILD_ID} needs review"
+    ]
+
+
+@pytest.mark.parametrize("is_osascript_available", [True, False], ids=["nonzero", "missing"])
+def test_failed_notification_delivery_keeps_task_failed(
+    fake_commands, ledger_path, monkeypatch, tmp_path, is_osascript_available
+):
+    if is_osascript_available:
+        monkeypatch.setenv("GOLEM_OSASCRIPT_EXIT", "1")
+    else:
+        monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setattr(
+        golem,
+        "run_claude",
+        lambda *_: (1, json.dumps({"result": "failed task"}), ""),
+    )
+    write_task(ledger_path, golem.STATUS_RUNNING)
+
+    assert golem.execute_task(TASK_ID, read_task(ledger_path), ()) == 1
+    assert read_task(ledger_path)["status"] == golem.STATUS_FAILED
+
+
 def test_auto_pickup_waits_for_usage_limit_resume(
     installed_launch_agent, fake_commands, ledger_path, monkeypatch
 ):
@@ -1428,6 +1504,7 @@ def test_auto_pickup_waits_for_usage_limit_resume(
     assert golem.main(["_execute", TASK_ID, task["session_id"]]) == 0
     assert read_task(ledger_path)["status"] == golem.STATUS_SCHEDULED
     assert fake_commands["open-args"].read_text(encoding="utf-8") == ""
+    assert logged_osascript_calls(fake_commands) == []
 
     set_task_due_now(ledger_path)
     write_claude_output(fake_commands, PROMPT)
@@ -1836,6 +1913,10 @@ def test_failing_gate_stops_chain_with_its_stderr_as_reason(
     assert tasks[PARENT_ID]["gate_reason"] == GATE_REASON
     assert tasks[CHILD_ID]["status"] == golem.STATUS_WAITING
     assert len(logged_claude_calls(fake_commands)) == 1
+    assert logged_osascript_calls(fake_commands)[0][-2:] == [
+        f"golem: {PARENT_ID} stopped at gate",
+        GATE_REASON,
+    ]
     assert golem.run_launch_agent_pass() == []
     assert not golem.has_pending_tasks(tasks)
 
@@ -3059,6 +3140,10 @@ def test_executor_death_keeps_task_running_until_claude_exits(
         wait_until(lambda: golem.is_run_lock_free(task["session_id"]))
         golem.run_launch_agent_pass()
         assert read_task(ledger_path)["status"] == golem.STATUS_FAILED
+        assert logged_osascript_calls(fake_commands)[0][-2:] == [
+            f"golem: {TASK_ID} failed",
+            PROMPT,
+        ]
     finally:
         hold_path.unlink(missing_ok=True)
         if executor.poll() is None:
@@ -3197,7 +3282,7 @@ def test_pickup_holds_worktree_until_its_claude_process_exits(
 
 @pytest.mark.parametrize("first_dependent", ["busy", "missing"])
 def test_dependent_drain_stops_for_busy_worktrees_and_skips_missing_worktrees(
-    ledger_path, monkeypatch, tmp_path, first_dependent
+    fake_commands, ledger_path, monkeypatch, tmp_path, first_dependent
 ):
     first_worktree = tmp_path / "first"
     second_worktree = tmp_path / "second"
@@ -3248,6 +3333,10 @@ def test_dependent_drain_stops_for_busy_worktrees_and_skips_missing_worktrees(
         f"golem: worktree is missing: {first_worktree}"
     )
     assert read_task(ledger_path, SIBLING_ID)["status"] == golem.STATUS_NEEDS_REVIEW
+    assert [notification[-2] for notification in logged_osascript_calls(fake_commands)] == [
+        f"golem: {CHILD_ID} failed",
+        f"golem: {SIBLING_ID} needs review",
+    ]
 
 
 def test_agent_recovers_interrupted_dependent_draining_in_ledger_order(
