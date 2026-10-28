@@ -21,7 +21,7 @@ from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, BinaryIO, cast
+from typing import TYPE_CHECKING, BinaryIO, NotRequired, TypedDict, cast
 
 if TYPE_CHECKING:
     import io
@@ -142,7 +142,109 @@ PRUNE_ANSWER_QUIT = "q"
 PRUNE_ANSWERS = (PRUNE_ANSWER_YES, PRUNE_ANSWER_NO, PRUNE_ANSWER_ALL, PRUNE_ANSWER_QUIT)
 ALIAS_PLACEHOLDER_PATTERN = re.compile(r"\{(\d+)\}")
 
-type PullRequestCache = dict[str | None, dict[str, Any] | None]
+
+class Task(TypedDict):
+    cwd: str
+    prompt: str
+    agent_args: list[str]
+    status: str
+    session_id: str
+    environment: NotRequired[dict[str, str]]
+    backend: NotRequired[str]
+    after: NotRequired[str]
+    due_at: NotRequired[str]
+    worktree: NotRequired[str]
+    worktree_pending: NotRequired[bool]
+    thread_id: NotRequired[str]
+    result: NotRequired[str]
+    returncode: NotRequired[int]
+    usage_limit_resume_count: NotRequired[int]
+    started_at: NotRequired[str]
+    auto_pickup: NotRequired[bool]
+    no_worktree: NotRequired[bool]
+    gate: NotRequired[str]
+    gate_reason: NotRequired[str]
+
+
+class WorktreeResource(TypedDict):
+    owner: str
+    session_id: str
+    created_at: str
+    repository: NotRequired[str]
+    released_at: NotRequired[str]
+    removed_at: NotRequired[str]
+    removal_error: NotRequired[str]
+
+
+class LocalSettings(TypedDict):
+    hooks: NotRequired[dict[str, list[object]]]
+
+
+class Settings(TypedDict):
+    worktree_retention_days: NotRequired[int]
+
+
+class PullRequest(TypedDict):
+    number: int
+    state: str
+
+
+class Arguments(argparse.Namespace):
+    command: str
+    handler: Callable[[Arguments], int]
+    agent_args: list[str]
+    id: str | None
+    prompt: str | None
+    file: str | None
+    backend: str
+    after: str | int | None
+    now: bool
+    at: str | None
+    all: bool
+    app: bool
+    yes: bool
+    off: bool
+    action: str
+    session_id: str
+    remove_worktree: bool
+    then: list[list[str]]
+    auto_pickup: bool
+    no_worktree: bool
+    gate: str | None
+    force: bool
+    event: str
+    ids: list[str]
+    chain: bool
+    directory: str | None
+
+
+class ClaudeRateLimit(TypedDict):
+    utilization: int | float
+    resets_at: str | None
+
+
+class ClaudeUsageResponse(TypedDict):
+    rate_limits_available: bool
+    rate_limits: dict[str, ClaudeRateLimit | None]
+
+
+class ClaudeControlResponse(TypedDict):
+    request_id: str
+    subtype: str
+    response: ClaudeUsageResponse
+
+
+class ClaudeControlFrame(TypedDict):
+    type: str
+    response: ClaudeControlResponse
+
+
+type Tasks = dict[str, Task]
+type Worktrees = dict[str, WorktreeResource]
+type PullRequestCache = dict[str | None, PullRequest | None]
+type JsonObject = dict[str, object]
+type AppServerRequests = list[JsonObject]
+type AppServerResponses = dict[int, JsonObject]
 
 
 def xdg_golem_directory(variable: str, fallback: Path) -> Path:
@@ -232,25 +334,29 @@ def settings_path() -> Path:
     return state_directory() / "settings.json"
 
 
-def load_json(path: Path) -> dict[str, Any]:
+def load_json(path: Path) -> JsonObject:
     if not path.exists():
         return {}
-    return cast("dict[str, Any]", json.loads(path.read_text(encoding="utf-8")))
+    return cast("JsonObject", json.loads(path.read_text(encoding="utf-8")))
 
 
 def ledger_temporary_prefix(task_ledger_path: Path) -> str:
     return f".{task_ledger_path.name}."
 
 
-def load_tasks() -> dict[str, Any]:
-    return load_json(ledger_path())
+def load_tasks() -> Tasks:
+    return cast("Tasks", load_json(ledger_path()))
 
 
-def load_worktrees() -> dict[str, Any]:
-    return load_json(worktree_ledger_path())
+def load_worktrees() -> Worktrees:
+    return cast("Worktrees", load_json(worktree_ledger_path()))
 
 
-def save_json(path: Path, value: dict[str, Any]) -> None:
+def load_settings() -> Settings:
+    return cast("Settings", load_json(settings_path()))
+
+
+def save_json(path: Path, value: object) -> None:
     file_descriptor, temporary_name = tempfile.mkstemp(
         dir=path.parent,
         prefix=ledger_temporary_prefix(path),
@@ -267,16 +373,16 @@ def save_json(path: Path, value: dict[str, Any]) -> None:
             temporary_path.unlink()
 
 
-def save_tasks(tasks: dict[str, Any]) -> None:
+def save_tasks(tasks: Tasks) -> None:
     save_json(ledger_path(), tasks)
 
 
-def save_settings(settings: dict[str, Any]) -> None:
+def save_settings(settings: Settings) -> None:
     save_json(settings_path(), settings)
 
 
 @contextmanager
-def locked_ledger() -> Generator[tuple[dict[str, Any], dict[str, Any]]]:
+def locked_ledger() -> Generator[tuple[Tasks, Worktrees]]:
     lock_path = ledger_path().with_suffix(".lock")
     lock_path.touch(exist_ok=True)
     with lock_path.open("r+", encoding="utf-8") as lock_file:
@@ -293,7 +399,7 @@ def locked_ledger() -> Generator[tuple[dict[str, Any], dict[str, Any]]]:
 
 
 @contextmanager
-def locked_tasks() -> Generator[dict[str, Any]]:
+def locked_tasks() -> Generator[Tasks]:
     with locked_ledger() as (tasks, _):
         yield tasks
 
@@ -355,7 +461,7 @@ def directory_lock_path(directory: str) -> Path:
     return lock_directory / f"{lock_name}.lock"
 
 
-def reserve_tasks(records: dict[str, Any]) -> None:
+def reserve_tasks(records: Tasks) -> None:
     with locked_tasks() as tasks:
         for task_id in records:
             if task_id in tasks:
@@ -363,11 +469,11 @@ def reserve_tasks(records: dict[str, Any]) -> None:
         tasks.update(records)
 
 
-def can_start_dependents(task: dict[str, Any]) -> bool:
+def can_start_dependents(task: Task) -> bool:
     return task.get("status") in SUCCEEDED_STATUSES and "gate_reason" not in task
 
 
-def waiting_dependent_ids(tasks: dict[str, Any], parent_id: str) -> list[str]:
+def waiting_dependent_ids(tasks: Tasks, parent_id: str) -> list[str]:
     return [
         dependent_id
         for dependent_id, dependent in tasks.items()
@@ -375,18 +481,15 @@ def waiting_dependent_ids(tasks: dict[str, Any], parent_id: str) -> list[str]:
     ]
 
 
-def dependent_task_ids(tasks: dict[str, Any], parent_id: str) -> list[str]:
+def dependent_task_ids(tasks: Tasks, parent_id: str) -> list[str]:
     return sorted(
         dependent_id
         for dependent_id, dependent in tasks.items()
-        if isinstance(dependent, dict)
-        and cast("dict[str, Any]", dependent).get("after") == parent_id
+        if dependent.get("after") == parent_id
     )
 
 
-def descendant_ids_with_status(
-    tasks: dict[str, Any], task_id: str, statuses: set[str]
-) -> list[str]:
+def descendant_ids_with_status(tasks: Tasks, task_id: str, statuses: set[str]) -> list[str]:
     matching_ids: list[str] = []
     pending_ids = [task_id]
     while pending_ids:
@@ -397,30 +500,30 @@ def descendant_ids_with_status(
     return matching_ids
 
 
-def has_running_dependent(tasks: dict[str, Any], parent_id: str) -> bool:
+def has_running_dependent(tasks: Tasks, parent_id: str) -> bool:
     return any(
         dependent["status"] == STATUS_RUNNING and dependent.get("after") == parent_id
         for dependent in tasks.values()
     )
 
 
-def has_unreviewed_dependent(tasks: dict[str, Any], parent_id: str) -> bool:
+def has_unreviewed_dependent(tasks: Tasks, parent_id: str) -> bool:
     return any(
         dependent["status"] in UNREVIEWED_STATUSES and dependent.get("after") == parent_id
         for dependent in tasks.values()
     )
 
 
-def mark_ancestors_done(tasks: dict[str, Any], task: dict[str, Any]) -> None:
+def mark_ancestors_done(tasks: Tasks, task: Task) -> None:
     ancestor = tasks.get(task.get("after", ""))
-    while isinstance(ancestor, dict):
-        parent = cast("dict[str, Any]", ancestor)
+    while ancestor is not None:
+        parent = ancestor
         if parent.get("status") == STATUS_NEEDS_REVIEW:
             parent["status"] = STATUS_DONE
         ancestor = tasks.get(parent.get("after", ""))
 
 
-def mark_task_done(tasks: dict[str, Any], task: dict[str, Any]) -> None:
+def mark_task_done(tasks: Tasks, task: Task) -> None:
     if task.get("status") != STATUS_NEEDS_REVIEW:
         return
     task["status"] = STATUS_DONE
@@ -435,12 +538,12 @@ def open_app_session_and_mark_done(task_id: str, session_id: str) -> int:
         return returncode
     with locked_tasks() as tasks:
         current_task = tasks.get(task_id)
-        if isinstance(current_task, dict):
-            mark_task_done(tasks, cast("dict[str, Any]", current_task))
+        if current_task is not None:
+            mark_task_done(tasks, current_task)
     return 0
 
 
-def reserve_dependent_task(records: dict[str, Any], parent_id: str) -> bool:
+def reserve_dependent_task(records: Tasks, parent_id: str) -> bool:
     with locked_tasks() as tasks:
         for task_id in records:
             if task_id in tasks:
@@ -558,7 +661,7 @@ def captured_environment() -> dict[str, str]:
     return {name: value for name, value in os.environ.items() if is_captured_variable(name)}
 
 
-def task_environment(task: dict[str, Any]) -> dict[str, str]:
+def task_environment(task: Task) -> dict[str, str]:
     inherited_environment = {
         name: value for name, value in os.environ.items() if not is_captured_variable(name)
     }
@@ -572,8 +675,8 @@ def codex_environment(environment: dict[str, str]) -> dict[str, str]:
     return environment
 
 
-def task_backend(task: dict[str, Any]) -> str:
-    return cast("str", task.get("backend", BACKEND_CLAUDE))
+def task_backend(task: Task) -> str:
+    return task.get("backend", BACKEND_CLAUDE)
 
 
 def has_agent_argument(agent_args: list[str], names: set[str]) -> bool:
@@ -644,7 +747,7 @@ def git_has_head(directory: str) -> bool:
     return run_git(directory, "rev-parse", "--verify", "HEAD").returncode == 0
 
 
-def recorded_worktree(tasks: dict[str, Any], task: dict[str, Any]) -> tuple[str, bool] | None:
+def recorded_worktree(tasks: Tasks, task: Task) -> tuple[str, bool] | None:
     if task.get("no_worktree"):
         return None
     ancestor = task
@@ -652,30 +755,27 @@ def recorded_worktree(tasks: dict[str, Any], task: dict[str, Any]) -> tuple[str,
         if "worktree" in ancestor:
             return ancestor["worktree"], ancestor.get("worktree_pending") is True
         parent = tasks.get(ancestor.get("after", ""))
-        if not isinstance(parent, dict):
+        if parent is None:
             return None
-        ancestor = cast("dict[str, Any]", parent)
+        ancestor = parent
         if ancestor.get("cwd") != task.get("cwd"):
             return None
 
 
-def worktree_resource(worktrees: dict[str, Any], worktree: str | None) -> dict[str, Any] | None:
+def worktree_resource(worktrees: Worktrees, worktree: str | None) -> WorktreeResource | None:
     if worktree is None:
         return None
-    resource = worktrees.get(resolved_path(worktree))
-    return cast("dict[str, Any]", resource) if isinstance(resource, dict) else None
+    return worktrees.get(resolved_path(worktree))
 
 
-def clear_worktree_release(
-    tasks: dict[str, Any], worktrees: dict[str, Any], task: dict[str, Any]
-) -> None:
+def clear_worktree_release(tasks: Tasks, worktrees: Worktrees, task: Task) -> None:
     for worktree, resource in worktrees.items():
         if task_uses_worktree(tasks, task, worktree):
             resource.pop("released_at", None)
 
 
 def record_worktree_resource(
-    worktrees: dict[str, Any],
+    worktrees: Worktrees,
     worktree: str,
     session_id: str,
     *,
@@ -684,7 +784,7 @@ def record_worktree_resource(
 ) -> None:
     if owner == WORKTREE_OWNER_EXTERNAL:
         repository = git_common_directory(worktree)
-    resource: dict[str, Any] = {
+    resource: WorktreeResource = {
         "owner": owner,
         "session_id": session_id,
         "created_at": datetime.now(UTC).isoformat(),
@@ -711,13 +811,16 @@ def is_worktree_owner_verified(worktree: str, session_id: str) -> bool:
         return False
 
 
-def record_created_worktree_owner(task_id: str, task: dict[str, Any]) -> None:
-    worktree = cast("str", task["worktree"])
+def record_created_worktree_owner(task_id: str, task: Task) -> None:
+    worktree = task.get("worktree")
+    if worktree is None:
+        return
     with locked_ledger() as (tasks, worktrees):
-        current_task = cast("dict[str, Any]", tasks.get(task_id, {}))
+        current_task = tasks.get(task_id)
         resource = worktree_resource(worktrees, worktree)
         if (
-            current_task.get("session_id") != task["session_id"]
+            current_task is None
+            or current_task.get("session_id") != task["session_id"]
             or current_task.get("worktree") != worktree
             or resource is None
             or resource.get("owner") != WORKTREE_OWNER_GOLEM
@@ -729,20 +832,20 @@ def record_created_worktree_owner(task_id: str, task: dict[str, Any]) -> None:
             return
         try:
             with marker_path.open("x", encoding="utf-8") as marker_file:
-                marker_file.write(cast("str", resource["session_id"]))
+                marker_file.write(resource["session_id"])
         except FileExistsError:
             return
         except OSError as error:
             print(f"golem: could not record worktree ownership: {error}", file=sys.stderr)
 
 
-def is_worktree_left_to_agent(task: dict[str, Any]) -> bool:
+def is_worktree_left_to_agent(task: Task) -> bool:
     return bool(task.get("no_worktree")) or has_agent_argument(
         task["agent_args"], WORKTREE_ARGUMENTS
     )
 
 
-def resolved_worktree(tasks: dict[str, Any], task: dict[str, Any]) -> tuple[str | None, bool]:
+def resolved_worktree(tasks: Tasks, task: Task) -> tuple[str | None, bool]:
     recorded = recorded_worktree(tasks, task)
     if recorded is not None:
         return recorded
@@ -754,20 +857,20 @@ def resolved_worktree(tasks: dict[str, Any], task: dict[str, Any]) -> tuple[str 
     return str(Path(common_directory).parent / ".claude" / "worktrees" / task["session_id"]), True
 
 
-def task_directory(task: dict[str, Any]) -> str:
+def task_directory(task: Task) -> str:
     worktree = task.get("worktree")
     if worktree is not None and Path(worktree).is_dir():
         return worktree
     return task["cwd"]
 
 
-def directory_to_lock(task: dict[str, Any], worktree: str | None) -> str:
+def directory_to_lock(task: Task, worktree: str | None) -> str:
     return worktree if worktree is not None else task["cwd"]
 
 
 def worktree_missing_message(
     worktree: str | None,
-    worktrees: dict[str, Any],
+    worktrees: Worktrees,
     *,
     is_worktree_pending: bool,
 ) -> str | None:
@@ -779,7 +882,7 @@ def worktree_missing_message(
     return f"golem: worktree is missing: {worktree}"
 
 
-def reject_missing_worktree(task: dict[str, Any], worktrees: dict[str, Any]) -> None:
+def reject_missing_worktree(task: Task, worktrees: Worktrees) -> None:
     missing_worktree = worktree_missing_message(
         task.get("worktree"), worktrees, is_worktree_pending=task.get("worktree_pending") is True
     )
@@ -787,14 +890,14 @@ def reject_missing_worktree(task: dict[str, Any], worktrees: dict[str, Any]) -> 
         raise SystemExit(missing_worktree)
 
 
-def clear_worktree_pending_if_created(task: dict[str, Any]) -> None:
+def clear_worktree_pending_if_created(task: Task) -> None:
     worktree = task.get("worktree")
     if worktree is not None and Path(worktree).is_dir():
         task.pop("worktree_pending", None)
 
 
 def record_resolved_worktree(
-    task: dict[str, Any], worktree: str | None, *, is_worktree_pending: bool
+    task: Task, worktree: str | None, *, is_worktree_pending: bool
 ) -> None:
     if worktree is None:
         return
@@ -806,8 +909,8 @@ def record_resolved_worktree(
     clear_worktree_pending_if_created(task)
 
 
-def is_usage_limit_resume(task: dict[str, Any]) -> bool:
-    return cast("int", task.get("usage_limit_resume_count", 0)) > 0
+def is_usage_limit_resume(task: Task) -> bool:
+    return task.get("usage_limit_resume_count", 0) > 0
 
 
 def progress_path(session_id: str) -> Path:
@@ -902,16 +1005,16 @@ def claude_event_progress(event: object) -> list[str]:
 
 
 def run_claude(
-    task_id: str, task: dict[str, Any], lock_file_descriptors: tuple[int, ...]
+    task_id: str, task: Task, lock_file_descriptors: tuple[int, ...]
 ) -> tuple[int, str, str]:
-    session_id = cast("str", task["session_id"])
+    session_id = task["session_id"]
     is_resuming = is_usage_limit_resume(task)
     command = (
         ["claude", "--resume", session_id, "--print", USAGE_LIMIT_RESUME_PROMPT]
         if is_resuming
-        else ["claude", "--session-id", session_id, "--print", cast("str", task["prompt"])]
+        else ["claude", "--session-id", session_id, "--print", task["prompt"]]
     )
-    agent_args = cast("list[str]", task["agent_args"])
+    agent_args = task["agent_args"]
     default_args: list[str] = []
     if VERBOSE_ARGUMENT not in agent_args:
         default_args.append(VERBOSE_ARGUMENT)
@@ -919,8 +1022,8 @@ def run_claude(
         default_args += ["--name", task_id]
     worktree = task.get("worktree")
     is_creating_worktree = worktree is not None and not Path(worktree).is_dir()
-    if is_creating_worktree:
-        default_args += ["--worktree", Path(cast("str", worktree)).name]
+    if worktree is not None and is_creating_worktree:
+        default_args += ["--worktree", Path(worktree).name]
     if not has_agent_argument(agent_args, PERMISSION_ARGUMENTS):
         default_args.append("--dangerously-skip-permissions")
     stdout_lines: list[str] = []
@@ -995,9 +1098,11 @@ def fetch_stale_default_branch(cwd: str) -> None:
         )
 
 
-def create_codex_worktree(task_id: str, task: dict[str, Any]) -> str | None:
-    worktree = cast("str", task["worktree"])
-    cwd = cast("str", task["cwd"])
+def create_codex_worktree(task_id: str, task: Task) -> str | None:
+    worktree = task.get("worktree")
+    if worktree is None:
+        return "golem: task has no worktree"
+    cwd = task["cwd"]
     fetch_stale_default_branch(cwd)
     base = ORIGIN_HEAD
     if run_git(cwd, "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}").returncode:
@@ -1030,8 +1135,8 @@ def create_codex_worktree(task_id: str, task: dict[str, Any]) -> str | None:
 def record_codex_thread(task_id: str, session_id: str, thread_id: str) -> None:
     with locked_tasks() as tasks:
         stored_task = tasks.get(task_id)
-        if isinstance(stored_task, dict):
-            task = cast("dict[str, Any]", stored_task)
+        if stored_task is not None:
+            task = stored_task
             if task.get("session_id") == session_id:
                 task["thread_id"] = thread_id
 
@@ -1041,8 +1146,8 @@ def codex_event_message(event: dict[str, object]) -> str | None:
     return message if isinstance(message, str) else None
 
 
-def codex_command(task: dict[str, Any]) -> tuple[list[str], str]:
-    agent_args = cast("list[str]", task["agent_args"])
+def codex_command(task: Task) -> tuple[list[str], str]:
+    agent_args = task["agent_args"]
     default_args = (
         []
         if has_codex_permission_argument(agent_args)
@@ -1057,9 +1162,12 @@ def codex_command(task: dict[str, Any]) -> tuple[list[str], str]:
         *default_args,
         *CODEX_PROVIDER_ARGUMENTS,
     ]
-    prompt = cast("str", task["prompt"])
+    prompt = task["prompt"]
     if is_usage_limit_resume(task):
-        command += ["resume", cast("str", task["thread_id"]), "-"]
+        thread_id = task.get("thread_id")
+        if thread_id is None:
+            raise KeyError("thread_id")
+        command += ["resume", thread_id, "-"]
         return command, USAGE_LIMIT_RESUME_PROMPT
     command.append("-")
     return command, prompt
@@ -1153,9 +1261,9 @@ def read_codex_events(
 
 
 def run_codex(
-    task_id: str, task: dict[str, Any], lock_file_descriptors: tuple[int, ...]
+    task_id: str, task: Task, lock_file_descriptors: tuple[int, ...]
 ) -> tuple[int, str | None, bool]:
-    session_id = cast("str", task["session_id"])
+    session_id = task["session_id"]
     with progress_writer(session_id) as record_progress:
         try:
             require_codex_subscription(task_environment(task))
@@ -1223,8 +1331,8 @@ def new_task_record(
     backend: str,
     *,
     after: str | None = None,
-) -> dict[str, Any]:
-    record: dict[str, Any] = {
+) -> Task:
+    record: Task = {
         "cwd": placement.cwd,
         "prompt": prompt,
         "agent_args": list(agent_args),
@@ -1253,8 +1361,8 @@ def new_follow_up_records(
     agent_args: tuple[str, ...],
     backend: str,
     placement: RunPlacement,
-) -> dict[str, Any]:
-    records: dict[str, Any] = {}
+) -> Tasks:
+    records: Tasks = {}
     previous_task_id = run_task_id
     for task_id, prompt in follow_ups:
         if task_id == run_task_id or task_id in records:
@@ -1268,9 +1376,7 @@ def new_follow_up_records(
 
 def pickup(task_id: str, *agent_args: str, is_app: bool, is_review_required: bool = False) -> int:
     preflight_task = load_tasks().get(task_id)
-    is_codex = isinstance(preflight_task, dict) and (
-        task_backend(cast("dict[str, Any]", preflight_task)) == BACKEND_CODEX
-    )
+    is_codex = preflight_task is not None and task_backend(preflight_task) == BACKEND_CODEX
     if is_codex and is_app:
         raise SystemExit(f"golem: pickup --app does not support Codex tasks: {task_id}")
     if is_codex:
@@ -1279,7 +1385,7 @@ def pickup(task_id: str, *agent_args: str, is_app: bool, is_review_required: boo
     with locked_ledger() as (tasks, worktrees):
         if task_id not in tasks:
             raise SystemExit(f"golem: task not found: {task_id}")
-        task = cast("dict[str, Any]", tasks[task_id])
+        task = tasks[task_id]
         if is_review_required and task.get("status") != STATUS_NEEDS_REVIEW:
             return 0
         if task.get("status") in NOT_STARTED_STATUSES:
@@ -1301,7 +1407,7 @@ def pickup(task_id: str, *agent_args: str, is_app: bool, is_review_required: boo
         if not is_app:
             mark_task_done(tasks, task)
         cwd = task_directory(task)
-        session_id = cast("str", task["session_id"])
+        session_id = task["session_id"]
     if is_app:
         release_lock(directory_lock_file)
         return open_app_session_and_mark_done(task_id, session_id)
@@ -1330,7 +1436,7 @@ def pickup(task_id: str, *agent_args: str, is_app: bool, is_review_required: boo
         release_lock(directory_lock_file)
 
 
-def is_ready_for_review(tasks: dict[str, Any], task_id: str) -> bool:
+def is_ready_for_review(tasks: Tasks, task_id: str) -> bool:
     task = tasks[task_id]
     return task.get("status") == STATUS_NEEDS_REVIEW and (
         "gate_reason" in task or not has_unreviewed_dependent(tasks, task_id)
@@ -1357,9 +1463,8 @@ def pickup_all() -> int:
 def auto_pickup_task(task_id: str) -> None:
     tasks = load_tasks()
     task = tasks.get(task_id)
-    if not isinstance(task, dict):
+    if task is None:
         return
-    task = cast("dict[str, Any]", task)
     if task.get("status") == STATUS_FAILED:
         auto_pickup_task(task.get("after", ""))
         return
@@ -1378,7 +1483,7 @@ def close(task_id: str) -> int:
     with locked_tasks() as tasks:
         if task_id not in tasks:
             raise SystemExit(f"golem: task not found: {task_id}")
-        task = cast("dict[str, Any]", tasks[task_id])
+        task = tasks[task_id]
         if task.get("status") != STATUS_NEEDS_REVIEW:
             raise SystemExit(f"golem: task does not need review: {task_id}")
         task["status"] = STATUS_DONE
@@ -1389,7 +1494,7 @@ def show_task_result(task_id: str) -> int:
     tasks = load_tasks()
     if task_id not in tasks:
         raise SystemExit(f"golem: task not found: {task_id}")
-    task = cast("dict[str, Any]", tasks[task_id])
+    task = tasks[task_id]
     if "gate_reason" in task:
         print(f"golem: gate stopped: {task['gate_reason']}", file=sys.stderr)
     result = task.get("result")
@@ -1399,13 +1504,14 @@ def show_task_result(task_id: str) -> int:
     return 0
 
 
-def is_usage_limit_pause(task: dict[str, Any]) -> bool:
+def is_usage_limit_pause(task: Task) -> bool:
     return task.get("status") == STATUS_SCHEDULED and is_usage_limit_resume(task)
 
 
-def task_end_line(task_id: str, task: dict[str, Any]) -> str:
-    if is_usage_limit_pause(task):
-        resume_time = display_due_at(task["due_at"], datetime.now().astimezone().date())
+def task_end_line(task_id: str, task: Task) -> str:
+    due_at = task.get("due_at")
+    if due_at is not None and is_usage_limit_pause(task):
+        resume_time = display_due_at(due_at, datetime.now().astimezone().date())
         return f"golem: task paused at the usage limit, resumes {resume_time}: {task_id}"
     return f"golem: task {task['status']}: {task_id}"
 
@@ -1418,9 +1524,7 @@ def print_new_progress(progress_file: BinaryIO) -> None:
     sys.stdout.flush()
 
 
-def follow_progress_until_stopped(
-    task_id: str, path: Path, progress_file: BinaryIO
-) -> dict[str, Any]:
+def follow_progress_until_stopped(task_id: str, path: Path, progress_file: BinaryIO) -> Task:
     try:
         while True:
             task = existing_task(load_tasks(), task_id)
@@ -1443,7 +1547,7 @@ def watch_task(task_id: str) -> int:
     task = existing_task(load_tasks(), task_id)
     if task.get("status") in NOT_STARTED_STATUSES and not is_usage_limit_pause(task):
         raise SystemExit(f"golem: task has not started: {task_id}")
-    session_id = cast("str", task["session_id"])
+    session_id = task["session_id"]
     rotated_path = rotated_progress_path(session_id)
     path = progress_path(session_id)
     try:
@@ -1464,7 +1568,7 @@ def cancel_task(task_id: str) -> int:
     with locked_tasks() as tasks:
         if task_id not in tasks:
             raise SystemExit(f"golem: task not found: {task_id}")
-        task = cast("dict[str, Any]", tasks[task_id])
+        task = tasks[task_id]
         if task.get("status") not in {STATUS_SCHEDULED, STATUS_WAITING}:
             raise SystemExit(f"golem: task is not scheduled: {task_id}")
         task["status"] = STATUS_CANCELLED
@@ -1472,7 +1576,7 @@ def cancel_task(task_id: str) -> int:
         while pending_task_ids:
             parent_id = pending_task_ids.pop()
             for waiting_task_id in waiting_dependent_ids(tasks, parent_id):
-                waiting_task = cast("dict[str, Any]", tasks[waiting_task_id])
+                waiting_task = tasks[waiting_task_id]
                 waiting_task["status"] = STATUS_CANCELLED
                 pending_task_ids.append(waiting_task_id)
         directories = hook_affected_directories(tasks, task)
@@ -1520,13 +1624,13 @@ def list_tasks() -> int:
         print("golem: no tasks")
         return 0
     today = datetime.now().astimezone().date()
-    rows = [
+    rows: list[tuple[str, str, str, str, str, str]] = [
         (
             task_id,
             task["status"],
             display_directory(task["cwd"]),
             display_due_at(task["due_at"], today) if "due_at" in task else "",
-            task["after"] if task["status"] == STATUS_WAITING else "",
+            task.get("after", "") if task["status"] == STATUS_WAITING else "",
             first_line(task.get("gate_reason", "")),
         )
         for task_id, task in tasks.items()
@@ -1534,7 +1638,7 @@ def list_tasks() -> int:
     rows.sort(key=lambda row: (LIST_STATUS_ORDER.index(row[1]), row[0]))
     headers = ("ID", "STATUS", "DIRECTORY", "DUE AT", "AFTER", "REASON")
     widths = [
-        max(len(str(value)) for value in column) for column in zip(headers, *rows, strict=True)
+        max(len(header), *(len(row[index]) for row in rows)) for index, header in enumerate(headers)
     ]
     is_color = is_color_enabled()
     print(
@@ -1610,7 +1714,9 @@ def next_reset_time() -> datetime | None:
             timeout=USAGE_TIMEOUT_SECONDS,
             check=False,
         )
-        frames = [json.loads(line) for line in result.stdout.splitlines()]
+        frames = [
+            cast("ClaudeControlFrame", json.loads(line)) for line in result.stdout.splitlines()
+        ]
         responses = {
             frame["response"]["request_id"]: frame["response"]
             for frame in frames
@@ -1649,8 +1755,8 @@ def next_reset_time() -> datetime | None:
         raise SystemExit(USAGE_ERROR) from error
 
 
-def codex_app_server_requests(*, has_rate_limits: bool) -> list[dict[str, Any]]:
-    requests: list[dict[str, Any]] = [
+def codex_app_server_requests(*, has_rate_limits: bool) -> AppServerRequests:
+    requests: AppServerRequests = [
         {
             "id": 1,
             "method": "initialize",
@@ -1674,7 +1780,7 @@ def read_codex_app_server_output(
 
 def codex_app_server_response(
     response_lines: queue.Queue[str | None], deadline: float
-) -> dict[str, Any]:
+) -> JsonObject:
     timeout = deadline - time.monotonic()
     if timeout <= 0:
         raise subprocess.TimeoutExpired("codex app-server", USAGE_TIMEOUT_SECONDS)
@@ -1687,11 +1793,11 @@ def codex_app_server_response(
     response = cast("object", json.loads(line))
     if not isinstance(response, dict):
         raise TypeError("invalid Codex app-server response")
-    return cast("dict[str, Any]", response)
+    return cast("JsonObject", response)
 
 
 def validate_codex_app_server(
-    process: subprocess.Popen[str], responses: dict[int, dict[str, Any]]
+    process: subprocess.Popen[str], responses: AppServerResponses
 ) -> None:
     if process.returncode:
         raise OSError("Codex app-server failed")
@@ -1701,7 +1807,7 @@ def validate_codex_app_server(
 
 def codex_app_server_responses(
     environment: dict[str, str], *, has_rate_limits: bool
-) -> dict[int, dict[str, Any]]:
+) -> AppServerResponses:
     process: subprocess.Popen[str] | None = None
     response_reader: threading.Thread | None = None
     standard_output: io.TextIOWrapper | None = None
@@ -1726,7 +1832,7 @@ def codex_app_server_responses(
         requests = codex_app_server_requests(has_rate_limits=has_rate_limits)
         standard_input.write("".join(json.dumps(request) + "\n" for request in requests))
         standard_input.flush()
-        responses: dict[int, dict[str, Any]] = {}
+        responses: AppServerResponses = {}
         required_ids = {request["id"] for request in requests if isinstance(request.get("id"), int)}
         deadline = time.monotonic() + USAGE_TIMEOUT_SECONDS
         while required_ids - responses.keys():
@@ -1760,8 +1866,8 @@ def codex_app_server_responses(
             standard_output.close()
 
 
-def validate_codex_subscription(responses: dict[int, dict[str, Any]]) -> None:
-    account_result = cast("object", responses[2]["result"])
+def validate_codex_subscription(responses: AppServerResponses) -> None:
+    account_result = responses[2]["result"]
     if not isinstance(account_result, dict):
         raise SystemExit(CODEX_ACCOUNT_ERROR)
     account_result_fields = cast("dict[str, object]", account_result)
@@ -1779,10 +1885,10 @@ def require_codex_subscription(environment: dict[str, str]) -> None:
     validate_codex_subscription(codex_app_server_responses(environment, has_rate_limits=False))
 
 
-def codex_rate_limits() -> dict[str, Any]:
+def codex_rate_limits() -> JsonObject:
     responses = codex_app_server_responses(os.environ.copy(), has_rate_limits=True)
     validate_codex_subscription(responses)
-    rate_limits_result = cast("object", responses[3]["result"])
+    rate_limits_result = responses[3]["result"]
     rate_limits_fields = (
         cast("dict[str, object]", rate_limits_result)
         if isinstance(rate_limits_result, dict)
@@ -1790,24 +1896,24 @@ def codex_rate_limits() -> dict[str, Any]:
     )
     if rate_limits_fields is None or not isinstance(rate_limits_fields.get("rateLimits"), dict):
         raise SystemExit(CODEX_ACCOUNT_ERROR)
-    return cast("dict[str, Any]", rate_limits_fields["rateLimits"])
+    return cast("JsonObject", rate_limits_fields["rateLimits"])
 
 
-def codex_reset_time_from_limit(limit: dict[str, Any]) -> datetime:
+def codex_reset_time_from_limit(limit: JsonObject) -> datetime:
     resets_at = limit.get("resetsAt")
     if not isinstance(resets_at, int | float):
         raise SystemExit(USAGE_ERROR)
     return validated_reset_time(datetime.fromtimestamp(resets_at, UTC))
 
 
-def required_codex_primary_limit(rate_limits: dict[str, Any]) -> dict[str, Any] | None:
+def required_codex_primary_limit(rate_limits: JsonObject) -> JsonObject | None:
     if "primary" not in rate_limits:
         raise SystemExit(USAGE_ERROR)
     primary = rate_limits["primary"]
-    return cast("dict[str, Any]", primary) if isinstance(primary, dict) else None
+    return cast("JsonObject", primary) if isinstance(primary, dict) else None
 
 
-def codex_active_reset_time(primary: dict[str, Any]) -> datetime | None:
+def codex_active_reset_time(primary: JsonObject) -> datetime | None:
     used_percent = primary.get("usedPercent")
     if primary.get("resetsAt") is None or used_percent == 0:
         return None
@@ -1822,15 +1928,13 @@ def next_codex_reset_time() -> datetime | None:
         primary = required_codex_primary_limit(rate_limits)
         secondary = rate_limits.get("secondary")
         limits = [
-            cast("dict[str, Any]", limit)
-            for limit in (primary, secondary)
-            if isinstance(limit, dict)
+            cast("JsonObject", limit) for limit in (primary, secondary) if isinstance(limit, dict)
         ]
         exhausted_limits = [
             limit
             for limit in limits
-            if isinstance(limit.get("usedPercent"), int | float)
-            and limit["usedPercent"] >= FULL_UTILIZATION
+            if isinstance(used_percent := limit.get("usedPercent"), int | float)
+            and used_percent >= FULL_UTILIZATION
         ]
         if exhausted_limits:
             return max(codex_reset_time_from_limit(limit) for limit in exhausted_limits)
@@ -1849,8 +1953,11 @@ def validated_reset_time(reset_time: datetime) -> datetime:
     return reset_time
 
 
-def reset_time_from_limit(limit: dict[str, Any]) -> datetime:
-    return validated_reset_time(datetime.fromisoformat(limit["resets_at"]))
+def reset_time_from_limit(limit: ClaudeRateLimit) -> datetime:
+    resets_at = limit["resets_at"]
+    if resets_at is None:
+        raise SystemExit(USAGE_ERROR)
+    return validated_reset_time(datetime.fromisoformat(resets_at))
 
 
 def schedule_new_task(
@@ -1862,7 +1969,7 @@ def schedule_new_task(
     *,
     backend: str,
     placement: RunPlacement,
-    follow_up_records: dict[str, Any],
+    follow_up_records: Tasks,
 ) -> int:
     due_time = when or datetime.now(UTC).astimezone()
     record = new_task_record(placement, prompt, agent_args, due_time, backend, after=after)
@@ -1919,34 +2026,32 @@ def record_worktree(task_id: str, worktree: str) -> None:
     with locked_ledger() as (tasks, worktrees):
         tasks[task_id]["worktree"] = worktree
         tasks[task_id].pop("worktree_pending", None)
-        task = cast("dict[str, Any]", tasks[task_id])
-        record_worktree_resource(worktrees, worktree, cast("str", task["session_id"]))
+        task = tasks[task_id]
+        record_worktree_resource(worktrees, worktree, task["session_id"])
 
 
 def clear_recorded_worktree_pending(task_id: str) -> None:
     with locked_tasks() as tasks:
         task = tasks.get(task_id)
-        if isinstance(task, dict):
-            clear_worktree_pending_if_created(cast("dict[str, Any]", task))
+        if task is not None:
+            clear_worktree_pending_if_created(task)
 
 
 def mark_task_waiting_for_reset(task_id: str, result: str) -> bool:
     try:
         task = load_tasks().get(task_id)
-        if not isinstance(task, dict):
+        if task is None:
             return False
-        when = planned_execution_time(
-            task_backend(cast("dict[str, Any]", task)), is_now=False, at_text=None
-        )
+        when = planned_execution_time(task_backend(task), is_now=False, at_text=None)
     except SystemExit:
         return False
     if when is None:
         return False
     with locked_tasks() as tasks:
         task = tasks.get(task_id)
-        if not isinstance(task, dict):
+        if task is None:
             return False
-        task_record = cast("dict[str, Any]", task)
+        task_record = task
         if task_record.get("status") != STATUS_RUNNING:
             return False
         task_record["result"] = result
@@ -1966,9 +2071,9 @@ def finish_task(
 ) -> None:
     with locked_tasks() as tasks:
         stored_task = tasks.get(task_id)
-        if not isinstance(stored_task, dict):
+        if stored_task is None:
             return
-        task_record = cast("dict[str, Any]", stored_task)
+        task_record = stored_task
         if task_record.get("status") != STATUS_RUNNING:
             return
         if result is not None:
@@ -1980,26 +2085,29 @@ def finish_task(
         )
         task_record["returncode"] = returncode
         stored_parent = tasks.get(task_record.get("after", ""))
-        if task_record["status"] != STATUS_NEEDS_REVIEW or not isinstance(stored_parent, dict):
+        if task_record["status"] != STATUS_NEEDS_REVIEW or stored_parent is None:
             return
-        parent = cast("dict[str, Any]", stored_parent)
+        parent = stored_parent
         if parent.get("status") == STATUS_NEEDS_REVIEW:
             parent["status"] = STATUS_DONE
 
 
 def claim_task(
-    tasks: dict[str, Any],
-    worktrees: dict[str, Any],
+    tasks: Tasks,
+    worktrees: Worktrees,
     task_id: str,
     session_id: str,
     expected_status: str,
-) -> tuple[dict[str, Any], io.TextIOWrapper, io.TextIOWrapper] | None:
+) -> tuple[Task, io.TextIOWrapper, io.TextIOWrapper] | None:
     task = tasks.get(task_id)
     if task is None or task["status"] != expected_status or task["session_id"] != session_id:
         return None
-    if expected_status == STATUS_SCHEDULED and datetime.fromisoformat(
-        task["due_at"]
-    ) > datetime.now(UTC):
+    due_at = task.get("due_at")
+    if (
+        expected_status == STATUS_SCHEDULED
+        and due_at is not None
+        and datetime.fromisoformat(due_at) > datetime.now(UTC)
+    ):
         return None
     run_lock_file = acquire_run_lock(session_id)
     if run_lock_file is None:
@@ -2042,12 +2150,12 @@ def claim_task(
 
 def claim_next_dependent(
     task_id: str, parent_session_id: str
-) -> tuple[str, dict[str, Any], io.TextIOWrapper, io.TextIOWrapper] | None:
+) -> tuple[str, Task, io.TextIOWrapper, io.TextIOWrapper] | None:
     with locked_ledger() as (tasks, worktrees):
         parent_record = tasks.get(task_id)
-        if not isinstance(parent_record, dict):
+        if parent_record is None:
             return None
-        parent = cast("dict[str, Any]", parent_record)
+        parent = parent_record
         if parent.get("session_id") != parent_session_id or not can_start_dependents(parent):
             return None
         for dependent_id in waiting_dependent_ids(tasks, task_id):
@@ -2069,11 +2177,11 @@ def drain_dependents(task_id: str, session_id: str) -> None:
         execute_claimed_task(*next_dependent)
     auto_pickup_task(task_id)
     drained_task = load_tasks().get(task_id)
-    if isinstance(drained_task, dict):
-        sync_hooks(task_directory(cast("dict[str, Any]", drained_task)))
+    if drained_task is not None:
+        sync_hooks(task_directory(drained_task))
 
 
-def execute_task(task_id: str, task: dict[str, Any], lock_file_descriptors: tuple[int, ...]) -> int:
+def execute_task(task_id: str, task: Task, lock_file_descriptors: tuple[int, ...]) -> int:
     stderr = ""
     try:
         if task_backend(task) == BACKEND_CODEX:
@@ -2093,7 +2201,7 @@ def execute_task(task_id: str, task: dict[str, Any], lock_file_descriptors: tupl
         if working_directory is not None and working_directory != task["cwd"]:
             record_worktree(task_id, working_directory)
     clear_recorded_worktree_pending(task_id)
-    usage_limit_resume_count = cast("int", task.get("usage_limit_resume_count", 0))
+    usage_limit_resume_count = task.get("usage_limit_resume_count", 0)
     if (
         is_usage_limit
         and usage_limit_resume_count < MAX_USAGE_LIMIT_RESUMES
@@ -2116,7 +2224,7 @@ def execute_task(task_id: str, task: dict[str, Any], lock_file_descriptors: tupl
     return returncode
 
 
-def gate_input_json(task_id: str, task: dict[str, Any]) -> str:
+def gate_input_json(task_id: str, task: Task) -> str:
     transcript_path = next(iter(transcript_paths(task)), None)
     return json.dumps(
         {
@@ -2131,16 +2239,17 @@ def gate_input_json(task_id: str, task: dict[str, Any]) -> str:
     )
 
 
-def gate_stop_reason(
-    task_id: str, task: dict[str, Any], timeout_seconds: int | None = None
-) -> str | None:
+def gate_stop_reason(task_id: str, task: Task, timeout_seconds: int | None = None) -> str | None:
+    gate = task.get("gate")
+    if gate is None:
+        return None
     if timeout_seconds is None:
         timeout_seconds = GATE_TIMEOUT_SECONDS
     # A file, not a pipe: a background process the gate starts can hold stderr open after it exits.
     with tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as stderr_file:
         try:
             gate_process = subprocess.Popen(
-                ["/bin/sh", "-c", task["gate"]],
+                ["/bin/sh", "-c", gate],
                 cwd=task_directory(task),
                 env=task_environment(task),
                 stdin=subprocess.PIPE,
@@ -2168,11 +2277,10 @@ def gate_stop_reason(
         return stderr_file.read().strip() or f"gate exited with status {gate_process.returncode}"
 
 
-def is_gate_pending(tasks: dict[str, Any], task_id: str) -> bool:
-    stored_task = tasks.get(task_id)
-    if not isinstance(stored_task, dict):
+def is_gate_pending(tasks: Tasks, task_id: str) -> bool:
+    task = tasks.get(task_id)
+    if task is None:
         return False
-    task = cast("dict[str, Any]", stored_task)
     return (
         task.get("status") == STATUS_NEEDS_REVIEW
         and "gate" in task
@@ -2181,7 +2289,7 @@ def is_gate_pending(tasks: dict[str, Any], task_id: str) -> bool:
     )
 
 
-def acquire_task_directory_lock(task: dict[str, Any]) -> io.TextIOWrapper | None:
+def acquire_task_directory_lock(task: Task) -> io.TextIOWrapper | None:
     return acquire_lock(directory_lock_path(directory_to_lock(task, task.get("worktree"))))
 
 
@@ -2189,14 +2297,13 @@ def run_pending_gate(task_id: str) -> None:
     tasks = load_tasks()
     if not is_gate_pending(tasks, task_id):
         return
-    stop_reason = gate_stop_reason(task_id, cast("dict[str, Any]", tasks[task_id]))
+    stop_reason = gate_stop_reason(task_id, tasks[task_id])
     if stop_reason is None:
         return
     with locked_tasks() as locked_tasks_by_id:
-        current_task = locked_tasks_by_id.get(task_id)
-        if not isinstance(current_task, dict):
+        current = locked_tasks_by_id.get(task_id)
+        if current is None:
             return
-        current = cast("dict[str, Any]", current_task)
         if current.get("status") not in SUCCEEDED_STATUSES:
             return
         current["gate_reason"] = stop_reason
@@ -2230,10 +2337,9 @@ def continue_task(task_id: str, *, is_forced: bool) -> int:
 
 def release_gate_stop(task_id: str, *, stderr: int | None = None) -> bool:
     with locked_tasks() as tasks:
-        stored_task = tasks.get(task_id)
-        if not isinstance(stored_task, dict):
+        task = tasks.get(task_id)
+        if task is None:
             return False
-        task = cast("dict[str, Any]", stored_task)
         if "gate_reason" not in task:
             return False
         del task["gate_reason"]
@@ -2248,8 +2354,8 @@ def hook_command_line(argument: str) -> str:
     return f"XDG_STATE_HOME={state_home} {command}{HOOK_FAILURE_SUFFIX}"
 
 
-def hook_group(event: str) -> dict[str, Any]:
-    entry: dict[str, Any] = {
+def hook_group(event: str) -> JsonObject:
+    entry: JsonObject = {
         "type": "command",
         "command": hook_command_line(HOOK_EVENT_ARGUMENTS[event]),
     }
@@ -2260,14 +2366,14 @@ def hook_group(event: str) -> dict[str, Any]:
 
 
 def group_entries(group: object) -> list[object]:
-    entries = cast("dict[str, Any]", group).get("hooks") if isinstance(group, dict) else None
+    entries = cast("JsonObject", group).get("hooks") if isinstance(group, dict) else None
     return cast("list[object]", entries) if isinstance(entries, list) else []
 
 
 def is_golem_hook_entry(entry: object) -> bool:
     if not isinstance(entry, dict):
         return False
-    command = cast("dict[str, Any]", entry).get("command")
+    command = cast("JsonObject", entry).get("command")
     return isinstance(command, str) and command.endswith(HOOK_COMMAND_SUFFIXES)
 
 
@@ -2275,14 +2381,14 @@ def local_settings_path(directory: str) -> Path:
     return Path(directory) / ".claude" / "settings.local.json"
 
 
-def save_local_settings(path: Path, settings: dict[str, Any]) -> None:
+def save_local_settings(path: Path, settings: LocalSettings) -> None:
     mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else None
     save_json(path, settings)
     if mode is not None:
         path.chmod(mode)
 
 
-def read_local_settings(path: Path) -> dict[str, Any] | None:
+def read_local_settings(path: Path) -> LocalSettings | None:
     if path.is_symlink():
         return None
     try:
@@ -2291,14 +2397,14 @@ def read_local_settings(path: Path) -> dict[str, Any] | None:
         return None
     if not isinstance(loaded_settings, dict):
         return None
-    settings = cast("dict[str, Any]", loaded_settings)
+    settings = cast("JsonObject", loaded_settings)
     hooks = settings.get("hooks", {})
     if not isinstance(hooks, dict):
         return None
-    hooks_by_event = cast("dict[str, Any]", hooks)
+    hooks_by_event = cast("JsonObject", hooks)
     if not all(isinstance(hooks_by_event.get(event, []), list) for event in HOOK_EVENT_ARGUMENTS):
         return None
-    return settings
+    return cast("LocalSettings", settings)
 
 
 def groups_without_golem_entries(groups: list[object]) -> list[object]:
@@ -2309,7 +2415,7 @@ def groups_without_golem_entries(groups: list[object]) -> list[object]:
         if len(kept_entries) == len(entries):
             kept_groups.append(group)
         elif kept_entries:
-            kept_groups.append({**cast("dict[str, Any]", group), "hooks": kept_entries})
+            kept_groups.append({**cast("JsonObject", group), "hooks": kept_entries})
     return kept_groups
 
 
@@ -2326,7 +2432,7 @@ def install_hooks(directory: str) -> None:
     for event in HOOK_EVENT_ARGUMENTS:
         groups = hooks.get(event, [])
         current_group = hook_group(event)
-        current_entry = current_group["hooks"][0]
+        current_entry = group_entries(current_group)[0]
         if any(entry == current_entry for group in groups for entry in group_entries(group)):
             continue
         hooks[event] = [*groups_without_golem_entries(groups), current_group]
@@ -2375,14 +2481,14 @@ def remove_hooks(directory: str) -> None:
         path.parent.rmdir()
 
 
-def has_pending_follow_up(tasks: dict[str, Any], task_id: str) -> bool:
+def has_pending_follow_up(tasks: Tasks, task_id: str) -> bool:
     return bool(
         waiting_dependent_ids(tasks, task_id)
         or descendant_ids_with_status(tasks, task_id, {STATUS_SCHEDULED, STATUS_RUNNING})
     )
 
 
-def is_hook_needed(tasks: dict[str, Any], directory: str) -> bool:
+def is_hook_needed(tasks: Tasks, directory: str) -> bool:
     return any(
         "gate" in task
         and task["status"] in SUCCEEDED_STATUSES
@@ -2392,11 +2498,11 @@ def is_hook_needed(tasks: dict[str, Any], directory: str) -> bool:
     )
 
 
-def hook_affected_directories(tasks: dict[str, Any], task: dict[str, Any]) -> set[str]:
+def hook_affected_directories(tasks: Tasks, task: Task) -> set[str]:
     directories = {task_directory(task)}
     parent = tasks.get(task.get("after", ""))
-    if isinstance(parent, dict):
-        directories.add(task_directory(cast("dict[str, Any]", parent)))
+    if parent is not None:
+        directories.add(task_directory(parent))
     return directories
 
 
@@ -2410,16 +2516,16 @@ def sync_hooks(directory: str) -> None:
 
 def read_hook_session_id() -> str | None:
     try:
-        payload = json.load(sys.stdin)
+        payload = cast("object", json.load(sys.stdin))
     except ValueError:
         return None
     if not isinstance(payload, dict):
         return None
-    session_id = cast("dict[str, Any]", payload).get("session_id")
+    session_id = cast("JsonObject", payload).get("session_id")
     return session_id if isinstance(session_id, str) and session_id else None
 
 
-def session_task_id(tasks: dict[str, Any], session_id: str | None) -> str | None:
+def session_task_id(tasks: Tasks, session_id: str | None) -> str | None:
     if session_id is None:
         return None
     return next(
@@ -2433,7 +2539,7 @@ def hook_stop() -> int:
     task_id = session_task_id(tasks, read_hook_session_id())
     if task_id is None:
         return 0
-    task = cast("dict[str, Any]", tasks[task_id])
+    task = tasks[task_id]
     next_ids = waiting_dependent_ids(tasks, task_id)
     if "gate_reason" not in task or not next_ids:
         return 0
@@ -2475,7 +2581,7 @@ def hook_pre_tool_use() -> int:
 
 def execute_claimed_task(
     task_id: str,
-    task: dict[str, Any],
+    task: Task,
     run_lock_file: io.TextIOWrapper,
     directory_lock_file: io.TextIOWrapper,
 ) -> int:
@@ -2507,7 +2613,7 @@ def run_pending_gate_under_directory_lock(task_id: str) -> bool:
     tasks = load_tasks()
     if not is_gate_pending(tasks, task_id):
         return True
-    directory_lock_file = acquire_task_directory_lock(cast("dict[str, Any]", tasks[task_id]))
+    directory_lock_file = acquire_task_directory_lock(tasks[task_id])
     if directory_lock_file is None:
         return False
     try:
@@ -2539,7 +2645,7 @@ def execute_or_drain_task(task_id: str, session_id: str) -> int:
 
 
 def start_task_executor(
-    task_id: str, task: dict[str, Any], *, stderr: int | None = None
+    task_id: str, task: Task, *, stderr: int | None = None
 ) -> subprocess.Popen[bytes]:
     return subprocess.Popen(
         [*golem_command(), "_execute", task_id, task["session_id"]],
@@ -2559,22 +2665,17 @@ def is_run_lock_free(session_id: str) -> bool:
     return True
 
 
-def task_uses_worktree(tasks: dict[str, Any], task: dict[str, Any], worktree: str) -> bool:
+def task_uses_worktree(tasks: Tasks, task: Task, worktree: str) -> bool:
     recorded = recorded_worktree(tasks, task)
-    directories = [cast("str", task["cwd"])]
+    directories = [task["cwd"]]
     if recorded is not None:
         directories.append(recorded[0])
     worktree_path = Path(worktree).resolve()
     return any(Path(directory).resolve().is_relative_to(worktree_path) for directory in directories)
 
 
-def worktree_task_ids(tasks: dict[str, Any], worktree: str) -> list[str]:
-    return [
-        task_id
-        for task_id, task in tasks.items()
-        if isinstance(task, dict)
-        and task_uses_worktree(tasks, cast("dict[str, Any]", task), worktree)
-    ]
+def worktree_task_ids(tasks: Tasks, worktree: str) -> list[str]:
+    return [task_id for task_id, task in tasks.items() if task_uses_worktree(tasks, task, worktree)]
 
 
 def git_worktree_entries(repository: str) -> list[list[str]] | None:
@@ -2600,15 +2701,15 @@ def git_worktree_lock_reason(entry: list[str]) -> str | None:
 
 
 def is_verified_stale_worktree_lock(
-    resource: dict[str, Any], tasks: dict[str, Any], worktree: str, reason: str
+    resource: WorktreeResource, tasks: Tasks, worktree: str, reason: str
 ) -> bool:
     match = CLAUDE_LOCK_PATTERN.fullmatch(reason)
     if match is None:
         return False
     session_id, process_id_text = match.groups()
-    session_ids = {cast("str", resource["session_id"])}
+    session_ids = {resource["session_id"]}
     session_ids.update(
-        cast("str", tasks[task_id]["session_id"]) for task_id in worktree_task_ids(tasks, worktree)
+        tasks[task_id]["session_id"] for task_id in worktree_task_ids(tasks, worktree)
     )
     if session_id not in session_ids:
         return False
@@ -2622,8 +2723,8 @@ def is_verified_stale_worktree_lock(
 
 
 def git_worktree_retention_reasons(
-    resource: dict[str, Any],
-    tasks: dict[str, Any],
+    resource: WorktreeResource,
+    tasks: Tasks,
     worktree: str,
     entries: list[list[str]] | None,
 ) -> list[str]:
@@ -2639,7 +2740,7 @@ def git_worktree_retention_reasons(
         return ["not a registered worktree"]
     if entries[0] == matching_entry:
         return ["original checkout"]
-    if not is_worktree_owner_verified(worktree, cast("str", resource["session_id"])):
+    if not is_worktree_owner_verified(worktree, resource["session_id"]):
         return ["ownership cannot be verified"]
     reasons: list[str] = []
     lock_reason = git_worktree_lock_reason(matching_entry)
@@ -2665,13 +2766,9 @@ def git_worktree_retention_reasons(
     return reasons
 
 
-def task_worktree_retention_reasons(
-    tasks: dict[str, Any], worktree: str, *, is_released: bool
-) -> list[str]:
+def task_worktree_retention_reasons(tasks: Tasks, worktree: str, *, is_released: bool) -> list[str]:
     reasons: list[str] = []
-    worktree_tasks = [
-        cast("dict[str, Any]", tasks[task_id]) for task_id in worktree_task_ids(tasks, worktree)
-    ]
+    worktree_tasks = [tasks[task_id] for task_id in worktree_task_ids(tasks, worktree)]
     if any(task.get("status") == STATUS_RUNNING for task in worktree_tasks):
         reasons.append("in use")
     for task in worktree_tasks:
@@ -2686,8 +2783,8 @@ def task_worktree_retention_reasons(
 
 
 def worktree_retention_reasons(
-    tasks: dict[str, Any],
-    resource: dict[str, Any] | None,
+    tasks: Tasks,
+    resource: WorktreeResource | None,
     worktree: str,
     entries: list[list[str]] | None,
     *,
@@ -2728,20 +2825,23 @@ def worktree_retention_reasons(
     return list(dict.fromkeys(reasons))
 
 
-def record_worktree_removal_error(resource: dict[str, Any], error: str) -> tuple[bool, list[str]]:
+def record_worktree_removal_error(resource: WorktreeResource, error: str) -> tuple[bool, list[str]]:
     resource["removal_error"] = error
     return False, [error]
 
 
 def remove_inspected_worktree_resource(
-    resource: dict[str, Any], entry: list[str], worktree: str
+    resource: WorktreeResource, entry: list[str], worktree: str
 ) -> tuple[bool, list[str]]:
+    repository = resource.get("repository")
+    if repository is None:
+        return False, []
     commands = ["remove"]
     if git_worktree_lock_reason(entry) is not None:
         commands.insert(0, "unlock")
     for command in commands:
         result = run_git(
-            resource["repository"],
+            repository,
             "-c",
             "status.showUntrackedFiles=all",
             "worktree",
@@ -2758,8 +2858,8 @@ def remove_inspected_worktree_resource(
 
 @contextmanager
 def locked_worktree_inspection(
-    tasks: dict[str, Any], worktrees: dict[str, Any], worktree: str, *, is_released: bool = False
-) -> Generator[tuple[dict[str, Any] | None, list[str] | None, list[str]]]:
+    tasks: Tasks, worktrees: Worktrees, worktree: str, *, is_released: bool = False
+) -> Generator[tuple[WorktreeResource | None, list[str] | None, list[str]]]:
     resource = worktree_resource(worktrees, worktree)
     if resource is None:
         yield None, None, ["ownership unknown"]
@@ -2781,20 +2881,22 @@ def locked_worktree_inspection(
 
 
 def remove_worktree_resource(
-    tasks: dict[str, Any], worktrees: dict[str, Any], worktree: str, *, is_released: bool = False
+    tasks: Tasks, worktrees: Worktrees, worktree: str, *, is_released: bool = False
 ) -> tuple[bool, list[str]]:
     with locked_worktree_inspection(tasks, worktrees, worktree, is_released=is_released) as (
         resource,
         entry,
         reasons,
     ):
-        if reasons:
+        if reasons or resource is None or entry is None:
             return False, reasons
-        resource = cast("dict[str, Any]", resource)
-        return remove_inspected_worktree_resource(resource, cast("list[str]", entry), worktree)
+        repository = resource.get("repository")
+        if repository is None:
+            return False, reasons
+        return remove_inspected_worktree_resource(resource, entry, worktree)
 
 
-def is_known_directory_busy(tasks: dict[str, Any], task: dict[str, Any]) -> bool:
+def is_known_directory_busy(tasks: Tasks, task: Task) -> bool:
     recorded = recorded_worktree(tasks, task)
     if recorded is not None:
         directory = recorded[0]
@@ -2816,7 +2918,7 @@ def is_directory_busy(directory: str) -> bool:
 def run_launch_agent_pass() -> list[subprocess.Popen[bytes]]:
     rotate_agent_log()
     now = datetime.now(UTC)
-    due_tasks: list[tuple[str, dict[str, Any]]] = []
+    due_tasks: list[tuple[str, Task]] = []
     hook_directories: set[str] = set()
     with locked_tasks() as tasks:
         remove_orphan_run_locks()
@@ -2828,7 +2930,8 @@ def run_launch_agent_pass() -> list[subprocess.Popen[bytes]]:
                     hook_directories |= hook_affected_directories(tasks, task)
             elif (
                 task["status"] == STATUS_SCHEDULED
-                and datetime.fromisoformat(task["due_at"]) <= now
+                and (due_at := task.get("due_at")) is not None
+                and datetime.fromisoformat(due_at) <= now
                 and not is_known_directory_busy(tasks, task)
             ) or (
                 can_start_dependents(task)
@@ -2846,12 +2949,13 @@ def run_launch_agent_pass() -> list[subprocess.Popen[bytes]]:
     return processes
 
 
-def has_pending_tasks(tasks: dict[str, Any]) -> bool:
+def has_pending_tasks(tasks: Tasks) -> bool:
     return any(
         task["status"] in {STATUS_SCHEDULED, STATUS_RUNNING}
         or (
             task["status"] == STATUS_WAITING
-            and can_start_dependents(tasks.get(task.get("after", ""), {}))
+            and (parent := tasks.get(task.get("after", ""))) is not None
+            and can_start_dependents(parent)
         )
         for task in tasks.values()
     )
@@ -2862,10 +2966,9 @@ def list_worktrees() -> int:
     worktrees = load_worktrees()
     worktree_paths = set(worktrees)
     for task in tasks.values():
-        if isinstance(task, dict):
-            recorded = recorded_worktree(tasks, cast("dict[str, Any]", task))
-            if recorded is not None:
-                worktree_paths.add(resolved_path(recorded[0]))
+        recorded = recorded_worktree(tasks, task)
+        if recorded is not None:
+            worktree_paths.add(resolved_path(recorded[0]))
     if not worktree_paths:
         print("golem: no worktrees")
         return 0
@@ -2876,8 +2979,9 @@ def list_worktrees() -> int:
         if resource is not None and resource.get("removed_at") is not None:
             state = "removed"
             reasons = []
-        if resource is not None and isinstance(resource.get("removal_error"), str):
-            reasons.append(f"last removal error: {resource['removal_error']}")
+        removal_error = resource.get("removal_error") if resource is not None else None
+        if isinstance(removal_error, str):
+            reasons.append(f"last removal error: {removal_error}")
         rows.append(
             (
                 worktree,
@@ -2888,7 +2992,7 @@ def list_worktrees() -> int:
         )
     headers = ("PATH", "TASKS", "STATE", "REASON")
     widths = [
-        max(len(str(value)) for value in column) for column in zip(headers, *rows, strict=True)
+        max(len(header), *(len(row[index]) for row in rows)) for index, header in enumerate(headers)
     ]
     for row in (headers, *rows):
         print(
@@ -2900,18 +3004,18 @@ def list_worktrees() -> int:
 
 
 def delete_task_and_release_worktrees(
-    tasks: dict[str, Any], worktrees: dict[str, Any], task_ids: list[str]
+    tasks: Tasks, worktrees: Worktrees, task_ids: list[str]
 ) -> None:
-    selected_tasks = [cast("dict[str, Any]", tasks[task_id]) for task_id in task_ids]
+    selected_tasks = [tasks[task_id] for task_id in task_ids]
     worktree_paths = [
         path
         for path in worktrees
         if any(task_uses_worktree(tasks, task, path) for task in selected_tasks)
     ]
     for task_id in task_ids:
-        remove_progress(cast("str", tasks.pop(task_id)["session_id"]))
+        remove_progress(tasks.pop(task_id)["session_id"])
     for path in worktree_paths:
-        resource = cast("dict[str, Any]", worktrees[path])
+        resource = worktrees[path]
         if (
             resource.get("owner") == WORKTREE_OWNER_GOLEM
             and resource.get("removed_at") is None
@@ -2920,15 +3024,15 @@ def delete_task_and_release_worktrees(
             resource.setdefault("released_at", datetime.now(UTC).isoformat())
 
 
-def chain_task_ids(tasks: dict[str, Any], task_id: str) -> set[str]:
+def chain_task_ids(tasks: Tasks, task_id: str) -> set[str]:
     chain_ids = {task_id}
     pending_ids = [task_id]
     while pending_ids:
         current_id = pending_ids.pop()
-        current_task = cast("dict[str, Any]", tasks[current_id])
+        current_task = tasks[current_id]
         adjacent_ids = dependent_task_ids(tasks, current_id)
         parent_id = current_task.get("after")
-        if isinstance(parent_id, str) and isinstance(tasks.get(parent_id), dict):
+        if parent_id is not None and parent_id in tasks:
             adjacent_ids.append(parent_id)
         for adjacent_id in adjacent_ids:
             if adjacent_id not in chain_ids:
@@ -2938,12 +3042,12 @@ def chain_task_ids(tasks: dict[str, Any], task_id: str) -> set[str]:
 
 
 def selected_delete_task_ids(
-    tasks: dict[str, Any], task_ids: list[str], *, is_chain: bool
+    tasks: Tasks, task_ids: list[str], *, is_chain: bool
 ) -> tuple[list[str], list[str]]:
     selected_ids: set[str] = set()
     messages: list[str] = []
     for task_id in task_ids:
-        if not isinstance(tasks.get(task_id), dict):
+        if task_id not in tasks:
             messages.append(f"golem: task not found: {task_id}")
         elif is_chain:
             selected_ids.update(chain_task_ids(tasks, task_id))
@@ -2953,13 +3057,13 @@ def selected_delete_task_ids(
 
 
 def task_worktrees_and_refusals(
-    tasks: dict[str, Any], task_ids: list[str], *, is_removing_worktree: bool
+    tasks: Tasks, task_ids: list[str], *, is_removing_worktree: bool
 ) -> tuple[dict[str, str | None], list[str]]:
     selected_id_set = set(task_ids)
     worktrees_by_task: dict[str, str | None] = {}
     messages: list[str] = []
     for task_id in task_ids:
-        task = cast("dict[str, Any]", tasks[task_id])
+        task = tasks[task_id]
         recorded = recorded_worktree(tasks, task)
         worktree = resolved_path(recorded[0]) if recorded is not None else None
         worktrees_by_task[task_id] = worktree
@@ -2982,8 +3086,8 @@ def print_retained_worktree(worktree: str, reasons: list[str]) -> None:
 
 
 def remove_selected_worktrees(
-    tasks: dict[str, Any],
-    worktrees: dict[str, Any],
+    tasks: Tasks,
+    worktrees: Worktrees,
     worktrees_by_task: dict[str, str | None],
 ) -> set[str] | None:
     selected_worktrees = list(
@@ -3018,9 +3122,9 @@ def remove_selected_worktrees(
             return None
         removed_worktrees: set[str] = set()
         for worktree, resource, entry, _ in inspections:
-            is_removed, reasons = remove_inspected_worktree_resource(
-                cast("dict[str, Any]", resource), cast("list[str]", entry), worktree
-            )
+            if resource is None or entry is None:
+                continue
+            is_removed, reasons = remove_inspected_worktree_resource(resource, entry, worktree)
             if not is_removed:
                 for removed_worktree in removed_worktrees:
                     print(f"golem: removed worktree: {removed_worktree}")
@@ -3048,9 +3152,7 @@ def delete_tasks(task_ids: list[str], *, is_chain: bool, is_removing_worktree: b
                 remove_hooks(task_directory(tasks[task_id]))
             removed_worktrees = remove_selected_worktrees(tasks, worktrees, worktrees_by_task)
         if removed_worktrees is not None:
-            selected_tasks = [
-                (task_id, cast("dict[str, Any]", tasks[task_id])) for task_id in selected_task_ids
-            ]
+            selected_tasks = [(task_id, tasks[task_id]) for task_id in selected_task_ids]
             delete_task_and_release_worktrees(tasks, worktrees, selected_task_ids)
             for task_id, task in selected_tasks:
                 worktree = worktrees_by_task[task_id]
@@ -3062,9 +3164,7 @@ def delete_tasks(task_ids: list[str], *, is_chain: bool, is_removing_worktree: b
     return 0 if removed_worktrees is not None else 1
 
 
-def print_deleted_task(
-    task_id: str, task: dict[str, Any], worktree: str | None, *, is_removed: bool
-) -> None:
+def print_deleted_task(task_id: str, task: Task, worktree: str | None, *, is_removed: bool) -> None:
     print(f"golem: deleted task: {task_id}")
     session = task.get("thread_id") if task_backend(task) == BACKEND_CODEX else task["session_id"]
     if isinstance(session, str):
@@ -3075,7 +3175,7 @@ def print_deleted_task(
         print(f"golem: removed worktree: {worktree}")
 
 
-def dependents_first_task_ids(tasks: dict[str, Any], task_ids: list[str]) -> list[str]:
+def dependents_first_task_ids(tasks: Tasks, task_ids: list[str]) -> list[str]:
     ordered_task_ids: list[str] = []
     for task_id in task_ids:
         ordered_task_ids += dependents_first_task_ids(tasks, dependent_task_ids(tasks, task_id))
@@ -3083,7 +3183,7 @@ def dependents_first_task_ids(tasks: dict[str, Any], task_ids: list[str]) -> lis
     return ordered_task_ids
 
 
-def branch_pull_request(worktree: str | None) -> dict[str, Any] | None:
+def branch_pull_request(worktree: str | None) -> PullRequest | None:
     if worktree is None:
         return None
     branch = run_git(worktree, "symbolic-ref", "--short", "HEAD")
@@ -3113,7 +3213,7 @@ def branch_pull_request(worktree: str | None) -> dict[str, Any] | None:
         return None
     if result.returncode:
         return None
-    pull_requests = cast("list[dict[str, Any]]", json.loads(result.stdout))
+    pull_requests = cast("list[PullRequest]", json.loads(result.stdout))
     open_pull_request = next(
         (
             pull_request
@@ -3127,7 +3227,7 @@ def branch_pull_request(worktree: str | None) -> dict[str, Any] | None:
     return max(pull_requests, key=lambda pull_request: pull_request["number"], default=None)
 
 
-def transcript_paths(task: dict[str, Any]) -> list[Path]:
+def transcript_paths(task: Task) -> list[Path]:
     if task_backend(task) == BACKEND_CLAUDE:
         return list((Path.home() / ".claude" / "projects").glob(f"*/{task['session_id']}.jsonl"))
     thread_id = task.get("thread_id")
@@ -3137,7 +3237,7 @@ def transcript_paths(task: dict[str, Any]) -> list[Path]:
     return list((codex_home / "sessions").glob(f"**/rollout-*-{thread_id}.jsonl"))
 
 
-def session_idle_reason(task: dict[str, Any]) -> str | None:
+def session_idle_reason(task: Task) -> str | None:
     transcript_modified_time = max(
         (transcript_path.stat().st_mtime for transcript_path in transcript_paths(task)),
         default=None,
@@ -3150,7 +3250,7 @@ def session_idle_reason(task: dict[str, Any]) -> str | None:
     return f"idle {idle_days}d"
 
 
-def done_task_prune_reason(task: dict[str, Any], pull_requests: PullRequestCache) -> str | None:
+def done_task_prune_reason(task: Task, pull_requests: PullRequestCache) -> str | None:
     worktree = task.get("worktree")
     if is_directory_busy(directory_to_lock(task, worktree)):
         return None
@@ -3189,16 +3289,16 @@ def prune_answer(candidates: list[tuple[str, str]]) -> str:
 
 
 def chain_prune_selection(
-    tasks: dict[str, Any],
+    tasks: Tasks,
     chain_ids: list[str],
     pull_requests: PullRequestCache,
     *,
     is_offering_done_tasks: bool,
-) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
-    selected_tasks: dict[str, dict[str, Any]] = {}
+) -> tuple[Tasks, dict[str, str]]:
+    selected_tasks: Tasks = {}
     done_reasons: dict[str, str] = {}
     for task_id in chain_ids:
-        task = cast("dict[str, Any]", tasks[task_id])
+        task = tasks[task_id]
         if any(
             dependent_id not in selected_tasks
             for dependent_id in dependent_task_ids(tasks, task_id)
@@ -3218,13 +3318,13 @@ def chain_prune_selection(
 
 
 def prune_selection(
-    tasks: dict[str, Any],
+    tasks: Tasks,
     pull_requests: PullRequestCache,
     *,
     is_confirmed: bool,
     is_keeping_done_tasks: bool,
-) -> tuple[dict[str, dict[str, Any]], bool]:
-    selected_tasks: dict[str, dict[str, Any]] = {}
+) -> tuple[Tasks, bool]:
+    selected_tasks: Tasks = {}
     has_candidates = False
     answer = PRUNE_ANSWER_ALL if is_confirmed else None
     root_task_ids = sorted(
@@ -3250,7 +3350,7 @@ def prune_selection(
 
 
 def delete_pruned_tasks(
-    selected_tasks: dict[str, dict[str, Any]],
+    selected_tasks: Tasks,
     pull_requests: PullRequestCache,
 ) -> None:
     with locked_ledger() as (tasks, worktrees):
@@ -3293,7 +3393,7 @@ def prune_tasks(*, is_confirmed: bool) -> int:
 
 
 def set_worktree_auto_remove(retention_days: int | None) -> int:
-    settings = load_json(settings_path())
+    settings = load_settings()
     if retention_days is None:
         settings.pop("worktree_retention_days", None)
     else:
@@ -3302,23 +3402,25 @@ def set_worktree_auto_remove(retention_days: int | None) -> int:
     return 0
 
 
-def set_worktree_auto_remove_from_arguments(arguments: argparse.Namespace) -> int:
+def set_worktree_auto_remove_from_arguments(arguments: Arguments) -> int:
     if arguments.off:
         return set_worktree_auto_remove(None)
-    retention_days = cast("int", arguments.after)
+    retention_days = arguments.after
+    if not isinstance(retention_days, int):
+        raise SystemExit("golem: --after is required")
     if retention_days < 0:
         raise SystemExit("golem: --after must be non-negative")
     return set_worktree_auto_remove(retention_days)
 
 
 def auto_remove_worktrees() -> None:
-    settings = load_json(settings_path())
-    retention_days = cast("int | None", settings.get("worktree_retention_days"))
+    settings = load_settings()
+    retention_days = settings.get("worktree_retention_days")
     if retention_days is None:
         return
     now = datetime.now(UTC)
     with locked_ledger() as (tasks, worktrees):
-        for worktree, resource in cast("dict[str, dict[str, Any]]", worktrees).items():
+        for worktree, resource in worktrees.items():
             if (
                 resource.get("owner") != WORKTREE_OWNER_GOLEM
                 or resource.get("removed_at") is not None
@@ -3326,7 +3428,7 @@ def auto_remove_worktrees() -> None:
                 continue
             if "released_at" not in resource:
                 continue
-            released_at = cast("str", resource["released_at"])
+            released_at = resource["released_at"]
             eligible_at = datetime.fromisoformat(released_at) + timedelta(days=retention_days)
             if now < eligible_at:
                 continue
@@ -3359,13 +3461,13 @@ def run_launch_agent() -> int:
     return 0
 
 
-def existing_task(tasks: dict[str, Any], task_id: str) -> dict[str, Any]:
+def existing_task(tasks: Tasks, task_id: str) -> Task:
     if task_id not in tasks:
         raise SystemExit(f"golem: task not found: {task_id}")
-    return cast("dict[str, Any]", tasks[task_id])
+    return tasks[task_id]
 
 
-def retryable_task(tasks: dict[str, Any], task_id: str) -> dict[str, Any]:
+def retryable_task(tasks: Tasks, task_id: str) -> Task:
     task = existing_task(tasks, task_id)
     if task.get("status") not in {STATUS_FAILED, STATUS_CANCELLED}:
         raise SystemExit(f"golem: task cannot be retried: {task_id}")
@@ -3386,25 +3488,27 @@ def retry_task(task_id: str, *, is_now: bool, at_text: str | None) -> int:
         task = retryable_task(tasks, task_id)
         reject_missing_worktree(task, worktrees)
         record = new_task_record(
-            RunPlacement(cast("str", task["cwd"])),
-            cast("str", task["prompt"]),
-            tuple(cast("list[str]", task["agent_args"])),
+            RunPlacement(task["cwd"]),
+            task["prompt"],
+            tuple(task["agent_args"]),
             when,
             task_backend(task),
             after=task.get("after"),
         )
-        for name in (
-            "environment",
-            "worktree",
-            "worktree_pending",
-            "auto_pickup",
-            "no_worktree",
-            "gate",
-        ):
-            if name in task:
-                record[name] = task[name]
+        if "environment" in task:
+            record["environment"] = task["environment"]
+        if "worktree" in task:
+            record["worktree"] = task["worktree"]
+        if "worktree_pending" in task:
+            record["worktree_pending"] = task["worktree_pending"]
+        if "auto_pickup" in task:
+            record["auto_pickup"] = task["auto_pickup"]
+        if "no_worktree" in task:
+            record["no_worktree"] = task["no_worktree"]
+        if "gate" in task:
+            record["gate"] = task["gate"]
         tasks[task_id] = record
-        remove_progress(cast("str", task["session_id"]))
+        remove_progress(task["session_id"])
         clear_worktree_release(tasks, worktrees, record)
         directories = hook_affected_directories(tasks, record)
     for directory in directories:
@@ -3412,7 +3516,7 @@ def retry_task(task_id: str, *, is_now: bool, at_text: str | None) -> int:
     return wake_launch_agent_and_report(task_id, when)
 
 
-def scheduled_task(tasks: dict[str, Any], task_id: str) -> dict[str, Any]:
+def scheduled_task(tasks: Tasks, task_id: str) -> Task:
     task = existing_task(tasks, task_id)
     if task.get("status") != STATUS_SCHEDULED:
         raise SystemExit(f"golem: task is not scheduled: {task_id}")
@@ -3459,50 +3563,59 @@ def add_scheduling_arguments(add_argument: Callable[..., argparse.Action]) -> No
 
 
 def set_command_handler(
-    command_parser: argparse.ArgumentParser, handler: Callable[[argparse.Namespace], int]
+    command_parser: argparse.ArgumentParser, handler: Callable[[Arguments], int]
 ) -> None:
     command_parser.set_defaults(handler=handler)
 
 
+def task_id_from_arguments(arguments: Arguments) -> str:
+    if arguments.id is None:
+        raise SystemExit("golem: task ID is required")
+    return arguments.id
+
+
 def schedule_run_task(
-    arguments: argparse.Namespace,
+    arguments: Arguments,
+    task_id: str,
     prompt_text: str,
     task_args: tuple[str, ...],
-    follow_up_records: dict[str, Any],
+    follow_up_records: Tasks,
     placement: RunPlacement,
 ) -> int:
-    if arguments.after is not None:
+    after = arguments.after if isinstance(arguments.after, str) else None
+    if after is not None:
         dependent_record = new_task_record(
-            placement, prompt_text, task_args, None, arguments.backend, after=arguments.after
+            placement, prompt_text, task_args, None, arguments.backend, after=after
         )
-        if reserve_dependent_task(
-            {arguments.id: dependent_record, **follow_up_records}, arguments.after
-        ):
-            sync_hooks(task_directory(existing_task(load_tasks(), arguments.after)))
-            print(f"golem: {arguments.id} will run after {arguments.after}")
+        if reserve_dependent_task({task_id: dependent_record, **follow_up_records}, after):
+            sync_hooks(task_directory(existing_task(load_tasks(), after)))
+            print(f"golem: {task_id} will run after {after}")
             return 0
     when = planned_execution_time(arguments.backend, is_now=arguments.now, at_text=arguments.at)
     return schedule_new_task(
-        arguments.id,
+        task_id,
         prompt_text,
         task_args,
         when,
-        arguments.after,
+        after,
         backend=arguments.backend,
         placement=placement,
         follow_up_records=follow_up_records,
     )
 
 
-def run_task_from_arguments(arguments: argparse.Namespace) -> int:
+def run_task_from_arguments(arguments: Arguments) -> int:
     if arguments.auto_pickup and arguments.backend == BACKEND_CODEX:
         raise SystemExit("golem: --auto-pickup does not support Codex tasks")
     if arguments.gate is not None and arguments.backend == BACKEND_CODEX:
         raise SystemExit("golem: --gate does not support Codex tasks")
     require_launch_agent()
+    task_id = task_id_from_arguments(arguments)
     prompt_text = (
         Path(arguments.file).read_text(encoding="utf-8") if arguments.file else arguments.prompt
     )
+    if prompt_text is None:
+        raise SystemExit("golem: a prompt is required")
     task_args = tuple(arguments.agent_args)
     placement = RunPlacement(
         str(Path.cwd()),
@@ -3511,13 +3624,9 @@ def run_task_from_arguments(arguments: argparse.Namespace) -> int:
         gate=arguments.gate,
     )
     has_worktree_argument = has_agent_argument(list(task_args), WORKTREE_ARGUMENTS)
-    parent = (
-        cast("dict[str, Any]", load_tasks().get(arguments.after, {}))
-        if arguments.after is not None
-        else {}
-    )
-    if parent.get("no_worktree"):
-        placement = replace(placement, cwd=cast("str", parent["cwd"]), is_no_worktree=True)
+    parent = load_tasks().get(arguments.after) if isinstance(arguments.after, str) else None
+    if parent is not None and parent.get("no_worktree"):
+        placement = replace(placement, cwd=parent["cwd"], is_no_worktree=True)
         if has_worktree_argument:
             raise SystemExit(
                 f"golem: {arguments.after} runs in place; -w/--worktree is not allowed"
@@ -3525,7 +3634,7 @@ def run_task_from_arguments(arguments: argparse.Namespace) -> int:
     if placement.is_no_worktree and has_worktree_argument:
         raise SystemExit("golem: --no-worktree does not accept -w/--worktree")
     follow_up_records = new_follow_up_records(
-        arguments.id,
+        task_id,
         arguments.then,
         task_args,
         arguments.backend,
@@ -3534,9 +3643,11 @@ def run_task_from_arguments(arguments: argparse.Namespace) -> int:
     if arguments.backend == BACKEND_CODEX:
         reject_unsupported_codex_arguments(list(task_args), is_run=True)
         require_codex_subscription(os.environ.copy())
-    exit_code = schedule_run_task(arguments, prompt_text, task_args, follow_up_records, placement)
+    exit_code = schedule_run_task(
+        arguments, task_id, prompt_text, task_args, follow_up_records, placement
+    )
     for task_id, record in follow_up_records.items():
-        print(f"golem: {task_id} will run after {record['after']}")
+        print(f"golem: {task_id} will run after {record.get('after')}")
     return exit_code
 
 
@@ -3572,14 +3683,19 @@ def add_continue_command(add_parser: Callable[..., argparse.ArgumentParser]) -> 
     continue_command.add_argument("id")
     continue_command.add_argument("--force", action="store_true", help="skip the gate")
     set_command_handler(
-        continue_command, lambda arguments: continue_task(arguments.id, is_forced=arguments.force)
+        continue_command,
+        lambda arguments: continue_task(
+            task_id_from_arguments(arguments), is_forced=arguments.force
+        ),
     )
 
 
 def add_watch_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
     watch_command = add_parser("watch")
     watch_command.add_argument("id")
-    set_command_handler(watch_command, lambda arguments: watch_task(arguments.id))
+    set_command_handler(
+        watch_command, lambda arguments: watch_task(task_id_from_arguments(arguments))
+    )
 
 
 def add_hook_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
@@ -3672,20 +3788,26 @@ def build_parser() -> tuple[argparse.ArgumentParser, dict[str, argparse.Argument
         lambda arguments: (
             pickup_all()
             if arguments.all
-            else pickup(arguments.id, *arguments.agent_args, is_app=arguments.app)
+            else pickup(
+                task_id_from_arguments(arguments), *arguments.agent_args, is_app=arguments.app
+            )
         ),
     )
     close_command = commands.add_parser("close")
     close_command.add_argument("id")
-    set_command_handler(close_command, lambda arguments: close(arguments.id))
+    set_command_handler(close_command, lambda arguments: close(task_id_from_arguments(arguments)))
     add_continue_command(commands.add_parser)
     show_command = commands.add_parser("show")
     show_command.add_argument("id")
-    set_command_handler(show_command, lambda arguments: show_task_result(arguments.id))
+    set_command_handler(
+        show_command, lambda arguments: show_task_result(task_id_from_arguments(arguments))
+    )
     add_watch_command(commands.add_parser)
     cancel_command = commands.add_parser("cancel")
     cancel_command.add_argument("id")
-    set_command_handler(cancel_command, lambda arguments: cancel_task(arguments.id))
+    set_command_handler(
+        cancel_command, lambda arguments: cancel_task(task_id_from_arguments(arguments))
+    )
     retry_command = commands.add_parser(
         "retry",
         description=SCHEDULE_DESCRIPTION,
@@ -3695,7 +3817,9 @@ def build_parser() -> tuple[argparse.ArgumentParser, dict[str, argparse.Argument
     add_scheduling_arguments(retry_schedule_group.add_argument)
     set_command_handler(
         retry_command,
-        lambda arguments: retry_task(arguments.id, is_now=arguments.now, at_text=arguments.at),
+        lambda arguments: retry_task(
+            task_id_from_arguments(arguments), is_now=arguments.now, at_text=arguments.at
+        ),
     )
     reschedule_command = commands.add_parser(
         "reschedule",
@@ -3706,7 +3830,9 @@ def build_parser() -> tuple[argparse.ArgumentParser, dict[str, argparse.Argument
     add_scheduling_arguments(reschedule_schedule_group.add_argument)
     set_command_handler(
         reschedule_command,
-        lambda arguments: reschedule_task(arguments.id, is_now=arguments.now, at_text=arguments.at),
+        lambda arguments: reschedule_task(
+            task_id_from_arguments(arguments), is_now=arguments.now, at_text=arguments.at
+        ),
     )
     delete_command = commands.add_parser("delete")
     delete_command.add_argument("ids", nargs="+")
@@ -3747,7 +3873,9 @@ def build_parser() -> tuple[argparse.ArgumentParser, dict[str, argparse.Argument
     execute_command.add_argument("session_id")
     set_command_handler(
         execute_command,
-        lambda arguments: execute_or_drain_task(arguments.id, arguments.session_id),
+        lambda arguments: execute_or_drain_task(
+            task_id_from_arguments(arguments), arguments.session_id
+        ),
     )
     add_hook_command(commands.add_parser)
     return parser, commands.choices
@@ -3802,7 +3930,7 @@ def main(argv: list[str] | None = None) -> int:
                     f"golem: alias {alias_name} expands to alias {golem_args[0]}; "
                     "aliases cannot use other aliases"
                 )
-    arguments = parser.parse_args(golem_args, argparse.Namespace(agent_args=agent_args))
+    arguments = parser.parse_args(golem_args, Arguments(agent_args=agent_args))
     change_directory(arguments.directory)
     if agent_args and arguments.command == "retry":
         parser.error("retry does not accept agent arguments")

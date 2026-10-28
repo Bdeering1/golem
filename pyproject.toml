@@ -37,6 +37,7 @@ reportUnreachable = "error"
 reportDeprecated = "error"
 reportImplicitOverride = "error"
 reportUnnecessaryTypeIgnoreComment = "error"
+reportAny = "error"
 
 [[tool.basedpyright.executionEnvironments]]
 root = "tests"
@@ -50,3 +51,4 @@ reportUnknownMemberType = "none"
 reportUnknownParameterType = "none"
 reportUnknownVariableType = "none"
 reportUntypedFunctionDecorator = "none"
+reportAny = "none"
