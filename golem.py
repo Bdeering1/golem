@@ -81,6 +81,9 @@ BACKGROUND_WORK_STOPPED_PATTERN = re.compile(
 )
 SCHEDULE_DESCRIPTION = "Run at the next usage reset, or immediately if no usage window is active."
 LAUNCH_AGENT_ERROR = "golem: the agent is not installed or is out of date; run golem agent install"
+SETUP_OUTPUT_ERROR = (
+    "setup output must be a JSON object with optional string directory and prompt_suffix"
+)
 LAUNCH_AGENT_LABEL = "com.github.bdeering1.golem"
 LAUNCH_AGENT_INTERVAL_SECONDS = 300
 LAUNCH_AGENT_POLL_SECONDS = 10
@@ -118,9 +121,6 @@ CLAUDE_LOCK_PATTERN = re.compile(r"claude session (\S+) \(pid (\d+) start .+\)")
 PRUNE_IDLE_DAYS = 7
 PULL_REQUEST_TIMEOUT_SECONDS = 30
 GATE_TIMEOUT_SECONDS = 300
-SETUP_OUTPUT_ERROR = (
-    "setup output must be a JSON object with optional string directory and prompt_suffix"
-)
 HOOK_GATE_TIMEOUT_SECONDS = 20
 HOOK_STOP_TIMEOUT_SECONDS = 30
 HOOK_ARGUMENT_STOP = "stop"
@@ -2376,14 +2376,15 @@ def prepared_task(
         fail_setup(task_id, outcome)
         return None
     directory, prompt = outcome
-    if directory_lock_path(directory) != directory_lock_path(task["cwd"]):
-        moved_lock_file = acquire_lock(directory_lock_path(directory))
-        if moved_lock_file is None:
-            fail_setup(task_id, f"directory is busy: {directory}")
-            return None
-        release_lock(directory_lock_file)
-        directory_lock_file = moved_lock_file
-    return record_setup(task_id, task, directory, prompt), directory_lock_file
+    if directory_lock_path(directory) == directory_lock_path(task["cwd"]):
+        return record_setup(task_id, task, directory, prompt), directory_lock_file
+    moved_lock_file = acquire_lock(directory_lock_path(directory))
+    if moved_lock_file is None:
+        fail_setup(task_id, f"directory is busy: {directory}")
+        return None
+    prepared = record_setup(task_id, task, directory, prompt)
+    release_lock(directory_lock_file)
+    return prepared, moved_lock_file
 
 
 def is_gate_pending(tasks: Tasks, task_id: str) -> bool:

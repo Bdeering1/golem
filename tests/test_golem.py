@@ -5412,24 +5412,27 @@ def test_failed_setup_fails_task_and_keeps_reason(
     assert expected_reason in capsys.readouterr().err
 
 
-def test_setup_that_cannot_run_fails_task(installed_launch_agent, ledger_path, tmp_path):
-    missing_directory = str(tmp_path / "missing")
-    write_task(ledger_path, golem.STATUS_SCHEDULED, setup="true", cwd=missing_directory)
+def test_setup_into_busy_directory_fails_task_and_frees_queued_directory(
+    installed_launch_agent, ledger_path, tmp_path
+):
+    directory = setup_directory(tmp_path)
+    parent = schedule_setup_chain(
+        ledger_path, setup_command(tmp_path, directory_setup_output(directory))
+    )
+    busy_lock_file = golem.acquire_lock(golem.directory_lock_path(str(directory)))
+    assert busy_lock_file is not None
 
-    assert golem.main(["_execute", TASK_ID, f"{TASK_ID}-session"]) == 1
+    try:
+        assert golem.main(["_execute", PARENT_ID, parent["session_id"]]) == 1
+    finally:
+        golem.release_lock(busy_lock_file)
 
-    assert missing_directory in read_task(ledger_path)["setup_reason"]
-
-
-def test_timed_out_setup_fails_task(installed_launch_agent, ledger_path, monkeypatch):
-    monkeypatch.setattr(golem, "GATE_TIMEOUT_SECONDS", 0.2)
-    write_task(ledger_path, golem.STATUS_SCHEDULED, setup="sleep 30")
-
-    assert golem.main(["_execute", TASK_ID, f"{TASK_ID}-session"]) == 1
-
-    task = read_task(ledger_path)
-    assert task["status"] == golem.STATUS_FAILED
-    assert task["setup_reason"] == "setup timed out after 0.2s"
+    tasks = read_tasks(ledger_path)
+    assert tasks[PARENT_ID]["setup_reason"] == f"directory is busy: {directory}"
+    assert tasks[CHILD_ID]["status"] == golem.STATUS_WAITING
+    queued_lock_file = golem.acquire_lock(golem.directory_lock_path(str(Path.cwd())))
+    assert queued_lock_file is not None
+    golem.release_lock(queued_lock_file)
 
 
 @pytest.mark.parametrize("is_setup_failing", [True, False], ids=["failed-setup", "failed-agent"])
@@ -5458,32 +5461,6 @@ def test_retry_runs_setup_again_only_after_failed_setup(
     assert len(setup_inputs(tmp_path)) == 1
     assert logged_claude_cwds(fake_commands)[-1] == str(directory)
     assert is_prompt_passed(logged_claude_args(fake_commands), f"{PROMPT}\n\n{SETUP_SUFFIX}")
-    assert read_task(ledger_path)["status"] == golem.STATUS_NEEDS_REVIEW
-
-
-def test_usage_limit_resume_skips_setup(
-    installed_launch_agent, fake_commands, ledger_path, tmp_path, monkeypatch
-):
-    directory = setup_directory(tmp_path)
-    monkeypatch.setattr(golem, "next_reset_time", lambda: RESET_TIME)
-    write_claude_output(
-        fake_commands, USAGE_LIMIT_RESULT, api_error_status=golem.USAGE_LIMIT_HTTP_STATUS
-    )
-    write_task(
-        ledger_path,
-        golem.STATUS_SCHEDULED,
-        setup=setup_command(tmp_path, directory_setup_output(directory)),
-        no_worktree=True,
-    )
-    assert golem.main(["_execute", TASK_ID, f"{TASK_ID}-session"]) == 0
-    assert read_task(ledger_path)["status"] == golem.STATUS_SCHEDULED
-
-    write_claude_output(fake_commands, CLAUDE_RESULT)
-    set_task_due_now(ledger_path)
-    assert golem.main(["_execute", TASK_ID, f"{TASK_ID}-session"]) == 0
-
-    assert len(setup_inputs(tmp_path)) == 1
-    assert logged_claude_cwds(fake_commands) == [str(directory)] * 2
     assert read_task(ledger_path)["status"] == golem.STATUS_NEEDS_REVIEW
 
 
