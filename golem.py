@@ -118,6 +118,9 @@ CLAUDE_LOCK_PATTERN = re.compile(r"claude session (\S+) \(pid (\d+) start .+\)")
 PRUNE_IDLE_DAYS = 7
 PULL_REQUEST_TIMEOUT_SECONDS = 30
 GATE_TIMEOUT_SECONDS = 300
+SETUP_OUTPUT_ERROR = (
+    "setup output must be a JSON object with optional string directory and prompt_suffix"
+)
 HOOK_GATE_TIMEOUT_SECONDS = 20
 HOOK_STOP_TIMEOUT_SECONDS = 30
 HOOK_ARGUMENT_STOP = "stop"
@@ -164,6 +167,9 @@ class Task(TypedDict):
     no_worktree: NotRequired[bool]
     gate: NotRequired[str]
     gate_reason: NotRequired[str]
+    setup: NotRequired[str]
+    setup_complete: NotRequired[bool]
+    setup_reason: NotRequired[str]
 
 
 class WorktreeResource(TypedDict):
@@ -211,6 +217,7 @@ class Arguments(argparse.Namespace):
     auto_pickup: bool
     no_worktree: bool
     gate: str | None
+    setup: str | None
     force: bool
     event: str
     ids: list[str]
@@ -1321,6 +1328,7 @@ class RunPlacement:
     is_auto_pickup: bool = False
     is_no_worktree: bool = False
     gate: str | None = None
+    setup: str | None = None
 
 
 def new_task_record(
@@ -1349,6 +1357,8 @@ def new_task_record(
         record["no_worktree"] = True
     if placement.gate is not None:
         record["gate"] = placement.gate
+    if placement.setup is not None:
+        record["setup"] = placement.setup
     if when is not None:
         record["status"] = STATUS_SCHEDULED
         record["due_at"] = when.isoformat()
@@ -1364,6 +1374,7 @@ def new_follow_up_records(
 ) -> Tasks:
     records: Tasks = {}
     previous_task_id = run_task_id
+    placement = replace(placement, setup=None)
     for task_id, prompt in follow_ups:
         if task_id == run_task_id or task_id in records:
             raise SystemExit(f"golem: task ID used more than once: {task_id}")
@@ -1497,6 +1508,11 @@ def show_task_result(task_id: str) -> int:
     task = tasks[task_id]
     if "gate_reason" in task:
         print(f"golem: gate stopped: {task['gate_reason']}", file=sys.stderr)
+    if "setup_reason" in task:
+        print(f"golem: setup failed: {task['setup_reason']}", file=sys.stderr)
+    if task.get("setup_complete"):
+        print(f"golem: directory: {task['cwd']}", file=sys.stderr)
+        print(f"golem: prompt:\n{task['prompt']}", file=sys.stderr)
     result = task.get("result")
     if not isinstance(result, str):
         raise SystemExit(f"golem: task has no result: {task_id}")
@@ -1631,7 +1647,7 @@ def list_tasks() -> int:
             display_directory(task["cwd"]),
             display_due_at(task["due_at"], today) if "due_at" in task else "",
             task.get("after", "") if task["status"] == STATUS_WAITING else "",
-            first_line(task.get("gate_reason", "")),
+            first_line(task.get("gate_reason") or task.get("setup_reason", "")),
         )
         for task_id, task in tasks.items()
     ]
@@ -2239,42 +2255,140 @@ def gate_input_json(task_id: str, task: Task) -> str:
     )
 
 
-def gate_stop_reason(task_id: str, task: Task, timeout_seconds: int | None = None) -> str | None:
-    gate = task.get("gate")
-    if gate is None:
-        return None
-    if timeout_seconds is None:
-        timeout_seconds = GATE_TIMEOUT_SECONDS
-    # A file, not a pipe: a background process the gate starts can hold stderr open after it exits.
-    with tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as stderr_file:
+def shell_command_outcome(
+    command: str, label: str, task: Task, input_json: str, timeout_seconds: float
+) -> tuple[str | None, str]:
+    # Files, not pipes: a background process the command starts can hold them open after it exits.
+    with (
+        tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as stdout_file,
+        tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as stderr_file,
+    ):
         try:
-            gate_process = subprocess.Popen(
-                ["/bin/sh", "-c", gate],
+            process = subprocess.Popen(
+                ["/bin/sh", "-c", command],
                 cwd=task_directory(task),
                 env=task_environment(task),
                 stdin=subprocess.PIPE,
-                stdout=subprocess.DEVNULL,
+                stdout=stdout_file,
                 stderr=stderr_file,
                 encoding="utf-8",
                 errors="replace",
                 process_group=0,
             )
         except OSError as error:
-            return str(error)
-        with gate_process:
+            return str(error), ""
+        with process:
             try:
-                gate_process.communicate(gate_input_json(task_id, task), timeout=timeout_seconds)
+                process.communicate(input_json, timeout=timeout_seconds)
             except subprocess.TimeoutExpired:
-                return f"gate timed out after {timeout_seconds}s"
+                return f"{label} timed out after {timeout_seconds}s", ""
             finally:
                 # Unreaped, so the group ID is still ours; macOS fails with EPERM once only zombies remain.
-                if gate_process.returncode is None:
+                if process.returncode is None:
                     with suppress(OSError):
-                        os.killpg(gate_process.pid, signal.SIGKILL)
-        if gate_process.returncode == 0:
-            return None
+                        os.killpg(process.pid, signal.SIGKILL)
+        stdout_file.seek(0)
+        stdout = stdout_file.read()
+        if process.returncode == 0:
+            return None, stdout
         stderr_file.seek(0)
-        return stderr_file.read().strip() or f"gate exited with status {gate_process.returncode}"
+        reason = stderr_file.read().strip() or f"{label} exited with status {process.returncode}"
+        return reason, stdout
+
+
+def gate_stop_reason(task_id: str, task: Task, timeout_seconds: int | None = None) -> str | None:
+    gate = task.get("gate")
+    if gate is None:
+        return None
+    if timeout_seconds is None:
+        timeout_seconds = GATE_TIMEOUT_SECONDS
+    stop_reason, _ = shell_command_outcome(
+        gate, "gate", task, gate_input_json(task_id, task), timeout_seconds
+    )
+    return stop_reason
+
+
+def setup_input_json(task_id: str, task: Task) -> str:
+    return json.dumps(
+        {
+            "task_id": task_id,
+            "session_id": task["session_id"] if task_backend(task) == BACKEND_CLAUDE else None,
+            "directory": task_directory(task),
+            "prompt": task["prompt"],
+        }
+    )
+
+
+def setup_directory_and_prompt(task_id: str, task: Task, setup: str) -> tuple[str, str] | str:
+    failure_reason, stdout = shell_command_outcome(
+        setup, "setup", task, setup_input_json(task_id, task), GATE_TIMEOUT_SECONDS
+    )
+    if failure_reason is not None:
+        return failure_reason
+    try:
+        output = cast("object", json.loads(stdout))
+    except json.JSONDecodeError as error:
+        return f"setup output is not valid JSON: {error}"
+    if not isinstance(output, dict):
+        return SETUP_OUTPUT_ERROR
+    setup_output = cast("JsonObject", output)
+    directory = setup_output.get("directory")
+    prompt_suffix = setup_output.get("prompt_suffix")
+    if not isinstance(directory, str | None) or not isinstance(prompt_suffix, str | None):
+        return SETUP_OUTPUT_ERROR
+    if directory is not None:
+        directory = resolved_path(str(Path(task["cwd"], directory)))
+        if not Path(directory).is_dir():
+            return f"setup directory does not exist: {directory}"
+    prompt = task["prompt"] if prompt_suffix is None else f"{task['prompt']}\n\n{prompt_suffix}"
+    return directory or task["cwd"], prompt
+
+
+def fail_setup(task_id: str, reason: str) -> None:
+    with locked_tasks() as tasks:
+        task = tasks.get(task_id)
+        if task is None or task.get("status") != STATUS_RUNNING:
+            return
+        task["status"] = STATUS_FAILED
+        task["setup_reason"] = reason
+
+
+def record_setup(task_id: str, directory: str, prompt: str) -> None:
+    with locked_tasks() as tasks:
+        task = tasks.get(task_id)
+        if task is None:
+            return
+        task["cwd"] = directory
+        task["prompt"] = prompt
+        task["setup_complete"] = True
+        for descendant_id in descendant_ids_with_status(tasks, task_id, set(LIST_STATUS_ORDER)):
+            tasks[descendant_id]["cwd"] = directory
+
+
+def prepared_task(
+    task_id: str, task: Task, directory_lock_file: io.TextIOWrapper
+) -> tuple[Task, io.TextIOWrapper] | None:
+    setup = task.get("setup")
+    if setup is None or task.get("setup_complete"):
+        return task, directory_lock_file
+    outcome = setup_directory_and_prompt(task_id, task, setup)
+    if isinstance(outcome, str):
+        fail_setup(task_id, outcome)
+        return None
+    directory, prompt = outcome
+    if directory_lock_path(directory) != directory_lock_path(task["cwd"]):
+        moved_lock_file = acquire_lock(directory_lock_path(directory))
+        if moved_lock_file is None:
+            fail_setup(task_id, f"directory is busy: {directory}")
+            return None
+        release_lock(directory_lock_file)
+        directory_lock_file = moved_lock_file
+    record_setup(task_id, directory, prompt)
+    prepared = task.copy()
+    prepared["cwd"] = directory
+    prepared["prompt"] = prompt
+    prepared["setup_complete"] = True
+    return prepared, directory_lock_file
 
 
 def is_gate_pending(tasks: Tasks, task_id: str) -> bool:
@@ -2587,12 +2701,17 @@ def execute_claimed_task(
 ) -> int:
     try:
         try:
-            returncode = execute_task(
-                task_id,
-                task,
-                (run_lock_file.fileno(), directory_lock_file.fileno()),
-            )
-            run_pending_gate(task_id)
+            prepared = prepared_task(task_id, task, directory_lock_file)
+            if prepared is None:
+                returncode = 1
+            else:
+                task, directory_lock_file = prepared
+                returncode = execute_task(
+                    task_id,
+                    task,
+                    (run_lock_file.fileno(), directory_lock_file.fileno()),
+                )
+                run_pending_gate(task_id)
         finally:
             release_lock(directory_lock_file)
         drain_dependents(task_id, task["session_id"])
@@ -3507,6 +3626,10 @@ def retry_task(task_id: str, *, is_now: bool, at_text: str | None) -> int:
             record["no_worktree"] = task["no_worktree"]
         if "gate" in task:
             record["gate"] = task["gate"]
+        if "setup" in task:
+            record["setup"] = task["setup"]
+        if "setup_complete" in task:
+            record["setup_complete"] = task["setup_complete"]
         tasks[task_id] = record
         remove_progress(task["session_id"])
         clear_worktree_release(tasks, worktrees, record)
@@ -3622,6 +3745,7 @@ def run_task_from_arguments(arguments: Arguments) -> int:
         is_auto_pickup=arguments.auto_pickup,
         is_no_worktree=arguments.no_worktree,
         gate=arguments.gate,
+        setup=arguments.setup,
     )
     has_worktree_argument = has_agent_argument(list(task_args), WORKTREE_ARGUMENTS)
     parent = load_tasks().get(arguments.after) if isinstance(arguments.after, str) else None
@@ -3633,6 +3757,8 @@ def run_task_from_arguments(arguments: Arguments) -> int:
             )
     if placement.is_no_worktree and has_worktree_argument:
         raise SystemExit("golem: --no-worktree does not accept -w/--worktree")
+    if placement.setup is not None and not placement.is_no_worktree:
+        raise SystemExit("golem: --setup requires --no-worktree")
     follow_up_records = new_follow_up_records(
         task_id,
         arguments.then,
@@ -3757,6 +3883,14 @@ def add_run_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
         help=(
             "shell command run after the task succeeds with a waiting follow-up; "
             "a non-zero exit stops the chain; follow-ups get it too"
+        ),
+    )
+    run_command.add_argument(
+        "--setup",
+        metavar="CMD",
+        help=(
+            "shell command run when the task starts; its JSON output can set the task "
+            "directory and append to the prompt; follow-ups get the directory"
         ),
     )
     run_schedule_group = run_command.add_mutually_exclusive_group()

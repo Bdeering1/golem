@@ -5276,3 +5276,309 @@ def test_delete_removes_recorded_progress(ledger_path):
 
     assert golem.main(["delete", TASK_ID]) == 0
     assert not any(path.exists() for path in paths)
+
+
+SETUP_SUFFIX = "blocked by another ticket"
+
+
+def setup_command(tmp_path, output="{}", *, exit_code=0, stderr=""):
+    log_path = tmp_path / "setup-stdin"
+    return (
+        f"cat >> {log_path}; echo >> {log_path}; printf %s {shlex.quote(output)}; "
+        f"printf %s {shlex.quote(stderr)} >&2; exit {exit_code}"
+    )
+
+
+def setup_inputs(tmp_path):
+    log_path = tmp_path / "setup-stdin"
+    if not log_path.exists():
+        return []
+    return [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines() if line]
+
+
+def setup_directory(tmp_path, name="platform"):
+    directory = tmp_path / name
+    directory.mkdir()
+    return directory
+
+
+def directory_setup_output(directory, **fields: str):
+    return json.dumps({"directory": str(directory), **fields})
+
+
+def is_prompt_passed(claude_args, prompt):
+    return f"--print\n{prompt}\n" in "\n".join(claude_args)
+
+
+def schedule_setup_chain(ledger_path, setup, *extra_arguments: str):
+    golem.main(
+        [
+            *["run", PARENT_ID, PARENT_PROMPT, "--now", "--no-worktree", "--setup", setup],
+            *["--then", CHILD_ID, CHILD_PROMPT, *extra_arguments],
+        ]
+    )
+    return read_task(ledger_path, PARENT_ID)
+
+
+@pytest.mark.parametrize("is_returning_fields", [True, False], ids=["fields", "neither"])
+def test_setup_prepares_directory_and_prompt_for_chain(
+    installed_launch_agent, fake_commands, ledger_path, tmp_path, capsys, is_returning_fields
+):
+    directory = setup_directory(tmp_path)
+    output = (
+        directory_setup_output(directory, prompt_suffix=SETUP_SUFFIX)
+        if is_returning_fields
+        else "{}"
+    )
+    expected_directory = str(directory) if is_returning_fields else str(Path.cwd())
+    expected_prompt = f"{PARENT_PROMPT}\n\n{SETUP_SUFFIX}" if is_returning_fields else PARENT_PROMPT
+    write_claude_output(fake_commands, CLAUDE_RESULT)
+    parent = schedule_setup_chain(ledger_path, setup_command(tmp_path, output))
+
+    assert golem.main(["_execute", PARENT_ID, parent["session_id"]]) == 0
+
+    tasks = read_tasks(ledger_path)
+    assert setup_inputs(tmp_path) == [
+        {
+            "task_id": PARENT_ID,
+            "session_id": parent["session_id"],
+            "directory": str(Path.cwd()),
+            "prompt": PARENT_PROMPT,
+        }
+    ]
+    assert logged_claude_cwds(fake_commands) == [expected_directory] * 2
+    assert is_prompt_passed(logged_claude_calls(fake_commands)[0], expected_prompt)
+    assert [tasks[task_id]["cwd"] for task_id in (PARENT_ID, CHILD_ID)] == [expected_directory] * 2
+    assert tasks[PARENT_ID]["prompt"] == expected_prompt
+    assert "setup" not in tasks[CHILD_ID]
+    capsys.readouterr()
+    assert golem.main(["show", PARENT_ID]) == 0
+    shown = capsys.readouterr().err
+    assert expected_directory in shown
+    assert expected_prompt in shown
+
+
+def test_setup_seeds_gate_hooks_in_returned_directory(
+    installed_launch_agent, ledger_path, tmp_path
+):
+    directory = setup_directory(tmp_path)
+    parent = schedule_setup_chain(
+        ledger_path,
+        setup_command(tmp_path, directory_setup_output(directory)),
+        "--gate",
+        "exit 1",
+    )
+
+    assert golem.main(["_execute", PARENT_ID, parent["session_id"]]) == 0
+
+    assert golem.local_settings_path(str(directory)).exists()
+    assert not golem.local_settings_path(str(Path.cwd())).exists()
+
+
+@pytest.mark.parametrize(
+    ("setup_arguments", "expected_reason"),
+    [
+        pytest.param({"exit_code": 3, "stderr": "no ticket\n"}, "no ticket", id="non-zero"),
+        pytest.param({"exit_code": 3}, "setup exited with status 3", id="non-zero-silent"),
+        pytest.param({"output": "not json"}, "setup output is not valid JSON", id="invalid-json"),
+        pytest.param({"output": "[]"}, golem.SETUP_OUTPUT_ERROR, id="not-object"),
+        pytest.param(
+            {"output": json.dumps({"directory": "missing"})},
+            "setup directory does not exist",
+            id="missing-directory",
+        ),
+    ],
+)
+def test_failed_setup_fails_task_and_keeps_reason(
+    installed_launch_agent,
+    fake_commands,
+    ledger_path,
+    tmp_path,
+    capsys,
+    setup_arguments,
+    expected_reason,
+):
+    parent = schedule_setup_chain(ledger_path, setup_command(tmp_path, **setup_arguments))
+
+    assert golem.main(["_execute", PARENT_ID, parent["session_id"]]) == 1
+
+    tasks = read_tasks(ledger_path)
+    assert tasks[PARENT_ID]["status"] == golem.STATUS_FAILED
+    assert expected_reason in tasks[PARENT_ID]["setup_reason"]
+    assert tasks[CHILD_ID]["status"] == golem.STATUS_WAITING
+    assert logged_claude_calls(fake_commands) == []
+    assert expected_reason in list_row(list_output(capsys), PARENT_ID)
+    with contextlib.suppress(SystemExit):
+        golem.main(["show", PARENT_ID])
+    assert expected_reason in capsys.readouterr().err
+
+
+def test_setup_that_cannot_run_fails_task(installed_launch_agent, ledger_path, tmp_path):
+    missing_directory = str(tmp_path / "missing")
+    write_task(ledger_path, golem.STATUS_SCHEDULED, setup="true", cwd=missing_directory)
+
+    assert golem.main(["_execute", TASK_ID, f"{TASK_ID}-session"]) == 1
+
+    assert missing_directory in read_task(ledger_path)["setup_reason"]
+
+
+def test_timed_out_setup_fails_task(installed_launch_agent, ledger_path, monkeypatch):
+    monkeypatch.setattr(golem, "GATE_TIMEOUT_SECONDS", 0.2)
+    write_task(ledger_path, golem.STATUS_SCHEDULED, setup="sleep 30")
+
+    assert golem.main(["_execute", TASK_ID, f"{TASK_ID}-session"]) == 1
+
+    task = read_task(ledger_path)
+    assert task["status"] == golem.STATUS_FAILED
+    assert task["setup_reason"] == "setup timed out after 0.2s"
+
+
+@pytest.mark.parametrize(
+    ("is_setup_failing", "expected_setup_count"),
+    [pytest.param(True, 2, id="failed-setup"), pytest.param(False, 1, id="failed-agent")],
+)
+def test_retry_runs_setup_again_only_after_failed_setup(
+    installed_launch_agent,
+    fake_commands,
+    ledger_path,
+    tmp_path,
+    monkeypatch,
+    is_setup_failing,
+    expected_setup_count,
+):
+    directory = setup_directory(tmp_path)
+    passing_setup = setup_command(
+        tmp_path, directory_setup_output(directory, prompt_suffix=SETUP_SUFFIX)
+    )
+    first_setup = setup_command(tmp_path, exit_code=1) if is_setup_failing else passing_setup
+    write_task(ledger_path, golem.STATUS_SCHEDULED, setup=first_setup, no_worktree=True)
+    if not is_setup_failing:
+        monkeypatch.setenv("GOLEM_CLAUDE_EXIT", "1")
+    assert golem.main(["_execute", TASK_ID, f"{TASK_ID}-session"]) == 1
+    if is_setup_failing:
+        tasks = read_tasks(ledger_path)
+        tasks[TASK_ID]["setup"] = passing_setup
+        write_tasks(ledger_path, tasks)
+    monkeypatch.delenv("GOLEM_CLAUDE_EXIT", raising=False)
+
+    assert golem.main(["retry", TASK_ID, "--now"]) == 0
+    assert golem.main(["_execute", TASK_ID, read_task(ledger_path)["session_id"]]) == 0
+
+    assert len(setup_inputs(tmp_path)) == expected_setup_count
+    assert logged_claude_cwds(fake_commands)[-1] == str(directory)
+    assert is_prompt_passed(logged_claude_args(fake_commands), f"{PROMPT}\n\n{SETUP_SUFFIX}")
+    assert read_task(ledger_path)["status"] == golem.STATUS_NEEDS_REVIEW
+
+
+def test_usage_limit_resume_skips_setup(
+    installed_launch_agent, fake_commands, ledger_path, tmp_path, monkeypatch
+):
+    directory = setup_directory(tmp_path)
+    monkeypatch.setattr(golem, "next_reset_time", lambda: RESET_TIME)
+    write_claude_output(
+        fake_commands, USAGE_LIMIT_RESULT, api_error_status=golem.USAGE_LIMIT_HTTP_STATUS
+    )
+    write_task(
+        ledger_path,
+        golem.STATUS_SCHEDULED,
+        setup=setup_command(tmp_path, directory_setup_output(directory)),
+        no_worktree=True,
+    )
+    assert golem.main(["_execute", TASK_ID, f"{TASK_ID}-session"]) == 0
+    assert read_task(ledger_path)["status"] == golem.STATUS_SCHEDULED
+
+    write_claude_output(fake_commands, CLAUDE_RESULT)
+    set_task_due_now(ledger_path)
+    assert golem.main(["_execute", TASK_ID, f"{TASK_ID}-session"]) == 0
+
+    assert len(setup_inputs(tmp_path)) == 1
+    assert logged_claude_cwds(fake_commands) == [str(directory)] * 2
+    assert read_task(ledger_path)["status"] == golem.STATUS_NEEDS_REVIEW
+
+
+def test_setups_in_one_directory_run_one_at_a_time(
+    installed_launch_agent, ledger_path, tmp_path, monkeypatch
+):
+    setup_started_path = tmp_path / "setup-started"
+    setup_hold_path = tmp_path / "setup-hold"
+    agent_hold_path = tmp_path / "agent-hold"
+    agent_started_path = tmp_path / "agent-started"
+    setup_hold_path.touch()
+    agent_hold_path.touch()
+    monkeypatch.setenv("GOLEM_CLAUDE_HOLD", str(agent_hold_path))
+    monkeypatch.setenv("GOLEM_CLAUDE_STARTED", str(agent_started_path))
+    held_directory = setup_directory(tmp_path, "held")
+    sibling_directory = setup_directory(tmp_path, "sibling")
+    held_setup = (
+        f"touch {setup_started_path}; while [ -e {setup_hold_path} ]; do sleep 0.05; done; "
+        f"printf %s {shlex.quote(directory_setup_output(held_directory))}"
+    )
+    sibling_setup = setup_command(tmp_path, directory_setup_output(sibling_directory))
+    write_tasks(
+        ledger_path,
+        {
+            PARENT_ID: task_record(
+                golem.STATUS_SCHEDULED, task_id=PARENT_ID, setup=held_setup, no_worktree=True
+            ),
+            SIBLING_ID: task_record(
+                golem.STATUS_SCHEDULED,
+                task_id=SIBLING_ID,
+                setup=sibling_setup,
+                no_worktree=True,
+                environment={"PATH": os.environ["PATH"], "GOLEM_CLAUDE_HOLD": ""},
+            ),
+        },
+    )
+    held_executor = golem.subprocess.Popen(
+        [sys.executable, golem.__file__, "_execute", PARENT_ID, PARENT_SESSION]
+    )
+    try:
+        wait_until(setup_started_path.exists)
+        assert golem.main(["_execute", SIBLING_ID, f"{SIBLING_ID}-session"]) == 0
+        assert read_task(ledger_path, SIBLING_ID)["status"] == golem.STATUS_SCHEDULED
+        assert setup_inputs(tmp_path) == []
+
+        setup_hold_path.unlink()
+        wait_until(agent_started_path.exists)
+        assert golem.main(["_execute", SIBLING_ID, f"{SIBLING_ID}-session"]) == 0
+        assert read_task(ledger_path, SIBLING_ID)["cwd"] == str(sibling_directory)
+    finally:
+        setup_hold_path.unlink(missing_ok=True)
+        agent_hold_path.unlink(missing_ok=True)
+        held_executor.wait(timeout=15)
+    assert read_task(ledger_path, PARENT_ID)["cwd"] == str(held_directory)
+
+
+def test_codex_task_gets_setup_directory_and_suffix(
+    installed_launch_agent, fake_commands, ledger_path, tmp_path
+):
+    directory = setup_directory(tmp_path)
+    setup = setup_command(tmp_path, directory_setup_output(directory, prompt_suffix=SETUP_SUFFIX))
+    golem.main(
+        ["run", TASK_ID, PROMPT, "--backend", "codex", "--now", "--no-worktree", "--setup", setup]
+    )
+
+    assert golem.main(["_execute", TASK_ID, read_task(ledger_path)["session_id"]]) == 0
+
+    assert setup_inputs(tmp_path)[0]["session_id"] is None
+    assert fake_commands["codex-cwd"].read_text(encoding="utf-8").splitlines()[-1] == str(directory)
+    assert (
+        fake_commands["codex-stdin"]
+        .read_text(encoding="utf-8")
+        .endswith(f"{PROMPT}\n\n{SETUP_SUFFIX}\x1e\n")
+    )
+
+
+def test_setup_requires_no_worktree(installed_launch_agent, ledger_path):
+    with pytest.raises(SystemExit, match="--setup requires --no-worktree"):
+        golem.main(["run", TASK_ID, PROMPT, "--now", "--setup", "true"])
+
+    assert not ledger_path.exists()
+
+
+def test_alias_fills_setup_placeholders(installed_launch_agent, ledger_path):
+    write_aliases({"platform": 'run {1} "{2}" --no-worktree --setup "make-platform {1}"'})
+
+    assert golem.main(["platform", TASK_ID, PROMPT, "--now"]) == 0
+
+    assert read_task(ledger_path)["setup"] == f"make-platform {TASK_ID}"
