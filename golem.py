@@ -1646,10 +1646,10 @@ def notify(title: str, message: str) -> None:
 
 
 def notify_task(task_id: str, task: Task, outcome: str) -> None:
-    result = (
+    summary = (
         task.get("gate_reason", "") if outcome == OUTCOME_GATE_STOPPED else task.get("result", "")
     )
-    message = first_line(result) or first_line(task["prompt"])
+    message = first_line(summary) or first_line(task["prompt"])
     notify(f"golem: {task_id} {outcome}", message[:NOTIFICATION_MESSAGE_MAX_LENGTH])
 
 

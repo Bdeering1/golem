@@ -559,22 +559,21 @@ def logged_claude_args(fake_commands):
     return calls[-1] if calls else []
 
 
-def logged_osascript_calls(fake_commands):
+def logged_calls(fake_commands, command):
     calls: list[list[str]] = []
-    for call in fake_commands["osascript-args"].read_text(encoding="utf-8").split("\x1e\n"):
+    for call in fake_commands[f"{command}-args"].read_text(encoding="utf-8").split("\x1e\n"):
         arguments = call.splitlines()
         if arguments:
             calls.append(arguments)
     return calls
+
+
+def logged_osascript_calls(fake_commands):
+    return logged_calls(fake_commands, "osascript")
 
 
 def logged_codex_calls(fake_commands):
-    calls: list[list[str]] = []
-    for call in fake_commands["codex-args"].read_text(encoding="utf-8").split("\x1e\n"):
-        arguments = call.splitlines()
-        if arguments:
-            calls.append(arguments)
-    return calls
+    return logged_calls(fake_commands, "codex")
 
 
 def logged_codex_args(fake_commands):
@@ -1447,7 +1446,9 @@ def test_finished_task_notifies_with_result(
 
     assert golem.main(["_execute", TASK_ID, task["session_id"]]) == exit_code
 
-    assert logged_osascript_calls(fake_commands)[0][-2:] == [title, "finished the task"]
+    assert [call[-2:] for call in logged_osascript_calls(fake_commands)] == [
+        [title, "finished the task"]
+    ]
 
 
 def test_only_final_chain_task_notifies_when_ready_for_review(
@@ -1473,6 +1474,19 @@ def test_failed_notification_delivery_keeps_task_failed(ledger_path, monkeypatch
 
     assert golem.execute_task(TASK_ID, read_task(ledger_path), ()) == 1
     assert read_task(ledger_path)["status"] == golem.STATUS_FAILED
+
+
+def test_scheduled_task_with_missing_worktree_notifies_failure(
+    fake_commands, ledger_path, tmp_path
+):
+    missing_worktree = tmp_path / "missing"
+    write_task(ledger_path, golem.STATUS_SCHEDULED, worktree=str(missing_worktree))
+
+    assert golem.main(["_execute", TASK_ID, read_task(ledger_path)["session_id"]]) == 0
+    assert read_task(ledger_path)["status"] == golem.STATUS_FAILED
+    assert [call[-2:] for call in logged_osascript_calls(fake_commands)] == [
+        [f"golem: {TASK_ID} failed", f"golem: worktree is missing: {missing_worktree}"]
+    ]
 
 
 def test_auto_pickup_waits_for_usage_limit_resume(
@@ -1897,9 +1911,8 @@ def test_failing_gate_stops_chain_with_its_stderr_as_reason(
     assert tasks[PARENT_ID]["gate_reason"] == GATE_REASON
     assert tasks[CHILD_ID]["status"] == golem.STATUS_WAITING
     assert len(logged_claude_calls(fake_commands)) == 1
-    assert logged_osascript_calls(fake_commands)[0][-2:] == [
-        f"golem: {PARENT_ID} stopped at gate",
-        GATE_REASON,
+    assert [call[-2:] for call in logged_osascript_calls(fake_commands)] == [
+        [f"golem: {PARENT_ID} stopped at gate", GATE_REASON]
     ]
     assert golem.run_launch_agent_pass() == []
     assert not golem.has_pending_tasks(tasks)
@@ -3124,9 +3137,8 @@ def test_executor_death_keeps_task_running_until_claude_exits(
         wait_until(lambda: golem.is_run_lock_free(task["session_id"]))
         golem.run_launch_agent_pass()
         assert read_task(ledger_path)["status"] == golem.STATUS_FAILED
-        assert logged_osascript_calls(fake_commands)[0][-2:] == [
-            f"golem: {TASK_ID} failed",
-            PROMPT,
+        assert [call[-2:] for call in logged_osascript_calls(fake_commands)] == [
+            [f"golem: {TASK_ID} failed", PROMPT]
         ]
     finally:
         hold_path.unlink(missing_ok=True)
