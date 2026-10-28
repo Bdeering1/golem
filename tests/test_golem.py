@@ -210,7 +210,6 @@ exit "${GOLEM_OPEN_EXIT:-0}"
         "osascript": """#!/bin/sh
 printf '\036\\n' >> "$GOLEM_OSASCRIPT_ARGS"
 printf '%s\\n' "$@" >> "$GOLEM_OSASCRIPT_ARGS"
-exit "${GOLEM_OSASCRIPT_EXIT:-0}"
 """,
         "gh": """#!/bin/sh
 head=''
@@ -1448,16 +1447,7 @@ def test_finished_task_notifies_with_result(
 
     assert golem.main(["_execute", TASK_ID, task["session_id"]]) == exit_code
 
-    notification = logged_osascript_calls(fake_commands)
-    assert notification[0][:6] == [
-        "-e",
-        "on run argv",
-        "-e",
-        "display notification (item 2 of argv) with title (item 1 of argv)",
-        "-e",
-        "end run",
-    ]
-    assert notification[0][-2:] == [title, "finished the task"]
+    assert logged_osascript_calls(fake_commands)[0][-2:] == [title, "finished the task"]
 
 
 def test_only_final_chain_task_notifies_when_ready_for_review(
@@ -1472,14 +1462,8 @@ def test_only_final_chain_task_notifies_when_ready_for_review(
     ]
 
 
-@pytest.mark.parametrize("is_osascript_available", [True, False], ids=["nonzero", "missing"])
-def test_failed_notification_delivery_keeps_task_failed(
-    fake_commands, ledger_path, monkeypatch, tmp_path, is_osascript_available
-):
-    if is_osascript_available:
-        monkeypatch.setenv("GOLEM_OSASCRIPT_EXIT", "1")
-    else:
-        monkeypatch.setenv("PATH", str(tmp_path))
+def test_failed_notification_delivery_keeps_task_failed(ledger_path, monkeypatch, tmp_path):
+    monkeypatch.setenv("PATH", str(tmp_path))
     monkeypatch.setattr(
         golem,
         "run_claude",

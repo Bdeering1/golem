@@ -70,6 +70,9 @@ CODEX_SUBSCRIPTION_ERROR = (
 USAGE_TIMEOUT_SECONDS = 30
 NOTIFY_TIMEOUT_SECONDS = 5
 NOTIFICATION_MESSAGE_MAX_LENGTH = 200
+OUTCOME_NEEDS_REVIEW = "needs review"
+OUTCOME_FAILED = "failed"
+OUTCOME_GATE_STOPPED = "stopped at gate"
 GIT_FETCH_TIMEOUT_SECONDS = 5
 GIT_FETCH_MAX_AGE_SECONDS = 24 * 60 * 60
 ORIGIN_HEAD = "refs/remotes/origin/HEAD"
@@ -1643,9 +1646,16 @@ def notify(title: str, message: str) -> None:
 
 
 def notify_task(task_id: str, task: Task, outcome: str) -> None:
-    result = task.get("gate_reason", "") if outcome == "stopped at gate" else task.get("result", "")
+    result = (
+        task.get("gate_reason", "") if outcome == OUTCOME_GATE_STOPPED else task.get("result", "")
+    )
     message = first_line(result) or first_line(task["prompt"])
     notify(f"golem: {task_id} {outcome}", message[:NOTIFICATION_MESSAGE_MAX_LENGTH])
+
+
+def notify_failed_tasks(failed_tasks: list[tuple[str, Task]]) -> None:
+    for task_id, task in failed_tasks:
+        notify_task(task_id, task, OUTCOME_FAILED)
 
 
 def list_tasks() -> int:
@@ -2202,8 +2212,7 @@ def claim_next_dependent(
                 break
             if tasks[dependent_id]["status"] == STATUS_WAITING:
                 break
-    for failed_task_id, failed_task in failed_claims:
-        notify_task(failed_task_id, failed_task, "failed")
+    notify_failed_tasks(failed_claims)
     return claimed_task
 
 
@@ -2264,9 +2273,9 @@ def execute_task(task_id: str, task: Task, lock_file_descriptors: tuple[int, ...
     stored_task = tasks.get(task_id)
     if stored_task is not None:
         if stored_task.get("status") == STATUS_FAILED:
-            notify_task(task_id, stored_task, "failed")
+            notify_task(task_id, stored_task, OUTCOME_FAILED)
         elif is_ready_for_review(tasks, task_id):
-            notify_task(task_id, stored_task, "needs review")
+            notify_task(task_id, stored_task, OUTCOME_NEEDS_REVIEW)
     return returncode
 
 
@@ -2356,7 +2365,7 @@ def run_pending_gate(task_id: str) -> None:
         directory = task_directory(current)
         stopped_task = current.copy()
     sync_hooks(directory)
-    notify_task(task_id, stopped_task, "stopped at gate")
+    notify_task(task_id, stopped_task, OUTCOME_GATE_STOPPED)
 
 
 def continue_task(task_id: str, *, is_forced: bool) -> int:
@@ -2653,8 +2662,7 @@ def execute_scheduled_task(task_id: str, session_id: str) -> int:
     failed_claims: list[tuple[str, Task]] = []
     with locked_ledger() as (tasks, worktrees):
         claim = claim_task(tasks, worktrees, task_id, session_id, STATUS_SCHEDULED, failed_claims)
-    for failed_task_id, failed_task in failed_claims:
-        notify_task(failed_task_id, failed_task, "failed")
+    notify_failed_tasks(failed_claims)
     if claim is None:
         return 0
     return execute_claimed_task(task_id, *claim)
@@ -2996,8 +3004,7 @@ def run_launch_agent_pass() -> list[subprocess.Popen[bytes]]:
                 due_tasks.append((task_id, task.copy()))
     for directory in hook_directories:
         sync_hooks(directory)
-    for failed_task_id, failed_task in failed_tasks:
-        notify_task(failed_task_id, failed_task, "failed")
+    notify_failed_tasks(failed_tasks)
     processes: list[subprocess.Popen[bytes]] = []
     for task_id, task in due_tasks:
         processes.append(start_task_executor(task_id, task))
