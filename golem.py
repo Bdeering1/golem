@@ -2355,7 +2355,10 @@ def setup_directory_and_prompt(task_id: str, task: Task, setup: str) -> tuple[st
     if not isinstance(directory, str | None) or not isinstance(prompt_suffix, str | None):
         raise SetupError(SETUP_OUTPUT_ERROR)
     if directory is not None:
-        directory = resolved_path(str(Path(task["cwd"], Path(directory).expanduser())))
+        try:
+            directory = resolved_path(str(Path(task["cwd"], Path(directory).expanduser())))
+        except (OSError, RuntimeError, ValueError) as error:
+            raise SetupError(f"setup directory is not usable: {error}") from error
         if not Path(directory).is_dir():
             raise SetupError(f"setup directory does not exist: {directory}")
     prompt = task["prompt"] if prompt_suffix is None else f"{task['prompt']}\n\n{prompt_suffix}"
@@ -2384,7 +2387,7 @@ def record_setup(task_id: str, directory: str, prompt: str) -> Task | None:
         return stored_task.copy()
 
 
-def prepared_task(
+def run_setup(
     task_id: str, task: Task, directory_lock_file: io.TextIOWrapper
 ) -> tuple[Task, io.TextIOWrapper] | None:
     setup = task.get("setup")
@@ -2720,7 +2723,7 @@ def execute_claimed_task(
 ) -> int:
     try:
         try:
-            prepared = prepared_task(task_id, task, directory_lock_file)
+            prepared = run_setup(task_id, task, directory_lock_file)
             if prepared is None:
                 returncode = 1
             else:

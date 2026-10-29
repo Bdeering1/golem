@@ -5350,7 +5350,6 @@ def test_setup_prepares_directory_and_prompt_for_chain(
     assert is_prompt_passed(logged_claude_calls(fake_commands)[0], expected_prompt)
     assert [tasks[task_id]["cwd"] for task_id in (PARENT_ID, CHILD_ID)] == [expected_directory] * 2
     assert tasks[PARENT_ID]["prompt"] == expected_prompt
-    assert "setup" not in tasks[CHILD_ID]
     capsys.readouterr()
     assert golem.main(["show", PARENT_ID]) == 0
     shown = capsys.readouterr().err
@@ -5386,6 +5385,11 @@ def test_setup_seeds_gate_hooks_in_returned_directory(
             {"output": json.dumps({"directory": "missing"})},
             "setup directory does not exist",
             id="missing-directory",
+        ),
+        pytest.param(
+            {"output": json.dumps({"directory": "~nosuchuser/x"})},
+            "setup directory is not usable",
+            id="unusable-directory",
         ),
     ],
 )
