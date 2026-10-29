@@ -5433,7 +5433,7 @@ def test_timed_out_setup_fails_task(installed_launch_agent, ledger_path, monkeyp
 
     task = read_task(ledger_path)
     assert task["status"] == golem.STATUS_FAILED
-    assert task["setup_reason"] == "setup timed out after 0.2s"
+    assert task["setup_reason"] == "setup failed: setup timed out after 0.2s"
 
 
 def test_usage_limit_resume_skips_setup(
@@ -5513,7 +5513,7 @@ def test_retry_runs_setup_again_only_after_failed_setup(
     if failure == "busy-directory":
         monkeypatch.setattr(golem, "MAX_SETUP_BUSY_RETRIES", 0)
         assert execute_with_busy_directory(directory, TASK_ID, f"{TASK_ID}-session") == 1
-        assert read_task(ledger_path)["setup_reason"] == f"directory is busy: {directory}"
+        assert read_task(ledger_path)["setup_reason"] == f"setup directory stayed busy: {directory}"
     else:
         assert golem.main(["_execute", TASK_ID, f"{TASK_ID}-session"]) == 1
     monkeypatch.delenv("GOLEM_CLAUDE_FAIL_TASK", raising=False)

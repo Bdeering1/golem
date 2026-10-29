@@ -1514,7 +1514,7 @@ def show_task_result(task_id: str) -> int:
     if "gate_reason" in task:
         print(f"golem: gate stopped: {task['gate_reason']}", file=sys.stderr)
     if "setup_reason" in task:
-        print(f"golem: setup failed: {task['setup_reason']}", file=sys.stderr)
+        print(f"golem: {task['setup_reason']}", file=sys.stderr)
         return 1
     if task.get("setup_complete"):
         print(f"golem: directory: {task['cwd']}", file=sys.stderr)
@@ -2375,7 +2375,7 @@ def fail_setup(task_id: str, reason: str) -> None:
         if task is None or task.get("status") != STATUS_RUNNING:
             return
         task["status"] = STATUS_FAILED
-        task["setup_reason"] = reason
+        task["setup_reason"] = f"setup failed: {reason}"
 
 
 def record_setup(task_id: str, directory: str, prompt: str) -> Task | None:
@@ -2403,7 +2403,7 @@ def requeue_busy_setup(task_id: str, directory: str, prompt: str) -> None:
         retry_count = task.get("setup_busy_retry_count", 0)
         if retry_count >= MAX_SETUP_BUSY_RETRIES:
             task["status"] = STATUS_FAILED
-            task["setup_reason"] = f"directory is busy: {directory}"
+            task["setup_reason"] = f"setup directory stayed busy: {directory}"
             return
         task["setup_busy_retry_count"] = retry_count + 1
         task["status"] = STATUS_SCHEDULED
