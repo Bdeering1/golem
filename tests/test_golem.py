@@ -5416,47 +5416,60 @@ def test_failed_setup_fails_task_and_keeps_reason(
     assert expected_reason in capsys.readouterr().err
 
 
-def test_setup_into_busy_directory_fails_task_and_frees_queued_directory(
-    installed_launch_agent, ledger_path, tmp_path
-):
-    directory = setup_directory(tmp_path)
-    parent = schedule_setup_chain(
-        ledger_path, setup_command(tmp_path, directory_setup_output(directory))
-    )
+def execute_with_busy_directory(directory, task_id, session_id):
     busy_lock_file = golem.acquire_lock(golem.directory_lock_path(str(directory)))
     assert busy_lock_file is not None
-
     try:
-        assert golem.main(["_execute", PARENT_ID, parent["session_id"]]) == 1
+        return golem.main(["_execute", task_id, session_id])
     finally:
         golem.release_lock(busy_lock_file)
 
-    tasks = read_tasks(ledger_path)
-    assert tasks[PARENT_ID]["setup_reason"] == f"directory is busy: {directory}"
-    assert tasks[CHILD_ID]["status"] == golem.STATUS_WAITING
+
+def test_setup_into_busy_directory_requeues_without_rerunning_setup(
+    installed_launch_agent, fake_commands, ledger_path, tmp_path
+):
+    directory = setup_directory(tmp_path)
+    write_claude_output(fake_commands, CLAUDE_RESULT)
+    parent = schedule_setup_chain(
+        ledger_path, setup_command(tmp_path, directory_setup_output(directory))
+    )
+
+    assert execute_with_busy_directory(directory, PARENT_ID, parent["session_id"]) == 1
+
+    assert read_task(ledger_path, PARENT_ID)["status"] == golem.STATUS_SCHEDULED
     queued_lock_file = golem.acquire_lock(golem.directory_lock_path(str(Path.cwd())))
     assert queued_lock_file is not None
     golem.release_lock(queued_lock_file)
+    set_task_due_now(ledger_path, PARENT_ID)
+    assert golem.main(["_execute", PARENT_ID, parent["session_id"]]) == 0
+
+    assert len(setup_inputs(tmp_path)) == 1
+    assert logged_claude_cwds(fake_commands) == [str(directory)] * 2
 
 
-@pytest.mark.parametrize("is_setup_failing", [True, False], ids=["failed-setup", "failed-agent"])
+@pytest.mark.parametrize("failure", ["setup", "agent", "busy-directory"])
 def test_retry_runs_setup_again_only_after_failed_setup(
     installed_launch_agent,
     fake_commands,
     ledger_path,
     tmp_path,
     monkeypatch,
-    is_setup_failing,
+    failure,
 ):
     directory = setup_directory(tmp_path)
     first_run_path = tmp_path / "first-run"
     setup = setup_command(tmp_path, directory_setup_output(directory, prompt_suffix=SETUP_SUFFIX))
-    if is_setup_failing:
+    if failure == "setup":
         setup = f"[ -e {first_run_path} ] || {{ touch {first_run_path}; exit 1; }}; {setup}"
-    else:
+    elif failure == "agent":
         monkeypatch.setenv("GOLEM_CLAUDE_FAIL_TASK", TASK_ID)
     write_task(ledger_path, golem.STATUS_SCHEDULED, setup=setup, no_worktree=True)
-    assert golem.main(["_execute", TASK_ID, f"{TASK_ID}-session"]) == 1
+    if failure == "busy-directory":
+        monkeypatch.setattr(golem, "MAX_SETUP_BUSY_RETRIES", 0)
+        assert execute_with_busy_directory(directory, TASK_ID, f"{TASK_ID}-session") == 1
+        assert read_task(ledger_path)["setup_reason"] == f"directory is busy: {directory}"
+    else:
+        assert golem.main(["_execute", TASK_ID, f"{TASK_ID}-session"]) == 1
     monkeypatch.delenv("GOLEM_CLAUDE_FAIL_TASK", raising=False)
 
     assert golem.main(["retry", TASK_ID, "--now"]) == 0

@@ -85,6 +85,8 @@ LAUNCH_AGENT_ERROR = "golem: the agent is not installed or is out of date; run g
 SETUP_OUTPUT_ERROR = (
     "setup output must be a JSON object with optional string directory and prompt_suffix"
 )
+MAX_SETUP_BUSY_RETRIES = 12
+SETUP_BUSY_RETRY_SECONDS = 300
 LAUNCH_AGENT_LABEL = "com.github.bdeering1.golem"
 LAUNCH_AGENT_INTERVAL_SECONDS = 300
 LAUNCH_AGENT_POLL_SECONDS = 10
@@ -171,6 +173,8 @@ class Task(TypedDict):
     setup: NotRequired[str]
     setup_complete: NotRequired[bool]
     setup_reason: NotRequired[str]
+    setup_directory: NotRequired[str]
+    setup_busy_retry_count: NotRequired[int]
 
 
 class WorktreeResource(TypedDict):
@@ -2387,23 +2391,44 @@ def record_setup(task_id: str, directory: str, prompt: str) -> Task | None:
         return stored_task.copy()
 
 
+def requeue_busy_setup(task_id: str, directory: str, prompt: str) -> None:
+    with locked_tasks() as tasks:
+        task = tasks.get(task_id)
+        if task is None or task.get("status") != STATUS_RUNNING:
+            return
+        task["setup_directory"] = directory
+        task["prompt"] = prompt
+        retry_count = task.get("setup_busy_retry_count", 0)
+        if retry_count >= MAX_SETUP_BUSY_RETRIES:
+            task["status"] = STATUS_FAILED
+            task["setup_reason"] = f"directory is busy: {directory}"
+            return
+        task["setup_busy_retry_count"] = retry_count + 1
+        task["status"] = STATUS_SCHEDULED
+        retry_at = datetime.now(UTC) + timedelta(seconds=SETUP_BUSY_RETRY_SECONDS)
+        task["due_at"] = retry_at.isoformat()
+
+
 def run_setup(
     task_id: str, task: Task, directory_lock_file: io.TextIOWrapper
 ) -> tuple[Task, io.TextIOWrapper] | None:
     setup = task.get("setup")
     if setup is None or task.get("setup_complete"):
         return task, directory_lock_file
-    try:
-        directory, prompt = setup_directory_and_prompt(task_id, task, setup)
-    except SetupError as error:
-        fail_setup(task_id, str(error))
-        return None
+    directory = task.get("setup_directory")
+    prompt = task["prompt"]
+    if directory is None:
+        try:
+            directory, prompt = setup_directory_and_prompt(task_id, task, setup)
+        except SetupError as error:
+            fail_setup(task_id, str(error))
+            return None
     if directory_lock_path(directory) == directory_lock_path(task["cwd"]):
         prepared = record_setup(task_id, directory, prompt)
         return None if prepared is None else (prepared, directory_lock_file)
     moved_lock_file = acquire_lock(directory_lock_path(directory))
     if moved_lock_file is None:
-        fail_setup(task_id, f"directory is busy: {directory}")
+        requeue_busy_setup(task_id, directory, prompt)
         return None
     prepared = record_setup(task_id, directory, prompt)
     if prepared is None:
@@ -3652,6 +3677,8 @@ def retry_task(task_id: str, *, is_now: bool, at_text: str | None) -> int:
             record["setup"] = task["setup"]
         if "setup_complete" in task:
             record["setup_complete"] = task["setup_complete"]
+        if "setup_directory" in task:
+            record["setup_directory"] = task["setup_directory"]
         tasks[task_id] = record
         remove_progress(task["session_id"])
         clear_worktree_release(tasks, worktrees, record)
