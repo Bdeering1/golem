@@ -68,6 +68,11 @@ CODEX_SUBSCRIPTION_ERROR = (
     "golem: Codex must be signed in with a ChatGPT subscription; run codex login"
 )
 USAGE_TIMEOUT_SECONDS = 30
+NOTIFY_TIMEOUT_SECONDS = 5
+NOTIFICATION_MESSAGE_MAX_LENGTH = 200
+OUTCOME_NEEDS_REVIEW = "needs review"
+OUTCOME_FAILED = "failed"
+OUTCOME_GATE_STOPPED = "stopped at gate"
 GIT_FETCH_TIMEOUT_SECONDS = 5
 GIT_FETCH_MAX_AGE_SECONDS = 24 * 60 * 60
 ORIGIN_HEAD = "refs/remotes/origin/HEAD"
@@ -1618,6 +1623,41 @@ def first_line(text: str) -> str:
     return next(iter(text.splitlines()), "")
 
 
+def notify(title: str, message: str) -> None:
+    with suppress(OSError, subprocess.TimeoutExpired):
+        subprocess.run(
+            [
+                "osascript",
+                "-e",
+                "on run argv",
+                "-e",
+                "display notification (item 2 of argv) with title (item 1 of argv)",
+                "-e",
+                "end run",
+                title,
+                message,
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=NOTIFY_TIMEOUT_SECONDS,
+            check=False,
+        )
+
+
+def notify_task(task_id: str, task: Task, outcome: str) -> None:
+    summary = (
+        task.get("gate_reason", "") if outcome == OUTCOME_GATE_STOPPED else task.get("result", "")
+    )
+    message = first_line(summary) or first_line(task["prompt"])
+    notify(f"golem: {task_id} {outcome}", message[:NOTIFICATION_MESSAGE_MAX_LENGTH])
+
+
+def notify_failed_tasks(failed_tasks: list[tuple[str, Task]]) -> None:
+    for task_id, task in failed_tasks:
+        notify_task(task_id, task, OUTCOME_FAILED)
+
+
 def list_tasks() -> int:
     tasks = load_tasks()
     if not tasks:
@@ -2098,6 +2138,7 @@ def claim_task(
     task_id: str,
     session_id: str,
     expected_status: str,
+    failed_claims: list[tuple[str, Task]],
 ) -> tuple[Task, io.TextIOWrapper, io.TextIOWrapper] | None:
     task = tasks.get(task_id)
     if task is None or task["status"] != expected_status or task["session_id"] != session_id:
@@ -2120,6 +2161,7 @@ def claim_task(
         record_resolved_worktree(task, worktree, is_worktree_pending=is_worktree_pending)
         task["status"] = STATUS_FAILED
         task["result"] = missing_worktree
+        failed_claims.append((task_id, task.copy()))
         release_run_lock(run_lock_file, session_id)
         return None
     directory_lock_file = acquire_lock(directory_lock_path(directory_to_lock(task, worktree)))
@@ -2151,6 +2193,8 @@ def claim_task(
 def claim_next_dependent(
     task_id: str, parent_session_id: str
 ) -> tuple[str, Task, io.TextIOWrapper, io.TextIOWrapper] | None:
+    failed_claims: list[tuple[str, Task]] = []
+    claimed_task: tuple[str, Task, io.TextIOWrapper, io.TextIOWrapper] | None = None
     with locked_ledger() as (tasks, worktrees):
         parent_record = tasks.get(task_id)
         if parent_record is None:
@@ -2160,12 +2204,16 @@ def claim_next_dependent(
             return None
         for dependent_id in waiting_dependent_ids(tasks, task_id):
             dependent_session_id = tasks[dependent_id]["session_id"]
-            claim = claim_task(tasks, worktrees, dependent_id, dependent_session_id, STATUS_WAITING)
+            claim = claim_task(
+                tasks, worktrees, dependent_id, dependent_session_id, STATUS_WAITING, failed_claims
+            )
             if claim is not None:
-                return dependent_id, *claim
+                claimed_task = dependent_id, *claim
+                break
             if tasks[dependent_id]["status"] == STATUS_WAITING:
-                return None
-    return None
+                break
+    notify_failed_tasks(failed_claims)
+    return claimed_task
 
 
 def print_task_result(result: str) -> None:
@@ -2221,6 +2269,13 @@ def execute_task(task_id: str, task: Task, lock_file_descriptors: tuple[int, ...
         is_usage_limit=is_usage_limit,
         is_background_work_stopped=stop_line_match is not None,
     )
+    tasks = load_tasks()
+    stored_task = tasks.get(task_id)
+    if stored_task is not None:
+        if stored_task.get("status") == STATUS_FAILED:
+            notify_task(task_id, stored_task, OUTCOME_FAILED)
+        elif is_ready_for_review(tasks, task_id):
+            notify_task(task_id, stored_task, OUTCOME_NEEDS_REVIEW)
     return returncode
 
 
@@ -2308,7 +2363,9 @@ def run_pending_gate(task_id: str) -> None:
             return
         current["gate_reason"] = stop_reason
         directory = task_directory(current)
+        stopped_task = current.copy()
     sync_hooks(directory)
+    notify_task(task_id, stopped_task, OUTCOME_GATE_STOPPED)
 
 
 def continue_task(task_id: str, *, is_forced: bool) -> int:
@@ -2602,8 +2659,10 @@ def execute_claimed_task(
 
 
 def execute_scheduled_task(task_id: str, session_id: str) -> int:
+    failed_claims: list[tuple[str, Task]] = []
     with locked_ledger() as (tasks, worktrees):
-        claim = claim_task(tasks, worktrees, task_id, session_id, STATUS_SCHEDULED)
+        claim = claim_task(tasks, worktrees, task_id, session_id, STATUS_SCHEDULED, failed_claims)
+    notify_failed_tasks(failed_claims)
     if claim is None:
         return 0
     return execute_claimed_task(task_id, *claim)
@@ -2919,6 +2978,7 @@ def run_launch_agent_pass() -> list[subprocess.Popen[bytes]]:
     rotate_agent_log()
     now = datetime.now(UTC)
     due_tasks: list[tuple[str, Task]] = []
+    failed_tasks: list[tuple[str, Task]] = []
     hook_directories: set[str] = set()
     with locked_tasks() as tasks:
         remove_orphan_run_locks()
@@ -2927,6 +2987,7 @@ def run_launch_agent_pass() -> list[subprocess.Popen[bytes]]:
             if task["status"] == STATUS_RUNNING:
                 if is_run_lock_free(task["session_id"]):
                     task["status"] = STATUS_FAILED
+                    failed_tasks.append((task_id, task.copy()))
                     hook_directories |= hook_affected_directories(tasks, task)
             elif (
                 task["status"] == STATUS_SCHEDULED
@@ -2943,6 +3004,7 @@ def run_launch_agent_pass() -> list[subprocess.Popen[bytes]]:
                 due_tasks.append((task_id, task.copy()))
     for directory in hook_directories:
         sync_hooks(directory)
+    notify_failed_tasks(failed_tasks)
     processes: list[subprocess.Popen[bytes]] = []
     for task_id, task in due_tasks:
         processes.append(start_task_executor(task_id, task))
