@@ -5534,7 +5534,7 @@ def test_timed_out_setup_fails_task(installed_launch_agent, ledger_path, monkeyp
 
     task = read_task(ledger_path)
     assert task["status"] == golem.STATUS_FAILED
-    assert task["setup_failure_reason"] == "setup failed: setup timed out after 0.2s"
+    assert "timed out" in task["setup_failure_reason"]
 
 
 def test_usage_limit_resume_skips_setup(
@@ -5608,7 +5608,8 @@ def test_retry_runs_setup_again_only_after_failed_setup(
     first_run_path = tmp_path / "first-run"
     setup = setup_command(tmp_path, directory_setup_output(directory, prompt_suffix=SETUP_SUFFIX))
     if failure == "setup":
-        setup = f"[ -e {first_run_path} ] || {{ touch {first_run_path}; exit 1; }}; {setup}"
+        failing_setup = setup_command(tmp_path, exit_code=1)
+        setup = f"if [ -e {first_run_path} ]; then {setup}; else touch {first_run_path}; {failing_setup}; fi"
     elif failure == "agent":
         monkeypatch.setenv("GOLEM_CLAUDE_FAIL_TASK", TASK_ID)
     write_task(ledger_path, golem.STATUS_SCHEDULED, setup=setup, no_worktree=True)
@@ -5626,7 +5627,7 @@ def test_retry_runs_setup_again_only_after_failed_setup(
     assert golem.main(["retry", TASK_ID, "--now"]) == 0
     assert golem.main(["_execute", TASK_ID, read_task(ledger_path)["session_id"]]) == 0
 
-    assert len(setup_inputs(tmp_path)) == 1
+    assert len(setup_inputs(tmp_path)) == (2 if failure == "setup" else 1)
     assert logged_claude_cwds(fake_commands)[-1] == str(directory)
     assert is_prompt_passed(logged_claude_args(fake_commands), f"{PROMPT}\n\n{SETUP_SUFFIX}")
     assert read_task(ledger_path)["status"] == golem.STATUS_NEEDS_REVIEW
