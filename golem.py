@@ -169,10 +169,10 @@ class Task(TypedDict):
     auto_pickup: NotRequired[bool]
     no_worktree: NotRequired[bool]
     gate: NotRequired[str]
-    gate_reason: NotRequired[str]
+    gate_stop_reason: NotRequired[str]
     setup: NotRequired[str]
     setup_complete: NotRequired[bool]
-    setup_reason: NotRequired[str]
+    setup_failure_reason: NotRequired[str]
     setup_directory: NotRequired[str]
     setup_busy_retry_count: NotRequired[int]
 
@@ -357,7 +357,12 @@ def ledger_temporary_prefix(task_ledger_path: Path) -> str:
 
 
 def load_tasks() -> Tasks:
-    return cast("Tasks", load_json(ledger_path()))
+    tasks = cast("dict[str, JsonObject]", load_json(ledger_path()))
+    for task in tasks.values():
+        # Older ledgers store gate_stop_reason under its former name, gate_reason.
+        if "gate_reason" in task:
+            task["gate_stop_reason"] = task.pop("gate_reason")
+    return cast("Tasks", tasks)
 
 
 def load_worktrees() -> Worktrees:
@@ -482,7 +487,7 @@ def reserve_tasks(records: Tasks) -> None:
 
 
 def can_start_dependents(task: Task) -> bool:
-    return task.get("status") in SUCCEEDED_STATUSES and "gate_reason" not in task
+    return task.get("status") in SUCCEEDED_STATUSES and "gate_stop_reason" not in task
 
 
 def waiting_dependent_ids(tasks: Tasks, parent_id: str) -> list[str]:
@@ -1455,7 +1460,7 @@ def pickup(task_id: str, *agent_args: str, is_app: bool, is_review_required: boo
 def is_ready_for_review(tasks: Tasks, task_id: str) -> bool:
     task = tasks[task_id]
     return task.get("status") == STATUS_NEEDS_REVIEW and (
-        "gate_reason" in task or not has_unreviewed_dependent(tasks, task_id)
+        "gate_stop_reason" in task or not has_unreviewed_dependent(tasks, task_id)
     )
 
 
@@ -1511,10 +1516,10 @@ def show_task_result(task_id: str) -> int:
     if task_id not in tasks:
         raise SystemExit(f"golem: task not found: {task_id}")
     task = tasks[task_id]
-    if "gate_reason" in task:
-        print(f"golem: gate stopped: {task['gate_reason']}", file=sys.stderr)
-    if "setup_reason" in task:
-        print(f"golem: {task['setup_reason']}", file=sys.stderr)
+    if "gate_stop_reason" in task:
+        print(f"golem: gate stopped: {task['gate_stop_reason']}", file=sys.stderr)
+    if "setup_failure_reason" in task:
+        print(f"golem: {task['setup_failure_reason']}", file=sys.stderr)
         return 1
     if task.get("setup_complete"):
         print(f"golem: directory: {task['cwd']}", file=sys.stderr)
@@ -1640,6 +1645,15 @@ def first_line(text: str) -> str:
     return next(iter(text.splitlines()), "")
 
 
+def list_reason(task: Task) -> str:
+    reason = task.get("gate_stop_reason") or task.get("setup_failure_reason")
+    if reason is not None:
+        return first_line(reason)
+    if "setup_busy_retry_count" in task and "setup_directory" in task:
+        return f"waiting for directory: {task['setup_directory']}"
+    return ""
+
+
 def list_tasks() -> int:
     tasks = load_tasks()
     if not tasks:
@@ -1653,7 +1667,7 @@ def list_tasks() -> int:
             display_directory(task["cwd"]),
             display_due_at(task["due_at"], today) if "due_at" in task else "",
             task.get("after", "") if task["status"] == STATUS_WAITING else "",
-            first_line(task.get("gate_reason") or task.get("setup_reason", "")),
+            list_reason(task),
         )
         for task_id, task in tasks.items()
     ]
@@ -2375,7 +2389,7 @@ def fail_setup(task_id: str, reason: str) -> None:
         if task is None or task.get("status") != STATUS_RUNNING:
             return
         task["status"] = STATUS_FAILED
-        task["setup_reason"] = f"setup failed: {reason}"
+        task["setup_failure_reason"] = f"setup failed: {reason}"
 
 
 def record_setup(task_id: str, directory: str, prompt: str) -> Task | None:
@@ -2403,7 +2417,7 @@ def requeue_busy_setup(task_id: str, directory: str, prompt: str) -> None:
         retry_count = task.get("setup_busy_retry_count", 0)
         if retry_count >= MAX_SETUP_BUSY_RETRIES:
             task["status"] = STATUS_FAILED
-            task["setup_reason"] = f"setup directory stayed busy: {directory}"
+            task["setup_failure_reason"] = f"setup directory stayed busy: {directory}"
             return
         task["setup_busy_retry_count"] = retry_count + 1
         task["status"] = STATUS_SCHEDULED
@@ -2447,7 +2461,7 @@ def is_gate_pending(tasks: Tasks, task_id: str) -> bool:
     return (
         task.get("status") == STATUS_NEEDS_REVIEW
         and "gate" in task
-        and "gate_reason" not in task
+        and "gate_stop_reason" not in task
         and bool(waiting_dependent_ids(tasks, task_id))
     )
 
@@ -2469,14 +2483,14 @@ def run_pending_gate(task_id: str) -> None:
             return
         if current.get("status") not in SUCCEEDED_STATUSES:
             return
-        current["gate_reason"] = stop_reason
+        current["gate_stop_reason"] = stop_reason
         directory = task_directory(current)
     sync_hooks(directory)
 
 
 def continue_task(task_id: str, *, is_forced: bool) -> int:
     task = existing_task(load_tasks(), task_id)
-    if "gate_reason" not in task:
+    if "gate_stop_reason" not in task:
         raise SystemExit(f"golem: task is not stopped at a gate: {task_id}")
     if not is_forced:
         directory_lock_file = acquire_task_directory_lock(task)
@@ -2489,8 +2503,8 @@ def continue_task(task_id: str, *, is_forced: bool) -> int:
         if stop_reason is not None:
             with locked_tasks() as tasks:
                 stopped_task = existing_task(tasks, task_id)
-                if "gate_reason" in stopped_task:
-                    stopped_task["gate_reason"] = stop_reason
+                if "gate_stop_reason" in stopped_task:
+                    stopped_task["gate_stop_reason"] = stop_reason
             print(stop_reason, file=sys.stderr)
             return 1
     if not release_gate_stop(task_id):
@@ -2503,9 +2517,9 @@ def release_gate_stop(task_id: str, *, stderr: int | None = None) -> bool:
         task = tasks.get(task_id)
         if task is None:
             return False
-        if "gate_reason" not in task:
+        if "gate_stop_reason" not in task:
             return False
-        del task["gate_reason"]
+        del task["gate_stop_reason"]
         task["status"] = STATUS_DONE
     start_task_executor(task_id, task, stderr=stderr)
     return True
@@ -2704,7 +2718,7 @@ def hook_stop() -> int:
         return 0
     task = tasks[task_id]
     next_ids = waiting_dependent_ids(tasks, task_id)
-    if "gate_reason" not in task or not next_ids:
+    if "gate_stop_reason" not in task or not next_ids:
         return 0
     directory_lock_file = acquire_task_directory_lock(task)
     if directory_lock_file is None:
