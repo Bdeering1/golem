@@ -46,6 +46,7 @@ LIST_STATUS_ORDER = (
     STATUS_DONE,
     STATUS_CANCELLED,
 )
+ALL_STATUSES: set[str] = set(LIST_STATUS_ORDER)
 STATUS_COLORS = {
     STATUS_NEEDS_REVIEW: 33,
     STATUS_FAILED: 196,
@@ -2257,11 +2258,19 @@ def gate_input_json(task_id: str, task: Task) -> str:
 
 
 def shell_command_outcome(
-    command: str, label: str, task: Task, input_json: str, timeout_seconds: float
+    command: str,
+    label: str,
+    task: Task,
+    input_json: str,
+    timeout_seconds: float,
+    *,
+    is_capturing_stdout: bool = False,
 ) -> tuple[str | None, str]:
     # Files, not pipes: a background process the command starts can hold them open after it exits.
     with (
-        tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as stdout_file,
+        tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace")
+        if is_capturing_stdout
+        else Path(os.devnull).open("w+", encoding="utf-8") as stdout_file,
         tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as stderr_file,
     ):
         try:
@@ -2288,13 +2297,12 @@ def shell_command_outcome(
                 if process.returncode is None:
                     with suppress(OSError):
                         os.killpg(process.pid, signal.SIGKILL)
-        stdout_file.seek(0)
-        stdout = stdout_file.read()
         if process.returncode == 0:
-            return None, stdout
+            stdout_file.seek(0)
+            return None, stdout_file.read()
         stderr_file.seek(0)
         reason = stderr_file.read().strip() or f"{label} exited with status {process.returncode}"
-        return reason, stdout
+        return reason, ""
 
 
 def gate_stop_reason(task_id: str, task: Task, timeout_seconds: int | None = None) -> str | None:
@@ -2320,27 +2328,36 @@ def setup_input_json(task_id: str, task: Task) -> str:
     )
 
 
-def setup_directory_and_prompt(task_id: str, task: Task, setup: str) -> tuple[str, str] | str:
+class SetupError(Exception):
+    pass
+
+
+def setup_directory_and_prompt(task_id: str, task: Task, setup: str) -> tuple[str, str]:
     failure_reason, stdout = shell_command_outcome(
-        setup, "setup", task, setup_input_json(task_id, task), GATE_TIMEOUT_SECONDS
+        setup,
+        "setup",
+        task,
+        setup_input_json(task_id, task),
+        GATE_TIMEOUT_SECONDS,
+        is_capturing_stdout=True,
     )
     if failure_reason is not None:
-        return failure_reason
+        raise SetupError(failure_reason)
     try:
         output = cast("object", json.loads(stdout))
     except json.JSONDecodeError as error:
-        return f"setup output is not valid JSON: {error}"
+        raise SetupError(f"setup output is not valid JSON: {error}") from error
     if not isinstance(output, dict):
-        return SETUP_OUTPUT_ERROR
+        raise SetupError(SETUP_OUTPUT_ERROR)
     setup_output = cast("JsonObject", output)
     directory = setup_output.get("directory")
     prompt_suffix = setup_output.get("prompt_suffix")
     if not isinstance(directory, str | None) or not isinstance(prompt_suffix, str | None):
-        return SETUP_OUTPUT_ERROR
+        raise SetupError(SETUP_OUTPUT_ERROR)
     if directory is not None:
-        directory = resolved_path(str(Path(task["cwd"], directory)))
+        directory = resolved_path(str(Path(task["cwd"], Path(directory).expanduser())))
         if not Path(directory).is_dir():
-            return f"setup directory does not exist: {directory}"
+            raise SetupError(f"setup directory does not exist: {directory}")
     prompt = task["prompt"] if prompt_suffix is None else f"{task['prompt']}\n\n{prompt_suffix}"
     return directory or task["cwd"], prompt
 
@@ -2354,13 +2371,15 @@ def fail_setup(task_id: str, reason: str) -> None:
         task["setup_reason"] = reason
 
 
-def record_setup(task_id: str, task: Task, directory: str, prompt: str) -> Task:
+def record_setup(task_id: str, directory: str, prompt: str) -> Task | None:
     with locked_tasks() as tasks:
-        stored_task = tasks.get(task_id, task)
+        stored_task = tasks.get(task_id)
+        if stored_task is None or stored_task.get("status") != STATUS_RUNNING:
+            return None
         stored_task["cwd"] = directory
         stored_task["prompt"] = prompt
         stored_task["setup_complete"] = True
-        for descendant_id in descendant_ids_with_status(tasks, task_id, set(LIST_STATUS_ORDER)):
+        for descendant_id in descendant_ids_with_status(tasks, task_id, ALL_STATUSES):
             tasks[descendant_id]["cwd"] = directory
         return stored_task.copy()
 
@@ -2371,18 +2390,22 @@ def prepared_task(
     setup = task.get("setup")
     if setup is None or task.get("setup_complete"):
         return task, directory_lock_file
-    outcome = setup_directory_and_prompt(task_id, task, setup)
-    if isinstance(outcome, str):
-        fail_setup(task_id, outcome)
+    try:
+        directory, prompt = setup_directory_and_prompt(task_id, task, setup)
+    except SetupError as error:
+        fail_setup(task_id, str(error))
         return None
-    directory, prompt = outcome
     if directory_lock_path(directory) == directory_lock_path(task["cwd"]):
-        return record_setup(task_id, task, directory, prompt), directory_lock_file
+        prepared = record_setup(task_id, directory, prompt)
+        return None if prepared is None else (prepared, directory_lock_file)
     moved_lock_file = acquire_lock(directory_lock_path(directory))
     if moved_lock_file is None:
         fail_setup(task_id, f"directory is busy: {directory}")
         return None
-    prepared = record_setup(task_id, task, directory, prompt)
+    prepared = record_setup(task_id, directory, prompt)
+    if prepared is None:
+        release_lock(moved_lock_file)
+        return None
     release_lock(directory_lock_file)
     return prepared, moved_lock_file
 
