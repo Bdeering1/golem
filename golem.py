@@ -2386,6 +2386,8 @@ def record_setup(task_id: str, directory: str, prompt: str) -> Task | None:
         stored_task["cwd"] = directory
         stored_task["prompt"] = prompt
         stored_task["setup_complete"] = True
+        stored_task.pop("setup_directory", None)
+        stored_task.pop("setup_busy_retry_count", None)
         for descendant_id in descendant_ids_with_status(tasks, task_id, ALL_STATUSES):
             tasks[descendant_id]["cwd"] = directory
         return stored_task.copy()

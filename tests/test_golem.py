@@ -5296,7 +5296,7 @@ def setup_inputs(tmp_path):
     return [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines() if line]
 
 
-def setup_directory(tmp_path, name="platform"):
+def create_directory(tmp_path, name="platform"):
     directory = tmp_path / name
     directory.mkdir()
     return directory
@@ -5307,7 +5307,7 @@ def directory_setup_output(directory, **fields: str):
 
 
 def is_prompt_passed(claude_args, prompt):
-    return f"--print\n{prompt}\n" in "\n".join(claude_args)
+    return f"--print\n{prompt}\n--" in "\n".join(claude_args)
 
 
 def schedule_setup_chain(ledger_path, setup, *extra_arguments: str):
@@ -5324,7 +5324,7 @@ def schedule_setup_chain(ledger_path, setup, *extra_arguments: str):
 def test_setup_prepares_directory_and_prompt_for_chain(
     installed_launch_agent, fake_commands, ledger_path, tmp_path, capsys, is_returning_fields
 ):
-    directory = setup_directory(tmp_path)
+    directory = create_directory(tmp_path)
     output = (
         directory_setup_output(directory, prompt_suffix=SETUP_SUFFIX)
         if is_returning_fields
@@ -5360,7 +5360,7 @@ def test_setup_prepares_directory_and_prompt_for_chain(
 def test_setup_seeds_gate_hooks_in_returned_directory(
     installed_launch_agent, ledger_path, tmp_path
 ):
-    directory = setup_directory(tmp_path)
+    directory = create_directory(tmp_path)
     parent = schedule_setup_chain(
         ledger_path,
         setup_command(tmp_path, directory_setup_output(directory)),
@@ -5416,6 +5416,52 @@ def test_failed_setup_fails_task_and_keeps_reason(
     assert expected_reason in capsys.readouterr().err
 
 
+def test_setup_that_cannot_run_fails_task(installed_launch_agent, ledger_path, tmp_path):
+    missing_directory = str(tmp_path / "missing")
+    write_task(ledger_path, golem.STATUS_SCHEDULED, setup="true", cwd=missing_directory)
+
+    assert golem.main(["_execute", TASK_ID, f"{TASK_ID}-session"]) == 1
+
+    assert missing_directory in read_task(ledger_path)["setup_reason"]
+
+
+def test_timed_out_setup_fails_task(installed_launch_agent, ledger_path, monkeypatch):
+    monkeypatch.setattr(golem, "GATE_TIMEOUT_SECONDS", 0.2)
+    write_task(ledger_path, golem.STATUS_SCHEDULED, setup="sleep 30")
+
+    assert golem.main(["_execute", TASK_ID, f"{TASK_ID}-session"]) == 1
+
+    task = read_task(ledger_path)
+    assert task["status"] == golem.STATUS_FAILED
+    assert task["setup_reason"] == "setup timed out after 0.2s"
+
+
+def test_usage_limit_resume_skips_setup(
+    installed_launch_agent, fake_commands, ledger_path, tmp_path, monkeypatch
+):
+    directory = create_directory(tmp_path)
+    monkeypatch.setattr(golem, "next_reset_time", lambda: RESET_TIME)
+    write_claude_output(
+        fake_commands, USAGE_LIMIT_RESULT, api_error_status=golem.USAGE_LIMIT_HTTP_STATUS
+    )
+    write_task(
+        ledger_path,
+        golem.STATUS_SCHEDULED,
+        setup=setup_command(tmp_path, directory_setup_output(directory)),
+        no_worktree=True,
+    )
+    assert golem.main(["_execute", TASK_ID, f"{TASK_ID}-session"]) == 0
+    assert read_task(ledger_path)["status"] == golem.STATUS_SCHEDULED
+
+    write_claude_output(fake_commands, CLAUDE_RESULT)
+    set_task_due_now(ledger_path)
+    assert golem.main(["_execute", TASK_ID, f"{TASK_ID}-session"]) == 0
+
+    assert len(setup_inputs(tmp_path)) == 1
+    assert logged_claude_cwds(fake_commands) == [str(directory)] * 2
+    assert read_task(ledger_path)["status"] == golem.STATUS_NEEDS_REVIEW
+
+
 def execute_with_busy_directory(directory, task_id, session_id):
     busy_lock_file = golem.acquire_lock(golem.directory_lock_path(str(directory)))
     assert busy_lock_file is not None
@@ -5428,13 +5474,13 @@ def execute_with_busy_directory(directory, task_id, session_id):
 def test_setup_into_busy_directory_requeues_without_rerunning_setup(
     installed_launch_agent, fake_commands, ledger_path, tmp_path
 ):
-    directory = setup_directory(tmp_path)
+    directory = create_directory(tmp_path)
     write_claude_output(fake_commands, CLAUDE_RESULT)
     parent = schedule_setup_chain(
         ledger_path, setup_command(tmp_path, directory_setup_output(directory))
     )
 
-    assert execute_with_busy_directory(directory, PARENT_ID, parent["session_id"]) == 1
+    execute_with_busy_directory(directory, PARENT_ID, parent["session_id"])
 
     assert read_task(ledger_path, PARENT_ID)["status"] == golem.STATUS_SCHEDULED
     queued_lock_file = golem.acquire_lock(golem.directory_lock_path(str(Path.cwd())))
@@ -5456,7 +5502,7 @@ def test_retry_runs_setup_again_only_after_failed_setup(
     monkeypatch,
     failure,
 ):
-    directory = setup_directory(tmp_path)
+    directory = create_directory(tmp_path)
     first_run_path = tmp_path / "first-run"
     setup = setup_command(tmp_path, directory_setup_output(directory, prompt_suffix=SETUP_SUFFIX))
     if failure == "setup":
@@ -5492,8 +5538,8 @@ def test_setups_in_one_directory_run_one_at_a_time(
     agent_hold_path.touch()
     monkeypatch.setenv("GOLEM_CLAUDE_HOLD", str(agent_hold_path))
     monkeypatch.setenv("GOLEM_CLAUDE_STARTED", str(agent_started_path))
-    held_directory = setup_directory(tmp_path, "held")
-    sibling_directory = setup_directory(tmp_path, "sibling")
+    held_directory = create_directory(tmp_path, "held")
+    sibling_directory = create_directory(tmp_path, "sibling")
     held_setup = (
         f"touch {setup_started_path}; while [ -e {setup_hold_path} ]; do sleep 0.05; done; "
         f"printf %s {shlex.quote(directory_setup_output(held_directory))}"
@@ -5537,7 +5583,7 @@ def test_setups_in_one_directory_run_one_at_a_time(
 def test_codex_task_gets_setup_directory_and_suffix(
     installed_launch_agent, fake_commands, ledger_path, tmp_path
 ):
-    directory = setup_directory(tmp_path)
+    directory = create_directory(tmp_path)
     setup = setup_command(tmp_path, directory_setup_output(directory, prompt_suffix=SETUP_SUFFIX))
     golem.main(
         ["run", TASK_ID, PROMPT, "--backend", "codex", "--now", "--no-worktree", "--setup", setup]
