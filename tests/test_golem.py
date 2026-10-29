@@ -53,7 +53,7 @@ LATER_RESET_TIME = datetime(2030, 1, 2, 11, tzinfo=UTC)
 ANSI_COLOR = re.compile(r"\033\[38;5;\d+m|\033\[0m")
 WORKTREE_BRANCH = "worktree"
 DAY_SECONDS = 24 * 60 * 60
-GATE_REASON = "no pull request yet"
+GATE_STOP_REASON = "no pull request yet"
 USER_SETTINGS_MODE = 0o644
 PARENT_SESSION = f"{PARENT_ID}-session"
 USER_SETTINGS = {
@@ -1291,7 +1291,16 @@ def test_pickup_marks_ancestors_that_need_review_done(fake_commands, ledger_path
         pytest.param({}, golem.STATUS_RUNNING, [], id="child-running"),
         pytest.param({}, golem.STATUS_FAILED, [PARENT_ID], id="child-failed"),
         pytest.param(
-            {"gate_reason": GATE_REASON}, golem.STATUS_WAITING, [PARENT_ID], id="parent-stopped"
+            {"gate_stop_reason": GATE_STOP_REASON},
+            golem.STATUS_WAITING,
+            [PARENT_ID],
+            id="parent-stopped",
+        ),
+        pytest.param(
+            {"gate_reason": GATE_STOP_REASON},
+            golem.STATUS_WAITING,
+            [PARENT_ID],
+            id="parent-stopped-in-old-ledger",
         ),
     ],
 )
@@ -1904,15 +1913,17 @@ def test_failing_gate_stops_chain_with_its_stderr_as_reason(
     installed_launch_agent, fake_commands, ledger_path, tmp_path
 ):
     write_claude_output(fake_commands, CLAUDE_RESULT)
-    run_gated_chain(ledger_path, gate_command(tmp_path, exit_code=1, stderr=f"{GATE_REASON}\n"))
+    run_gated_chain(
+        ledger_path, gate_command(tmp_path, exit_code=1, stderr=f"{GATE_STOP_REASON}\n")
+    )
 
     tasks = read_tasks(ledger_path)
     assert tasks[PARENT_ID]["status"] == golem.STATUS_NEEDS_REVIEW
-    assert tasks[PARENT_ID]["gate_reason"] == GATE_REASON
+    assert tasks[PARENT_ID]["gate_stop_reason"] == GATE_STOP_REASON
     assert tasks[CHILD_ID]["status"] == golem.STATUS_WAITING
     assert len(logged_claude_calls(fake_commands)) == 1
     assert [call[-2:] for call in logged_osascript_calls(fake_commands)] == [
-        [f"golem: {PARENT_ID} stopped at gate", GATE_REASON]
+        [f"golem: {PARENT_ID} stopped at gate", GATE_STOP_REASON]
     ]
     assert golem.run_launch_agent_pass() == []
     assert not golem.has_pending_tasks(tasks)
@@ -1937,7 +1948,7 @@ def test_gate_that_cannot_run_stops_chain_with_error_as_reason(
     assert golem.main(["_execute", PARENT_ID, f"{PARENT_ID}-session"]) == 0
 
     tasks = read_tasks(ledger_path)
-    assert missing_directory in tasks[PARENT_ID]["gate_reason"]
+    assert missing_directory in tasks[PARENT_ID]["gate_stop_reason"]
     assert tasks[CHILD_ID]["status"] == golem.STATUS_WAITING
 
 
@@ -1988,14 +1999,14 @@ def test_failing_gate_keeps_chain_stopped_when_task_is_closed_meanwhile(
 ):
     close_parent = shlex.join([sys.executable, golem.__file__, "close", PARENT_ID])
     write_parent_with_waiting_child(
-        ledger_path, gate=f"{close_parent}; echo {GATE_REASON} >&2; exit 1"
+        ledger_path, gate=f"{close_parent}; echo {GATE_STOP_REASON} >&2; exit 1"
     )
 
     assert golem.main(["_execute", PARENT_ID, f"{PARENT_ID}-session"]) == 0
 
     tasks = read_tasks(ledger_path)
     assert tasks[PARENT_ID]["status"] == golem.STATUS_DONE
-    assert tasks[PARENT_ID]["gate_reason"] == GATE_REASON
+    assert tasks[PARENT_ID]["gate_stop_reason"] == GATE_STOP_REASON
     assert tasks[CHILD_ID]["status"] == golem.STATUS_WAITING
 
 
@@ -2039,7 +2050,7 @@ def test_task_without_waiting_follow_up_never_runs_its_gate(
 
     assert golem.main(["_execute", PARENT_ID, parent["session_id"]]) == 0
     assert read_task(ledger_path, PARENT_ID)["status"] == golem.STATUS_NEEDS_REVIEW
-    assert "gate_reason" not in read_task(ledger_path, PARENT_ID)
+    assert "gate_stop_reason" not in read_task(ledger_path, PARENT_ID)
     assert gate_inputs(tmp_path) == []
 
 
@@ -2047,13 +2058,13 @@ def test_auto_pickup_opens_stopped_task_and_keeps_chain_stopped(
     installed_launch_agent, fake_commands, ledger_path, tmp_path
 ):
     parent = run_gated_chain(
-        ledger_path, gate_command(tmp_path, exit_code=1, stderr=GATE_REASON), "--auto-pickup"
+        ledger_path, gate_command(tmp_path, exit_code=1, stderr=GATE_STOP_REASON), "--auto-pickup"
     )
 
     assert fake_commands["open-args"].read_text(encoding="utf-8") == (
         f"claude://resume?session={parent['session_id']}\n"
     )
-    assert read_task(ledger_path, PARENT_ID)["gate_reason"] == GATE_REASON
+    assert read_task(ledger_path, PARENT_ID)["gate_stop_reason"] == GATE_STOP_REASON
     assert read_task(ledger_path, CHILD_ID)["status"] == golem.STATUS_WAITING
     assert golem.run_launch_agent_pass() == []
 
@@ -2085,14 +2096,14 @@ def test_continue_releases_stopped_task(
     write_parent_with_waiting_child(
         ledger_path,
         gate=gate_command(tmp_path, exit_code=gate_exit_code),
-        gate_reason=GATE_REASON,
+        gate_stop_reason=GATE_STOP_REASON,
     )
 
     assert golem.main(["continue", PARENT_ID, *continue_arguments]) == 0
 
     parent = read_task(ledger_path, PARENT_ID)
     assert parent["status"] == golem.STATUS_DONE
-    assert "gate_reason" not in parent
+    assert "gate_stop_reason" not in parent
     assert len(gate_inputs(tmp_path)) == expected_gate_run_count
     assert started_executors == [PARENT_ID]
 
@@ -2103,14 +2114,14 @@ def test_continue_with_failing_gate_keeps_task_stopped(
     write_parent_with_waiting_child(
         ledger_path,
         gate=gate_command(tmp_path, exit_code=1, stderr="still missing"),
-        gate_reason=GATE_REASON,
+        gate_stop_reason=GATE_STOP_REASON,
     )
 
     assert golem.main(["continue", PARENT_ID]) == 1
 
     parent = read_task(ledger_path, PARENT_ID)
     assert parent["status"] == golem.STATUS_NEEDS_REVIEW
-    assert parent["gate_reason"] == "still missing"
+    assert parent["gate_stop_reason"] == "still missing"
     assert "still missing" in capsys.readouterr().err
     assert started_executors == []
 
@@ -2140,13 +2151,15 @@ def stop_gated_chain(ledger_path, fake_commands, tmp_path, original_settings):
         settings_file().write_text(json.dumps(original_settings), encoding="utf-8")
         settings_file().chmod(USER_SETTINGS_MODE)
     write_claude_output(fake_commands, CLAUDE_RESULT)
-    return run_gated_chain(ledger_path, gate_command(tmp_path, exit_code=1, stderr=GATE_REASON))
+    return run_gated_chain(
+        ledger_path, gate_command(tmp_path, exit_code=1, stderr=GATE_STOP_REASON)
+    )
 
 
 def finish_chain(ledger_path, parent):
     tasks = read_tasks(ledger_path)
     tasks[PARENT_ID]["status"] = golem.STATUS_DONE
-    del tasks[PARENT_ID]["gate_reason"]
+    del tasks[PARENT_ID]["gate_stop_reason"]
     write_tasks(ledger_path, tasks)
     assert golem.main(["_execute", PARENT_ID, parent["session_id"]]) == 0
 
@@ -2199,7 +2212,7 @@ def test_unusable_hook_settings_are_left_alone(
         settings_file().write_text("{not json", encoding="utf-8")
     original_text = settings_file().read_text(encoding="utf-8")
     write_claude_output(fake_commands, CLAUDE_RESULT)
-    run_gated_chain(ledger_path, gate_command(tmp_path, exit_code=1, stderr=GATE_REASON))
+    run_gated_chain(ledger_path, gate_command(tmp_path, exit_code=1, stderr=GATE_STOP_REASON))
 
     assert settings_file().is_symlink() == is_symlink
     assert settings_file().read_text(encoding="utf-8") == original_text
@@ -2309,7 +2322,7 @@ def test_stop_hook_continues_stopped_chain_when_gate_passes(
     ledger_path, tmp_path, started_executors, monkeypatch, capsys, parent_status
 ):
     write_parent_with_waiting_child(
-        ledger_path, parent_status, gate=gate_command(tmp_path), gate_reason=GATE_REASON
+        ledger_path, parent_status, gate=gate_command(tmp_path), gate_stop_reason=GATE_STOP_REASON
     )
 
     output = run_hook(monkeypatch, capsys, golem.HOOK_ARGUMENT_STOP, PARENT_SESSION)
@@ -2333,7 +2346,7 @@ def test_stop_hook_does_nothing(
     ledger_path, started_executors, monkeypatch, capsys, session_id, gate, is_directory_busy
 ):
     monkeypatch.setattr(golem, "HOOK_GATE_TIMEOUT_SECONDS", 0.2)
-    write_parent_with_waiting_child(ledger_path, gate=gate, gate_reason=GATE_REASON)
+    write_parent_with_waiting_child(ledger_path, gate=gate, gate_stop_reason=GATE_STOP_REASON)
     directory_lock_file = (
         golem.acquire_lock(golem.directory_lock_path(str(Path.cwd())))
         if is_directory_busy
@@ -2345,7 +2358,7 @@ def test_stop_hook_does_nothing(
     finally:
         if directory_lock_file is not None:
             golem.release_lock(directory_lock_file)
-    assert read_task(ledger_path, PARENT_ID)["gate_reason"] == GATE_REASON
+    assert read_task(ledger_path, PARENT_ID)["gate_stop_reason"] == GATE_STOP_REASON
     assert started_executors == []
 
 
@@ -2401,7 +2414,7 @@ def test_stop_hook_returns_while_follow_up_runs(ledger_path, tmp_path, monkeypat
     monkeypatch.setenv("GOLEM_CLAUDE_HOLD", str(hold_path))
     monkeypatch.setenv("GOLEM_CLAUDE_STARTED", str(started_path))
     write_parent_with_waiting_child(
-        ledger_path, gate=gate_command(tmp_path), gate_reason=GATE_REASON
+        ledger_path, gate=gate_command(tmp_path), gate_stop_reason=GATE_STOP_REASON
     )
 
     result = golem.subprocess.run(
@@ -3681,7 +3694,7 @@ def test_delete_chain_removes_worktree_holding_golem_hooks(owned_worktree, ledge
                 task_id=PARENT_ID,
                 worktree=str(worktree),
                 gate="false",
-                gate_reason=GATE_REASON,
+                gate_stop_reason=GATE_STOP_REASON,
             ),
             CHILD_ID: task_record(golem.STATUS_WAITING, task_id=CHILD_ID, after=PARENT_ID),
         },
@@ -5361,3 +5374,340 @@ def test_delete_removes_recorded_progress(ledger_path):
 
     assert golem.main(["delete", TASK_ID]) == 0
     assert not any(path.exists() for path in paths)
+
+
+SETUP_SUFFIX = "blocked by another ticket"
+
+
+def setup_command(tmp_path, output="{}", *, exit_code=0, stderr=""):
+    log_path = tmp_path / "setup-stdin"
+    return (
+        f"cat >> {log_path}; echo >> {log_path}; printf %s {shlex.quote(output)}; "
+        f"printf %s {shlex.quote(stderr)} >&2; exit {exit_code}"
+    )
+
+
+def setup_inputs(tmp_path):
+    log_path = tmp_path / "setup-stdin"
+    if not log_path.exists():
+        return []
+    return [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines() if line]
+
+
+def create_directory(tmp_path, name="platform"):
+    directory = tmp_path / name
+    directory.mkdir()
+    return directory
+
+
+def directory_setup_output(directory, **fields: str):
+    return json.dumps({"directory": str(directory), **fields})
+
+
+def is_prompt_passed(claude_args, prompt):
+    return f"--print\n{prompt}\n--" in "\n".join(claude_args)
+
+
+def schedule_setup_chain(ledger_path, setup, *extra_arguments: str):
+    golem.main(
+        [
+            *["run", PARENT_ID, PARENT_PROMPT, "--now", "--no-worktree", "--setup", setup],
+            *["--then", CHILD_ID, CHILD_PROMPT, *extra_arguments],
+        ]
+    )
+    return read_task(ledger_path, PARENT_ID)
+
+
+@pytest.mark.parametrize("is_returning_fields", [True, False], ids=["fields", "neither"])
+def test_setup_prepares_directory_and_prompt_for_chain(
+    installed_launch_agent, fake_commands, ledger_path, tmp_path, capsys, is_returning_fields
+):
+    directory = create_directory(tmp_path)
+    output = (
+        directory_setup_output(directory, prompt_suffix=SETUP_SUFFIX)
+        if is_returning_fields
+        else "{}"
+    )
+    expected_directory = str(directory) if is_returning_fields else str(Path.cwd())
+    expected_prompt = f"{PARENT_PROMPT}\n\n{SETUP_SUFFIX}" if is_returning_fields else PARENT_PROMPT
+    write_claude_output(fake_commands, CLAUDE_RESULT)
+    parent = schedule_setup_chain(ledger_path, setup_command(tmp_path, output))
+
+    assert golem.main(["_execute", PARENT_ID, parent["session_id"]]) == 0
+
+    tasks = read_tasks(ledger_path)
+    assert setup_inputs(tmp_path) == [
+        {
+            "task_id": PARENT_ID,
+            "session_id": parent["session_id"],
+            "directory": str(Path.cwd()),
+            "prompt": PARENT_PROMPT,
+        }
+    ]
+    assert logged_claude_cwds(fake_commands) == [expected_directory] * 2
+    assert is_prompt_passed(logged_claude_calls(fake_commands)[0], expected_prompt)
+    assert [tasks[task_id]["cwd"] for task_id in (PARENT_ID, CHILD_ID)] == [expected_directory] * 2
+    assert tasks[PARENT_ID]["prompt"] == expected_prompt
+    capsys.readouterr()
+    assert golem.main(["show", PARENT_ID]) == 0
+    shown = capsys.readouterr().err
+    assert expected_directory in shown
+    assert expected_prompt in shown
+
+
+def test_setup_seeds_gate_hooks_in_returned_directory(
+    installed_launch_agent, ledger_path, tmp_path
+):
+    directory = create_directory(tmp_path)
+    parent = schedule_setup_chain(
+        ledger_path,
+        setup_command(tmp_path, directory_setup_output(directory)),
+        "--gate",
+        "exit 1",
+    )
+
+    assert golem.main(["_execute", PARENT_ID, parent["session_id"]]) == 0
+
+    assert golem.local_settings_path(str(directory)).exists()
+    assert not golem.local_settings_path(str(Path.cwd())).exists()
+
+
+@pytest.mark.parametrize(
+    ("setup_arguments", "expected_reason"),
+    [
+        pytest.param({"exit_code": 3, "stderr": "no ticket\n"}, "no ticket", id="non-zero"),
+        pytest.param({"exit_code": 3}, "setup exited with status 3", id="non-zero-silent"),
+        pytest.param({"output": "not json"}, "setup output is not valid JSON", id="invalid-json"),
+        pytest.param({"output": "[]"}, golem.SETUP_OUTPUT_ERROR, id="not-object"),
+        pytest.param(
+            {"output": json.dumps({"directory": "missing"})},
+            "setup directory does not exist",
+            id="missing-directory",
+        ),
+        pytest.param(
+            {"output": json.dumps({"directory": "~nosuchuser/x"})},
+            "setup directory is not usable",
+            id="unusable-directory",
+        ),
+    ],
+)
+def test_failed_setup_fails_task_and_keeps_reason(
+    installed_launch_agent,
+    fake_commands,
+    ledger_path,
+    tmp_path,
+    capsys,
+    setup_arguments,
+    expected_reason,
+):
+    parent = schedule_setup_chain(ledger_path, setup_command(tmp_path, **setup_arguments))
+
+    assert golem.main(["_execute", PARENT_ID, parent["session_id"]]) == 1
+
+    tasks = read_tasks(ledger_path)
+    assert tasks[PARENT_ID]["status"] == golem.STATUS_FAILED
+    assert expected_reason in tasks[PARENT_ID]["setup_failure_reason"]
+    assert tasks[CHILD_ID]["status"] == golem.STATUS_WAITING
+    assert logged_claude_calls(fake_commands) == []
+    [notification] = logged_osascript_calls(fake_commands)
+    assert notification[-2] == f"golem: {PARENT_ID} failed"
+    assert expected_reason in notification[-1]
+    assert expected_reason in list_row(list_output(capsys), PARENT_ID)
+    assert golem.main(["show", PARENT_ID]) == 1
+    assert expected_reason in capsys.readouterr().err
+
+
+def test_setup_that_cannot_run_fails_task(installed_launch_agent, ledger_path, tmp_path):
+    missing_directory = str(tmp_path / "missing")
+    write_task(ledger_path, golem.STATUS_SCHEDULED, setup="true", cwd=missing_directory)
+
+    assert golem.main(["_execute", TASK_ID, f"{TASK_ID}-session"]) == 1
+
+    assert missing_directory in read_task(ledger_path)["setup_failure_reason"]
+
+
+def test_timed_out_setup_fails_task(installed_launch_agent, ledger_path, monkeypatch):
+    monkeypatch.setattr(golem, "GATE_TIMEOUT_SECONDS", 0.2)
+    write_task(ledger_path, golem.STATUS_SCHEDULED, setup="sleep 30")
+
+    assert golem.main(["_execute", TASK_ID, f"{TASK_ID}-session"]) == 1
+
+    task = read_task(ledger_path)
+    assert task["status"] == golem.STATUS_FAILED
+    assert "timed out" in task["setup_failure_reason"]
+
+
+def test_usage_limit_resume_skips_setup(
+    installed_launch_agent, fake_commands, ledger_path, tmp_path, monkeypatch
+):
+    directory = create_directory(tmp_path)
+    monkeypatch.setattr(golem, "next_reset_time", lambda: RESET_TIME)
+    write_claude_output(
+        fake_commands, USAGE_LIMIT_RESULT, api_error_status=golem.USAGE_LIMIT_HTTP_STATUS
+    )
+    write_task(
+        ledger_path,
+        golem.STATUS_SCHEDULED,
+        setup=setup_command(tmp_path, directory_setup_output(directory)),
+        no_worktree=True,
+    )
+    assert golem.main(["_execute", TASK_ID, f"{TASK_ID}-session"]) == 0
+    assert read_task(ledger_path)["status"] == golem.STATUS_SCHEDULED
+
+    write_claude_output(fake_commands, CLAUDE_RESULT)
+    set_task_due_now(ledger_path)
+    assert golem.main(["_execute", TASK_ID, f"{TASK_ID}-session"]) == 0
+
+    assert len(setup_inputs(tmp_path)) == 1
+    assert logged_claude_cwds(fake_commands) == [str(directory)] * 2
+    assert read_task(ledger_path)["status"] == golem.STATUS_NEEDS_REVIEW
+
+
+def execute_with_busy_directory(directory, task_id, session_id):
+    busy_lock_file = golem.acquire_lock(golem.directory_lock_path(str(directory)))
+    assert busy_lock_file is not None
+    try:
+        return golem.main(["_execute", task_id, session_id])
+    finally:
+        golem.release_lock(busy_lock_file)
+
+
+def test_setup_into_busy_directory_requeues_without_rerunning_setup(
+    installed_launch_agent, fake_commands, ledger_path, tmp_path, capsys
+):
+    directory = create_directory(tmp_path)
+    write_claude_output(fake_commands, CLAUDE_RESULT)
+    parent = schedule_setup_chain(
+        ledger_path, setup_command(tmp_path, directory_setup_output(directory))
+    )
+
+    execute_with_busy_directory(directory, PARENT_ID, parent["session_id"])
+
+    assert read_task(ledger_path, PARENT_ID)["status"] == golem.STATUS_SCHEDULED
+    assert f"waiting for directory: {directory}" in list_row(list_output(capsys), PARENT_ID)
+    queued_lock_file = golem.acquire_lock(golem.directory_lock_path(str(Path.cwd())))
+    assert queued_lock_file is not None
+    golem.release_lock(queued_lock_file)
+    set_task_due_now(ledger_path, PARENT_ID)
+    assert golem.main(["_execute", PARENT_ID, parent["session_id"]]) == 0
+
+    assert len(setup_inputs(tmp_path)) == 1
+    assert logged_claude_cwds(fake_commands) == [str(directory)] * 2
+
+
+@pytest.mark.parametrize("failure", ["setup", "agent", "busy-directory"])
+def test_retry_runs_setup_again_only_after_failed_setup(
+    installed_launch_agent,
+    fake_commands,
+    ledger_path,
+    tmp_path,
+    monkeypatch,
+    failure,
+):
+    directory = create_directory(tmp_path)
+    first_run_path = tmp_path / "first-run"
+    setup = setup_command(tmp_path, directory_setup_output(directory, prompt_suffix=SETUP_SUFFIX))
+    if failure == "setup":
+        failing_setup = setup_command(tmp_path, exit_code=1)
+        setup = f"if [ -e {first_run_path} ]; then {setup}; else touch {first_run_path}; {failing_setup}; fi"
+    elif failure == "agent":
+        monkeypatch.setenv("GOLEM_CLAUDE_FAIL_TASK", TASK_ID)
+    write_task(ledger_path, golem.STATUS_SCHEDULED, setup=setup, no_worktree=True)
+    if failure == "busy-directory":
+        monkeypatch.setattr(golem, "MAX_SETUP_BUSY_RETRIES", 0)
+        assert execute_with_busy_directory(directory, TASK_ID, f"{TASK_ID}-session") == 1
+        assert (
+            read_task(ledger_path)["setup_failure_reason"]
+            == f"setup directory stayed busy: {directory}"
+        )
+    else:
+        assert golem.main(["_execute", TASK_ID, f"{TASK_ID}-session"]) == 1
+    monkeypatch.delenv("GOLEM_CLAUDE_FAIL_TASK", raising=False)
+
+    assert golem.main(["retry", TASK_ID, "--now"]) == 0
+    assert golem.main(["_execute", TASK_ID, read_task(ledger_path)["session_id"]]) == 0
+
+    assert len(setup_inputs(tmp_path)) == (2 if failure == "setup" else 1)
+    assert logged_claude_cwds(fake_commands)[-1] == str(directory)
+    assert is_prompt_passed(logged_claude_args(fake_commands), f"{PROMPT}\n\n{SETUP_SUFFIX}")
+    assert read_task(ledger_path)["status"] == golem.STATUS_NEEDS_REVIEW
+
+
+def test_setups_in_one_directory_run_one_at_a_time(
+    installed_launch_agent, ledger_path, tmp_path, monkeypatch
+):
+    setup_started_path = tmp_path / "setup-started"
+    setup_hold_path = tmp_path / "setup-hold"
+    agent_hold_path = tmp_path / "agent-hold"
+    agent_started_path = tmp_path / "agent-started"
+    setup_hold_path.touch()
+    agent_hold_path.touch()
+    monkeypatch.setenv("GOLEM_CLAUDE_HOLD", str(agent_hold_path))
+    monkeypatch.setenv("GOLEM_CLAUDE_STARTED", str(agent_started_path))
+    held_directory = create_directory(tmp_path, "held")
+    sibling_directory = create_directory(tmp_path, "sibling")
+    held_setup = (
+        f"touch {setup_started_path}; while [ -e {setup_hold_path} ]; do sleep 0.05; done; "
+        f"printf %s {shlex.quote(directory_setup_output(held_directory))}"
+    )
+    sibling_setup = setup_command(tmp_path, directory_setup_output(sibling_directory))
+    write_tasks(
+        ledger_path,
+        {
+            PARENT_ID: task_record(
+                golem.STATUS_SCHEDULED, task_id=PARENT_ID, setup=held_setup, no_worktree=True
+            ),
+            SIBLING_ID: task_record(
+                golem.STATUS_SCHEDULED,
+                task_id=SIBLING_ID,
+                setup=sibling_setup,
+                no_worktree=True,
+                environment={"PATH": os.environ["PATH"], "GOLEM_CLAUDE_HOLD": ""},
+            ),
+        },
+    )
+    held_executor = golem.subprocess.Popen(
+        [sys.executable, golem.__file__, "_execute", PARENT_ID, PARENT_SESSION]
+    )
+    try:
+        wait_until(setup_started_path.exists)
+        assert golem.main(["_execute", SIBLING_ID, f"{SIBLING_ID}-session"]) == 0
+        assert read_task(ledger_path, SIBLING_ID)["status"] == golem.STATUS_SCHEDULED
+        assert setup_inputs(tmp_path) == []
+
+        setup_hold_path.unlink()
+        wait_until(agent_started_path.exists)
+        assert golem.main(["_execute", SIBLING_ID, f"{SIBLING_ID}-session"]) == 0
+        assert read_task(ledger_path, SIBLING_ID)["cwd"] == str(sibling_directory)
+    finally:
+        setup_hold_path.unlink(missing_ok=True)
+        agent_hold_path.unlink(missing_ok=True)
+        held_executor.wait(timeout=15)
+    assert read_task(ledger_path, PARENT_ID)["cwd"] == str(held_directory)
+
+
+def test_codex_task_gets_setup_directory_and_suffix(
+    installed_launch_agent, fake_commands, ledger_path, tmp_path
+):
+    directory = create_directory(tmp_path)
+    setup = setup_command(tmp_path, directory_setup_output(directory, prompt_suffix=SETUP_SUFFIX))
+    golem.main(
+        ["run", TASK_ID, PROMPT, "--backend", "codex", "--now", "--no-worktree", "--setup", setup]
+    )
+
+    assert golem.main(["_execute", TASK_ID, read_task(ledger_path)["session_id"]]) == 0
+
+    assert setup_inputs(tmp_path)[0]["session_id"] is None
+    assert fake_commands["codex-cwd"].read_text(encoding="utf-8").splitlines()[-1] == str(directory)
+    assert (
+        fake_commands["codex-stdin"]
+        .read_text(encoding="utf-8")
+        .endswith(f"{PROMPT}\n\n{SETUP_SUFFIX}\x1e\n")
+    )
+
+
+def test_setup_requires_no_worktree(installed_launch_agent, ledger_path):
+    with pytest.raises(SystemExit, match="--setup requires --no-worktree"):
+        golem.main(["run", TASK_ID, PROMPT, "--now", "--setup", "true"])
+
+    assert not ledger_path.exists()
