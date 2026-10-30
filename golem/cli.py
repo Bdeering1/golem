@@ -36,7 +36,7 @@ def config_path() -> Path:
     return ledger.xdg_golem_directory("XDG_CONFIG_HOME", Path.home() / ".config") / "config.toml"
 
 
-def invalid_config_error() -> str:
+def invalid_config_message_prefix() -> str:
     return f"golem: invalid config file {config_path()}"
 
 
@@ -47,39 +47,36 @@ def load_config() -> dict[str, object]:
     try:
         return tomllib.loads(path.read_text(encoding="utf-8"))
     except tomllib.TOMLDecodeError as error:
-        raise SystemExit(f"{invalid_config_error()}: {error}") from error
+        raise SystemExit(f"{invalid_config_message_prefix()}: {error}") from error
+
+
+def load_string_table(table_name: str, item_label: str) -> dict[str, str]:
+    table = load_config().get(table_name)
+    if table is None:
+        return {}
+    if not isinstance(table, dict):
+        raise SystemExit(f"{invalid_config_message_prefix()}: {table_name} must be a table")
+    entries = cast("dict[str, object]", table)
+    validated_table: dict[str, str] = {}
+    for name, value in entries.items():
+        if not isinstance(value, str):
+            raise SystemExit(
+                f"{invalid_config_message_prefix()}: {item_label} {name} must be a string"
+            )
+        validated_table[name] = value
+    return validated_table
 
 
 def load_aliases() -> dict[str, str]:
-    aliases = load_config().get("aliases")
-    if aliases is None:
-        return {}
-    if not isinstance(aliases, dict):
-        raise SystemExit(f"{invalid_config_error()}: aliases must be a table")
-    alias_table = cast("dict[str, object]", aliases)
-    validated_aliases: dict[str, str] = {}
-    for name, template in alias_table.items():
-        if not isinstance(template, str):
-            raise SystemExit(f"{invalid_config_error()}: alias {name} must be a string")
-        validated_aliases[name] = template
-    return validated_aliases
+    return load_string_table("aliases", "alias")
 
 
 def load_environment() -> dict[str, str]:
-    environment = load_config().get("env")
-    if environment is None:
-        return {}
-    if not isinstance(environment, dict):
-        raise SystemExit(f"{invalid_config_error()}: env must be a table")
-    environment_table = cast("dict[str, object]", environment)
-    validated_environment: dict[str, str] = {}
-    for name, value in environment_table.items():
+    environment = load_string_table("env", "env")
+    for name in environment:
         if not ENVIRONMENT_NAME_PATTERN.fullmatch(name):
-            raise SystemExit(f"{invalid_config_error()}: env name {name} is not a valid name")
-        if not isinstance(value, str):
-            raise SystemExit(f"{invalid_config_error()}: env {name} must be a string")
-        validated_environment[name] = value
-    return validated_environment
+            raise SystemExit(f"{invalid_config_message_prefix()}: env name {name} is invalid")
+    return environment
 
 
 def environment_from_arguments(assignments: list[str]) -> dict[str, str]:
@@ -89,7 +86,7 @@ def environment_from_arguments(assignments: list[str]) -> dict[str, str]:
         if not separator:
             raise SystemExit(f"golem: --env expects NAME=VALUE, got: {assignment}")
         if not ENVIRONMENT_NAME_PATTERN.fullmatch(name):
-            raise SystemExit(f"golem: --env name is not a valid name: {name}")
+            raise SystemExit(f"golem: --env name is invalid: {name}")
         environment[name] = value
     return environment
 

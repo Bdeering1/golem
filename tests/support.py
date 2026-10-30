@@ -66,24 +66,22 @@ def write_tasks(ledger_path, tasks):
     ledger_path.write_text(json.dumps(tasks), encoding="utf-8")
 
 
+def write_config_text(text):
+    path = cli.config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def write_config_table(table_name, values):
+    lines = [
+        f"[{table_name}]",
+        *(f"{name} = {json.dumps(value)}" for name, value in values.items()),
+    ]
+    write_config_text("\n".join(lines) + "\n")
+
+
 def write_aliases(aliases):
-    path = cli.config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    lines = [
-        "[aliases]",
-        *(f"{name} = {json.dumps(template)}" for name, template in aliases.items()),
-    ]
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
-def write_environment_config(environment):
-    path = cli.config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    lines = [
-        "[env]",
-        *(f"{name} = {json.dumps(value)}" for name, value in environment.items()),
-    ]
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    write_config_table("aliases", aliases)
 
 
 def list_output(capsys):

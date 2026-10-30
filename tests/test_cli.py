@@ -130,7 +130,9 @@ def test_missing_and_invalid_alias_config_do_not_block_builtin_commands(capsys):
 
 @pytest.mark.parametrize("backend", ["claude", "codex"])
 def test_run_environment_precedence_and_follow_ups(installed_launch_agent, ledger_path, backend):
-    support.write_environment_config({"SHARED": "config", "FROM_CONFIG": "config"})
+    support.write_config_table(
+        "env", {"SHARED": "config", "FROM_CONFIG": "config", "PATH": "/config/bin"}
+    )
 
     assert (
         cli.main(
@@ -143,7 +145,7 @@ def test_run_environment_precedence_and_follow_ups(installed_launch_agent, ledge
         == 0
     )
 
-    expected = {"SHARED": "flag", "FROM_CONFIG": "config", "EMPTY": ""}
+    expected = {"SHARED": "flag", "FROM_CONFIG": "config", "PATH": "/config/bin", "EMPTY": ""}
     for task_id in (support.TASK_ID, support.CHILD_ID):
         environment = support.read_task(ledger_path, task_id)["environment"]
         assert expected.items() <= environment.items()
@@ -156,7 +158,7 @@ def test_run_after_parent_uses_its_own_environment(installed_launch_agent, ledge
         task_id=support.PARENT_ID,
         environment={"PARENT_ONLY": "1"},
     )
-    support.write_environment_config({"OWN": "config"})
+    support.write_config_table("env", {"OWN": "config"})
 
     assert (
         cli.main(["run", support.CHILD_ID, support.CHILD_PROMPT, "--after", support.PARENT_ID]) == 0
@@ -171,19 +173,17 @@ def test_run_after_parent_uses_its_own_environment(installed_launch_agent, ledge
     ("config_text", "arguments", "message"),
     [
         pytest.param(None, ["--env", "NO_EQUALS"], "NAME=VALUE", id="flag-without-equals"),
-        pytest.param(None, ["--env", "1BAD=x"], "not a valid name", id="flag-bad-name"),
+        pytest.param(None, ["--env", "1BAD=x"], "name is invalid", id="flag-bad-name"),
         pytest.param("env = 1\n", [], "env must be a table", id="config-not-a-table"),
         pytest.param("[env]\nA = 1\n", [], "env A must be a string", id="config-non-string"),
-        pytest.param('[env]\n"a-b" = "x"\n', [], "not a valid name", id="config-bad-name"),
+        pytest.param('[env]\n"a-b" = "x"\n', [], "name a-b is invalid", id="config-bad-name"),
     ],
 )
 def test_run_rejects_invalid_environment_without_changing_the_ledger(
     installed_launch_agent, ledger_path, config_text, arguments, message
 ):
     if config_text is not None:
-        path = cli.config_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(config_text, encoding="utf-8")
+        support.write_config_text(config_text)
 
     with pytest.raises(SystemExit, match=message):
         cli.main(["run", support.TASK_ID, support.PROMPT, "--now", *arguments])
