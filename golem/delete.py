@@ -2,7 +2,7 @@ from contextlib import ExitStack
 from datetime import UTC, datetime
 
 from golem import chains, git, ledger, progress_log, task_directories, worktree_cleanup
-from golem.backends import claude_hooks
+from golem.backends import claude_hooks, registry
 
 
 def delete_task_and_release_worktrees(
@@ -153,12 +153,8 @@ def print_deleted_task(
     task_id: str, task: ledger.Task, worktree: str | None, *, is_removed: bool
 ) -> None:
     print(f"golem: deleted task: {task_id}")
-    session = (
-        task.get("thread_id")
-        if ledger.task_backend(task) == ledger.BACKEND_CODEX
-        else task["session_id"]
-    )
-    if isinstance(session, str):
+    session = registry.task_backend(task).conversation_id(task)
+    if session is not None:
         print(f"golem: session: {session}")
     if worktree is not None:
         print(f"golem: worktree: {worktree}")

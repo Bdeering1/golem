@@ -1,5 +1,9 @@
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
+from typing import TYPE_CHECKING, Protocol
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 from golem import display, ledger
 
@@ -38,11 +42,28 @@ def validated_reset_time(reset_time: datetime) -> datetime:
     return reset_time
 
 
-def transcript_paths(task: ledger.Task) -> list[Path]:
-    if ledger.task_backend(task) == ledger.BACKEND_CLAUDE:
-        return list((Path.home() / ".claude" / "projects").glob(f"*/{task['session_id']}.jsonl"))
-    thread_id = task.get("thread_id")
-    if not isinstance(thread_id, str):
-        return []
-    codex_home = Path(task.get("environment", {}).get("CODEX_HOME", Path.home() / ".codex"))
-    return list((codex_home / "sessions").glob(f"**/rollout-*-{thread_id}.jsonl"))
+@dataclass(frozen=True)
+class RunOutcome:
+    returncode: int
+    result: str | None
+    is_usage_limit: bool
+    stderr: str = ""
+    working_directory: str | None = None
+
+
+class Backend(Protocol):
+    NAME: str
+    IS_GATE_SUPPORTED: bool
+    IS_AUTO_PICKUP_SUPPORTED: bool
+
+    def run(
+        self, task_id: str, task: ledger.Task, lock_file_descriptors: tuple[int, ...]
+    ) -> RunOutcome: ...
+
+    def next_reset_time(self) -> datetime | None: ...
+
+    def validate_run_arguments(self, agent_args: list[str]) -> None: ...
+
+    def conversation_id(self, task: ledger.Task) -> str | None: ...
+
+    def transcript_paths(self, task: ledger.Task) -> list[Path]: ...

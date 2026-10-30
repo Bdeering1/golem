@@ -3,14 +3,14 @@ import sys
 from typing import cast
 
 from golem import chains, launch_agent, ledger, locks, notifications, spawn
-from golem.backends import claude_hooks, common
+from golem.backends import claude_hooks, registry
 
 GATE_TIMEOUT_SECONDS = 300
 HOOK_GATE_TIMEOUT_SECONDS = 20
 
 
 def gate_input_json(task_id: str, task: ledger.Task) -> str:
-    transcript_path = next(iter(common.transcript_paths(task)), None)
+    transcript_path = next(iter(registry.task_backend(task).transcript_paths(task)), None)
     return json.dumps(
         {
             "task_id": task_id,

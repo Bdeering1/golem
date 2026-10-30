@@ -25,7 +25,7 @@ from golem import (
     scheduling,
     worktree_cleanup,
 )
-from golem.backends import claude_hooks, codex, common
+from golem.backends import claude_hooks, common, registry
 
 SCHEDULE_DESCRIPTION = "Run at the next usage reset, or immediately if no usage window is active."
 ALIAS_PLACEHOLDER_PATTERN = re.compile(r"\{(\d+)\}")
@@ -117,10 +117,11 @@ def task_id_from_arguments(arguments: ledger.Arguments) -> str:
 
 
 def run_task_from_arguments(arguments: ledger.Arguments) -> int:
-    if arguments.auto_pickup and arguments.backend == ledger.BACKEND_CODEX:
-        raise SystemExit("golem: --auto-pickup does not support Codex tasks")
-    if arguments.gate is not None and arguments.backend == ledger.BACKEND_CODEX:
-        raise SystemExit("golem: --gate does not support Codex tasks")
+    backend = registry.BACKENDS[arguments.backend]
+    if arguments.auto_pickup and not backend.IS_AUTO_PICKUP_SUPPORTED:
+        raise SystemExit(f"golem: --auto-pickup does not support {backend.NAME} tasks")
+    if arguments.gate is not None and not backend.IS_GATE_SUPPORTED:
+        raise SystemExit(f"golem: --gate does not support {backend.NAME} tasks")
     launch_agent.require_launch_agent()
     task_id = task_id_from_arguments(arguments)
     prompt_text = (
@@ -155,9 +156,7 @@ def run_task_from_arguments(arguments: ledger.Arguments) -> int:
         arguments.backend,
         placement,
     )
-    if arguments.backend == ledger.BACKEND_CODEX:
-        codex.reject_unsupported_codex_arguments(list(task_args), is_run=True)
-        codex.require_codex_subscription(os.environ.copy())
+    backend.validate_run_arguments(list(task_args))
     exit_code = scheduling.schedule_run_task(
         arguments, task_id, prompt_text, task_args, follow_up_records, placement
     )
@@ -252,7 +251,7 @@ def add_run_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
     run_command.add_argument("id")
     run_command.add_argument(
         "--backend",
-        choices=(ledger.BACKEND_CLAUDE, ledger.BACKEND_CODEX),
+        choices=tuple(registry.BACKENDS),
         default=ledger.BACKEND_CLAUDE,
     )
     prompt_group = run_command.add_mutually_exclusive_group(required=True)

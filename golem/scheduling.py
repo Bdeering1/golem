@@ -4,7 +4,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 
 from golem import chains, launch_agent, ledger, progress_log, spawn, task_directories
-from golem.backends import claude, claude_hooks, codex
+from golem.backends import claude_hooks, registry
 
 
 def new_session_id() -> str:
@@ -210,13 +210,7 @@ def planned_execution_time(backend: str, *, is_now: bool, at_text: str | None) -
     if is_now:
         return None
     when = (
-        (
-            codex.next_codex_reset_time()
-            if backend == ledger.BACKEND_CODEX
-            else claude.next_reset_time()
-        )
-        if at_text is None
-        else scheduled_time(at_text)
+        registry.BACKENDS[backend].next_reset_time() if at_text is None else scheduled_time(at_text)
     )
     if when is None:
         return None
