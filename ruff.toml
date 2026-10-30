@@ -70,7 +70,7 @@ ignore = [
 ]
 
 [lint.per-file-ignores]
-"golem.py" = [
+"golem/**" = [
     "T201", # CLI output
     "S603", # CLI forwards user arguments to subprocesses without a shell
     "S607", # CLI uses the user's executables on PATH
@@ -86,6 +86,9 @@ ignore = [
     "ANN204",  # fakes do not require `__init__` annotations
     "PLR0917", # pytest passes fixtures and parameters positionally
 ]
+
+[lint.flake8-tidy-imports]
+ban-relative-imports = "all"
 
 [lint.pylint]
 max-positional-args = 6
