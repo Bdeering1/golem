@@ -27,7 +27,7 @@ class StubBackend:
         self.run_task_ids.append(task_id)
         return self.outcomes.pop(0)
 
-    def next_reset_time(self):
+    def next_reset_time(self) -> datetime | None:
         return support.RESET_TIME
 
     def validate_run_arguments(self, agent_args: list[str]) -> None:
