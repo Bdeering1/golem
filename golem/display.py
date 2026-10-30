@@ -18,7 +18,6 @@ STATUS_COLORS = {
 }
 ANSI_RESET = "\033[0m"
 LIST_HEADERS = ("ID", "STEP", "STATUS", "DIRECTORY", "DETAIL")
-LIST_STATUS_COLUMN = LIST_HEADERS.index("STATUS")
 
 
 class ListRow(NamedTuple):
@@ -27,6 +26,9 @@ class ListRow(NamedTuple):
     status: str
     directory: str
     detail: str
+
+
+LIST_STATUS_COLUMN = ListRow._fields.index("status")
 
 
 def show_task_result(task_id: str) -> int:
