@@ -26,6 +26,10 @@ class ListRow(NamedTuple):
     status: str
     directory: str
     detail: str
+    is_detail_time: bool
+
+    def cells(self) -> tuple[str, str, str, str, str]:
+        return (self.task_id, self.step, self.status, self.directory, self.detail)
 
 
 LIST_STATUS_COLUMN = ListRow._fields.index("status")
@@ -141,6 +145,7 @@ def list_rows(tasks: ledger.Tasks, today: date) -> list[ListRow]:
                 shown_task["status"],
                 shown_task["cwd"],
                 list_detail(shown_task, today),
+                detail_timestamp(shown_task) is not None,
             )
         )
     rows.sort(key=lambda row: (ledger.LIST_STATUS_ORDER.index(row.status), row.task_id))
@@ -149,14 +154,14 @@ def list_rows(tasks: ledger.Tasks, today: date) -> list[ListRow]:
 
 def table_lines(rows: list[ListRow], *, is_color: bool) -> list[str]:
     widths = [
-        max(len(header), *(len(row[index]) for row in rows))
+        max(len(header), *(len(row.cells()[index]) for row in rows))
         for index, header in enumerate(LIST_HEADERS)
     ]
     lines = [
         "  ".join(value.ljust(width) for value, width in zip(LIST_HEADERS, widths, strict=True))
     ]
     for row in rows:
-        cells = [value.ljust(width) for value, width in zip(row, widths, strict=True)]
+        cells = [value.ljust(width) for value, width in zip(row.cells(), widths, strict=True)]
         cells[LIST_STATUS_COLUMN] = display_status(
             row.status, widths[LIST_STATUS_COLUMN], is_color=is_color
         )
@@ -181,7 +186,7 @@ def list_tasks() -> int:
         ]
     for line in table_lines(table_rows, is_color=is_color_enabled()):
         print(line)
-    if any(detail_timestamp(tasks[row.task_id]) is not None for row in rows):
+    if any(row.is_detail_time for row in rows):
         print("\nTimes are local.")
     return 0
 
