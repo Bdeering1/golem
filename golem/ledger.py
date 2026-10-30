@@ -96,6 +96,7 @@ class Arguments(argparse.Namespace):
     session_id: str
     remove_worktree: bool
     then: list[list[str]]
+    env: list[str]
     auto_pickup: bool
     no_worktree: bool
     gate: str | None

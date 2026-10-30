@@ -29,33 +29,69 @@ from golem.backends import claude_hooks, common, registry
 
 SCHEDULE_DESCRIPTION = "Run at the next usage reset, or immediately if no usage window is active."
 ALIAS_PLACEHOLDER_PATTERN = re.compile(r"\{(\d+)\}")
+ENVIRONMENT_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 def config_path() -> Path:
     return ledger.xdg_golem_directory("XDG_CONFIG_HOME", Path.home() / ".config") / "config.toml"
 
 
-def load_aliases() -> dict[str, str]:
+def invalid_config_error() -> str:
+    return f"golem: invalid config file {config_path()}"
+
+
+def load_config() -> dict[str, object]:
     path = config_path()
     if not path.exists():
         return {}
-    invalid_config_error = f"golem: invalid config file {path}"
     try:
-        config = tomllib.loads(path.read_text(encoding="utf-8"))
+        return tomllib.loads(path.read_text(encoding="utf-8"))
     except tomllib.TOMLDecodeError as error:
-        raise SystemExit(f"{invalid_config_error}: {error}") from error
-    aliases = config.get("aliases")
+        raise SystemExit(f"{invalid_config_error()}: {error}") from error
+
+
+def load_aliases() -> dict[str, str]:
+    aliases = load_config().get("aliases")
     if aliases is None:
         return {}
     if not isinstance(aliases, dict):
-        raise SystemExit(f"{invalid_config_error}: aliases must be a table")
+        raise SystemExit(f"{invalid_config_error()}: aliases must be a table")
     alias_table = cast("dict[str, object]", aliases)
     validated_aliases: dict[str, str] = {}
     for name, template in alias_table.items():
         if not isinstance(template, str):
-            raise SystemExit(f"{invalid_config_error}: alias {name} must be a string")
+            raise SystemExit(f"{invalid_config_error()}: alias {name} must be a string")
         validated_aliases[name] = template
     return validated_aliases
+
+
+def load_environment() -> dict[str, str]:
+    environment = load_config().get("env")
+    if environment is None:
+        return {}
+    if not isinstance(environment, dict):
+        raise SystemExit(f"{invalid_config_error()}: env must be a table")
+    environment_table = cast("dict[str, object]", environment)
+    validated_environment: dict[str, str] = {}
+    for name, value in environment_table.items():
+        if not ENVIRONMENT_NAME_PATTERN.fullmatch(name):
+            raise SystemExit(f"{invalid_config_error()}: env name {name} is not a valid name")
+        if not isinstance(value, str):
+            raise SystemExit(f"{invalid_config_error()}: env {name} must be a string")
+        validated_environment[name] = value
+    return validated_environment
+
+
+def environment_from_arguments(assignments: list[str]) -> dict[str, str]:
+    environment = load_environment()
+    for assignment in assignments:
+        name, separator, value = assignment.partition("=")
+        if not separator:
+            raise SystemExit(f"golem: --env expects NAME=VALUE, got: {assignment}")
+        if not ENVIRONMENT_NAME_PATTERN.fullmatch(name):
+            raise SystemExit(f"golem: --env name is not a valid name: {name}")
+        environment[name] = value
+    return environment
 
 
 def expand_alias(
@@ -132,6 +168,7 @@ def run_task_from_arguments(arguments: ledger.Arguments) -> int:
     task_args = tuple(arguments.agent_args)
     placement = scheduling.RunPlacement(
         str(Path.cwd()),
+        environment=environment_from_arguments(arguments.env),
         is_auto_pickup=arguments.auto_pickup,
         is_no_worktree=arguments.no_worktree,
         gate=arguments.gate,
@@ -264,6 +301,13 @@ def add_run_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
         default=[],
         metavar=("ID", "PROMPT"),
         help="run PROMPT as task ID after the previous task succeeds; repeatable",
+    )
+    run_command.add_argument(
+        "--env",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help="set an environment variable for the task; repeatable; follow-ups get it too",
     )
     run_command.add_argument(
         "--auto-pickup",

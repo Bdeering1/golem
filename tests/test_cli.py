@@ -4,7 +4,7 @@ from typing import override
 
 import pytest
 
-from golem import cli, launch_agent, scheduling
+from golem import cli, launch_agent, ledger, scheduling
 from tests import support
 
 
@@ -126,3 +126,66 @@ def test_missing_and_invalid_alias_config_do_not_block_builtin_commands(capsys):
     assert capsys.readouterr().out == "golem: no tasks\n"
     with pytest.raises(SystemExit, match=re.escape(str(path))):
         cli.main(["alias", "list"])
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex"])
+def test_run_environment_precedence_and_follow_ups(installed_launch_agent, ledger_path, backend):
+    support.write_environment_config({"SHARED": "config", "FROM_CONFIG": "config"})
+
+    assert (
+        cli.main(
+            [
+                *["run", support.TASK_ID, support.PROMPT, "--backend", backend, "--now"],
+                *["--env", "SHARED=first", "--env", "SHARED=flag", "--env", "EMPTY="],
+                *["--then", support.CHILD_ID, support.CHILD_PROMPT],
+            ]
+        )
+        == 0
+    )
+
+    expected = {"SHARED": "flag", "FROM_CONFIG": "config", "EMPTY": ""}
+    for task_id in (support.TASK_ID, support.CHILD_ID):
+        environment = support.read_task(ledger_path, task_id)["environment"]
+        assert expected.items() <= environment.items()
+
+
+def test_run_after_parent_uses_its_own_environment(installed_launch_agent, ledger_path):
+    support.write_task(
+        ledger_path,
+        ledger.STATUS_SCHEDULED,
+        task_id=support.PARENT_ID,
+        environment={"PARENT_ONLY": "1"},
+    )
+    support.write_environment_config({"OWN": "config"})
+
+    assert (
+        cli.main(["run", support.CHILD_ID, support.CHILD_PROMPT, "--after", support.PARENT_ID]) == 0
+    )
+
+    environment = support.read_task(ledger_path, support.CHILD_ID)["environment"]
+    assert environment["OWN"] == "config"
+    assert "PARENT_ONLY" not in environment
+
+
+@pytest.mark.parametrize(
+    ("config_text", "arguments", "message"),
+    [
+        pytest.param(None, ["--env", "NO_EQUALS"], "NAME=VALUE", id="flag-without-equals"),
+        pytest.param(None, ["--env", "1BAD=x"], "not a valid name", id="flag-bad-name"),
+        pytest.param("env = 1\n", [], "env must be a table", id="config-not-a-table"),
+        pytest.param("[env]\nA = 1\n", [], "env A must be a string", id="config-non-string"),
+        pytest.param('[env]\n"a-b" = "x"\n', [], "not a valid name", id="config-bad-name"),
+    ],
+)
+def test_run_rejects_invalid_environment_without_changing_the_ledger(
+    installed_launch_agent, ledger_path, config_text, arguments, message
+):
+    if config_text is not None:
+        path = cli.config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(config_text, encoding="utf-8")
+
+    with pytest.raises(SystemExit, match=message):
+        cli.main(["run", support.TASK_ID, support.PROMPT, "--now", *arguments])
+
+    assert not ledger_path.exists()

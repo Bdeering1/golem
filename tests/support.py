@@ -76,6 +76,16 @@ def write_aliases(aliases):
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def write_environment_config(environment):
+    path = cli.config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "[env]",
+        *(f"{name} = {json.dumps(value)}" for name, value in environment.items()),
+    ]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def list_output(capsys):
     assert cli.main(["list"]) == 0
     return capsys.readouterr().out
