@@ -197,11 +197,12 @@ def test_watch_prints_usage_limit_pause_and_its_resume(
     assert support.read_task(ledger_path)["status"] == ledger.STATUS_SCHEDULED
     capsys.readouterr()
 
-    resume_time = display.display_due_at(
+    resume_time = display.display_time(
         support.RESET_TIME.isoformat(), datetime.now().astimezone().date()
     )
+    zone = f"{support.RESET_TIME.astimezone():%Z}"
     assert watch_output(capsys) == (
-        f"{paused_progress}golem: task paused at the usage limit, resumes {resume_time}: {support.TASK_ID}\n"
+        f"{paused_progress}golem: task paused at the usage limit, resumes {resume_time} {zone}: {support.TASK_ID}\n"
     )
 
     resumed_progress = write_agent_run_and_expected_progress(

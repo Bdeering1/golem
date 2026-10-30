@@ -117,3 +117,12 @@ def dependents_first_task_ids(tasks: ledger.Tasks, task_ids: list[str]) -> list[
         ordered_task_ids += dependents_first_task_ids(tasks, dependent_task_ids(tasks, task_id))
         ordered_task_ids.append(task_id)
     return ordered_task_ids
+
+
+def task_depth(tasks: ledger.Tasks, task_id: str) -> int:
+    depth = 1
+    parent_id = tasks[task_id].get("after")
+    while parent_id is not None and parent_id in tasks:
+        depth += 1
+        parent_id = tasks[parent_id].get("after")
+    return depth
