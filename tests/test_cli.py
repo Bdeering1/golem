@@ -1,0 +1,128 @@
+import re
+from datetime import UTC, datetime
+from typing import override
+
+import pytest
+
+from golem import cli, launch_agent, scheduling
+from tests import support
+
+
+def test_alias_expands_arguments_verbatim_like_run(
+    installed_launch_agent, ledger_path, monkeypatch
+):
+    class FixedDateTime(datetime):
+        @classmethod
+        @override
+        def now(cls, tz=None) -> datetime:
+            now = datetime(2030, 1, 1, 10, tzinfo=UTC)
+            return now if tz is not None else now.replace(tzinfo=None)
+
+    monkeypatch.setattr(scheduling, "datetime", FixedDateTime)
+    monkeypatch.setattr(launch_agent, "datetime", FixedDateTime)
+    monkeypatch.setattr(scheduling, "new_session_id", lambda: "session")
+    support.write_aliases({"impl": 'run {1} "/impl {2}" --then {1}-review /review-lite'})
+    task_id = "t42"
+    prompt = 'add "retry" {backoff}\nonce'
+
+    assert cli.main(["impl", task_id, prompt, "--now"]) == 0
+    alias_tasks = support.read_tasks(ledger_path)
+
+    support.write_tasks(ledger_path, {})
+
+    assert (
+        cli.main(
+            [
+                "run",
+                task_id,
+                f"/impl {prompt}",
+                "--then",
+                f"{task_id}-review",
+                "/review-lite",
+                "--now",
+            ]
+        )
+        == 0
+    )
+
+    assert support.read_tasks(ledger_path) == alias_tasks
+
+
+def test_alias_appends_extra_arguments_before_template_agent_arguments(
+    installed_launch_agent, ledger_path
+):
+    support.write_aliases({"queue": "run {1} {2} -- --model template-{1}"})
+
+    assert (
+        cli.main(
+            [
+                "queue",
+                support.TASK_ID,
+                support.PROMPT,
+                "--now",
+                "--",
+                "--model",
+                "command-line",
+            ]
+        )
+        == 0
+    )
+
+    task = support.read_task(ledger_path)
+    assert task["agent_args"] == [
+        "--model",
+        f"template-{support.TASK_ID}",
+        "--model",
+        "command-line",
+    ]
+    assert datetime.fromisoformat(task["due_at"]) < support.RESET_TIME
+
+
+def test_alias_requires_all_placeholder_arguments(ledger_path):
+    support.write_aliases({"impl": "run {1} {2}"})
+
+    with pytest.raises(SystemExit, match=r"alias impl needs 2 arguments, got 1"):
+        cli.main(["impl", support.TASK_ID])
+
+    assert not ledger_path.exists()
+
+
+def test_alias_list_marks_shadowed_builtin(capsys):
+    support.write_aliases({"ship": "run {1} {2}", "run": "not a command"})
+
+    assert cli.main(["alias", "list"]) == 0
+
+    ship_line, run_line = capsys.readouterr().out.splitlines()
+    assert "shadowed" not in ship_line
+    assert "shadowed" in run_line
+
+
+def test_builtin_command_wins_over_alias(installed_launch_agent, ledger_path):
+    support.write_aliases({"run": "not a command"})
+
+    assert cli.main(["run", support.TASK_ID, support.PROMPT, "--now"]) == 0
+
+    assert support.read_task(ledger_path)["prompt"] == support.PROMPT
+
+
+def test_alias_cannot_expand_to_another_alias(ledger_path):
+    support.write_aliases({"impl": "review", "review": "run {1} {2}"})
+
+    with pytest.raises(SystemExit, match=r"alias impl expands to alias review"):
+        cli.main(["impl"])
+
+    assert not ledger_path.exists()
+
+
+def test_missing_and_invalid_alias_config_do_not_block_builtin_commands(capsys):
+    assert cli.main(["alias", "list"]) == 0
+    assert capsys.readouterr().out == "golem: no aliases\n"
+
+    path = cli.config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("[aliases\n", encoding="utf-8")
+
+    assert cli.main(["list"]) == 0
+    assert capsys.readouterr().out == "golem: no tasks\n"
+    with pytest.raises(SystemExit, match=re.escape(str(path))):
+        cli.main(["alias", "list"])
