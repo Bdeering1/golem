@@ -36,6 +36,13 @@ def frame_text(rows, width=WIDE_WIDTH, height=HEIGHT, state=None):
     return "\n".join(frame_lines(rows, width, height, state or board.BoardState()))
 
 
+def running_tasks():
+    return {
+        f"task-{index:02}": support.task_record(ledger.STATUS_RUNNING, task_id=f"task-{index:02}")
+        for index in range(10)
+    }
+
+
 def statuses_tasks():
     return {
         status: support.task_record(status, task_id=status)
@@ -132,10 +139,7 @@ def test_board_focus_stays_within_shown_columns():
 
 
 def test_board_scroll_stops_at_the_end_of_a_column():
-    tasks = {
-        f"task-{index:02}": support.task_record(ledger.STATUS_RUNNING, task_id=f"task-{index:02}")
-        for index in range(10)
-    }
+    tasks = running_tasks()
     rows = display.list_rows(tasks, TODAY)
     state = board.BoardState(focus_index=1)
     height = 8
@@ -282,10 +286,7 @@ def test_board_switches_columns_after_resizing_to_one_column(pty_board):
 @pytest.mark.parametrize("keys", [ARROW_KEYS, LETTER_KEYS], ids=["arrows", "letters"])
 def test_board_keys_switch_columns_and_scroll(pty_board, keys):
     left, right, up, down = keys
-    tasks = statuses_tasks() | {
-        f"task-{index:02}": support.task_record(ledger.STATUS_RUNNING, task_id=f"task-{index:02}")
-        for index in range(10)
-    }
+    tasks = statuses_tasks() | running_tasks()
     running_board = pty_board(tasks=tasks)
     top_lines = running_board.screen.display[1:]
 

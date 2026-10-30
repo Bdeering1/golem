@@ -49,7 +49,7 @@ class Segment(NamedTuple):
 
 
 type Line = list[tuple[str, str]]
-type LedgerSnapshot = tuple[int, int, int] | None
+type LedgerStat = tuple[int, int, int] | None
 
 BOARD_COLUMNS = (
     BoardColumn("Queued", (ledger.STATUS_SCHEDULED, ledger.STATUS_WAITING)),
@@ -214,7 +214,7 @@ def start_colors() -> bool:
     return True
 
 
-def ledger_snapshot(task_ledger_path: Path) -> LedgerSnapshot:
+def ledger_stat(task_ledger_path: Path) -> LedgerStat:
     try:
         ledger_stat = task_ledger_path.stat()
     except FileNotFoundError:
@@ -225,12 +225,12 @@ def ledger_snapshot(task_ledger_path: Path) -> LedgerSnapshot:
 def board_loop(screen: curses.window, *, is_color: bool) -> int:
     task_ledger_path = ledger.ledger_path()
     state = BoardState()
-    shown_redraw_key: tuple[LedgerSnapshot, datetime] | None = None
+    shown_redraw_key: tuple[LedgerStat, datetime] | None = None
     rows: list[display.ListRow] = []
     is_redraw_needed = True
     while True:
         now = datetime.now().astimezone()
-        redraw_key = (ledger_snapshot(task_ledger_path), now.replace(second=0, microsecond=0))
+        redraw_key = (ledger_stat(task_ledger_path), now.replace(second=0, microsecond=0))
         if redraw_key != shown_redraw_key:
             shown_redraw_key = redraw_key
             rows = display.list_rows(ledger.load_tasks(), now.date())
