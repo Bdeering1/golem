@@ -73,13 +73,15 @@ def load_aliases() -> dict[str, str]:
 
 def load_environment() -> dict[str, str]:
     environment = load_string_table("env", "env")
-    for name in environment:
+    for name, value in environment.items():
         if not ENVIRONMENT_NAME_PATTERN.fullmatch(name):
             raise SystemExit(f"{invalid_config_message_prefix()}: env name {name} is invalid")
+        if "\0" in value:
+            raise SystemExit(f"{invalid_config_message_prefix()}: env {name} contains a null byte")
     return environment
 
 
-def environment_from_arguments(assignments: list[str]) -> dict[str, str]:
+def task_environment(assignments: list[str]) -> dict[str, str]:
     environment = load_environment()
     for assignment in assignments:
         name, separator, value = assignment.partition("=")
@@ -165,7 +167,7 @@ def run_task_from_arguments(arguments: ledger.Arguments) -> int:
     task_args = tuple(arguments.agent_args)
     placement = scheduling.RunPlacement(
         str(Path.cwd()),
-        environment=environment_from_arguments(arguments.env),
+        environment=task_environment(arguments.env),
         is_auto_pickup=arguments.auto_pickup,
         is_no_worktree=arguments.no_worktree,
         gate=arguments.gate,
