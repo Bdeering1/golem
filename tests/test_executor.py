@@ -283,12 +283,12 @@ def test_executor_death_keeps_task_running_until_claude_exits(
     monkeypatch.setenv("GOLEM_CLAUDE_STARTED", str(started_path))
     cli.main(["run", support.TASK_ID, support.PROMPT, "--now"])
     task = support.read_task(ledger_path)
-    executor = spawn.start_task_executor(support.TASK_ID, task)
+    executor_process = spawn.start_task_executor(support.TASK_ID, task)
 
     try:
         support.wait_until(started_path.exists)
-        os.kill(executor.pid, signal.SIGKILL)
-        executor.wait()
+        os.kill(executor_process.pid, signal.SIGKILL)
+        executor_process.wait()
 
         launch_agent.run_launch_agent_pass()
         assert support.read_task(ledger_path)["status"] == ledger.STATUS_RUNNING
@@ -306,9 +306,9 @@ def test_executor_death_keeps_task_running_until_claude_exits(
         ]
     finally:
         hold_path.unlink(missing_ok=True)
-        if executor.poll() is None:
-            executor.kill()
-            executor.wait()
+        if executor_process.poll() is None:
+            executor_process.kill()
+            executor_process.wait()
 
 
 def test_executor_frees_worktree_held_by_stray_claude_process(ledger_path, monkeypatch, tmp_path):
