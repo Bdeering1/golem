@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 from golem import (
+    board,
     delete,
     display,
     executor,
@@ -218,6 +219,11 @@ def add_watch_command(add_parser: Callable[..., argparse.ArgumentParser]) -> Non
     )
 
 
+def add_view_commands(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
+    set_command_handler(add_parser("list"), lambda _: display.list_tasks())
+    set_command_handler(add_parser("board"), lambda _: board.run_board())
+
+
 def add_hook_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
     hook_command = add_parser("_hook")
     hook_command.add_argument("event", choices=tuple(claude_hooks.HOOK_EVENT_ARGUMENTS.values()))
@@ -381,7 +387,7 @@ def build_parser() -> tuple[argparse.ArgumentParser, dict[str, argparse.Argument
         ),
     )
     add_prune_command(commands.add_parser)
-    set_command_handler(commands.add_parser("list"), lambda _: display.list_tasks())
+    add_view_commands(commands.add_parser)
     alias_command = commands.add_parser("alias")
     alias_commands = alias_command.add_subparsers(dest="alias_command", required=True)
     set_command_handler(alias_commands.add_parser("list"), lambda _: list_aliases(commands.choices))

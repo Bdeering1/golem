@@ -18,6 +18,8 @@ golem = "golem.cli:main"
 [dependency-groups]
 dev = [
     "basedpyright>=1.40.2",
+    "pexpect>=4.9.0",
+    "pyte>=0.8.2",
     "pytest>=9.1.1",
     "pytest-randomly>=5.0.0",
     "pytest-socket>=0.8.1",
