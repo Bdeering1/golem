@@ -178,21 +178,24 @@ def test_list_omits_times_footnote_without_times(ledger_path, capsys):
 
 
 @pytest.mark.parametrize(
-    ("is_tty", "terminal_width", "is_shortened"),
+    ("is_tty", "terminal_width", "is_narrow_layout"),
     [
         pytest.param(True, 20, True, id="terminal-overflow"),
         pytest.param(True, 500, False, id="terminal-fits"),
         pytest.param(False, 20, False, id="not-a-terminal"),
     ],
 )
-def test_list_shortens_directories_only_when_terminal_overflows(
-    ledger_path, capsys, monkeypatch, is_tty, terminal_width, is_shortened
+def test_list_shortens_directories_and_moves_detail_only_when_terminal_overflows(
+    ledger_path, capsys, monkeypatch, is_tty, terminal_width, is_narrow_layout
 ):
     home_directory = Path.home()
     tasks = {
         "home": support.task_record(ledger.STATUS_DONE, task_id="home", cwd=str(home_directory)),
         "nested": support.task_record(
-            ledger.STATUS_DONE, task_id="nested", cwd=str(home_directory / "project" / "leaf")
+            ledger.STATUS_NEEDS_REVIEW,
+            task_id="nested",
+            cwd=str(home_directory / "project" / "leaf"),
+            gate_stop_reason="gate",
         ),
     }
     support.write_tasks(ledger_path, tasks)
@@ -201,8 +204,13 @@ def test_list_shortens_directories_only_when_terminal_overflows(
 
     output = support.list_output(capsys)
 
-    nested_directory = ".../leaf" if is_shortened else "~/project/leaf"
-    assert support.list_row(output, "nested").endswith(f"  {nested_directory}")
+    lines = ANSI_COLOR.sub("", output).splitlines()
+    nested_index = next(index for index, line in enumerate(lines) if line.startswith("nested "))
+    if is_narrow_layout:
+        assert lines[nested_index].endswith("  .../leaf")
+        assert lines[nested_index + 1] == f"{display.DETAIL_LINE_INDENT}gate"
+    else:
+        assert lines[nested_index].endswith("  ~/project/leaf  gate")
     assert support.list_row(output, "home").endswith("  ~")
 
 

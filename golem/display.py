@@ -16,8 +16,10 @@ STATUS_COLORS = {
     ledger.STATUS_DONE: 34,
     ledger.STATUS_CANCELLED: 244,
 }
+DETAIL_LINE_COLOR = 245
 ANSI_RESET = "\033[0m"
 LIST_HEADERS = ("ID", "STEP", "STATUS", "DIRECTORY", "DETAIL")
+DETAIL_LINE_INDENT = "    "
 
 
 class ListRow(NamedTuple):
@@ -152,21 +154,38 @@ def list_rows(tasks: ledger.Tasks, today: date) -> list[ListRow]:
     return rows
 
 
-def table_lines(rows: list[ListRow], *, is_color: bool) -> list[str]:
+def detail_line(detail: str, *, is_color: bool) -> str:
+    if not is_color:
+        return f"{DETAIL_LINE_INDENT}{detail}"
+    return f"{DETAIL_LINE_INDENT}\033[38;5;{DETAIL_LINE_COLOR}m{detail}{ANSI_RESET}"
+
+
+def table_lines(
+    rows: list[ListRow], *, is_color: bool, is_detail_on_own_line: bool = False
+) -> list[str]:
+    headers = LIST_HEADERS[:-1] if is_detail_on_own_line else LIST_HEADERS
     widths = [
         max(len(header), *(len(row.cells()[index]) for row in rows))
-        for index, header in enumerate(LIST_HEADERS)
+        for index, header in enumerate(headers)
     ]
-    lines = [
-        "  ".join(value.ljust(width) for value, width in zip(LIST_HEADERS, widths, strict=True))
-    ]
+    lines = ["  ".join(value.ljust(width) for value, width in zip(headers, widths, strict=True))]
     for row in rows:
-        cells = [value.ljust(width) for value, width in zip(row.cells(), widths, strict=True)]
+        cells = [
+            value.ljust(width)
+            for value, width in zip(row.cells()[: len(headers)], widths, strict=True)
+        ]
         cells[LIST_STATUS_COLUMN] = display_status(
             row.status, widths[LIST_STATUS_COLUMN], is_color=is_color
         )
         lines.append("  ".join(cells))
+        if is_detail_on_own_line and row.detail:
+            lines.append(detail_line(row.detail, is_color=is_color))
     return [line.rstrip() for line in lines]
+
+
+def table_width(rows: list[ListRow], *, is_detail_on_own_line: bool) -> int:
+    lines = table_lines(rows, is_color=False, is_detail_on_own_line=is_detail_on_own_line)
+    return max(len(line) for line in lines)
 
 
 def list_tasks() -> int:
@@ -175,16 +194,30 @@ def list_tasks() -> int:
         print("golem: no tasks")
         return 0
     rows = list_rows(tasks, datetime.now().astimezone().date())
-    table_rows = [row._replace(directory=display_directory(row.directory)) for row in rows]
-    is_wider_than_terminal = (
-        max(len(line) for line in table_lines(table_rows, is_color=False))
-        > shutil.get_terminal_size().columns
+    full_rows = [row._replace(directory=display_directory(row.directory)) for row in rows]
+    shortened_rows = [
+        row._replace(directory=shortened_directory(row.directory)) for row in full_rows
+    ]
+    layouts = [
+        (full_rows, False),
+        (shortened_rows, False),
+        (full_rows, True),
+        (shortened_rows, True),
+    ]
+    if not sys.stdout.isatty():
+        layouts = layouts[:1]
+    terminal_width = shutil.get_terminal_size().columns
+    table_rows, is_detail_on_own_line = next(
+        (
+            (layout_rows, is_own_line)
+            for layout_rows, is_own_line in layouts
+            if table_width(layout_rows, is_detail_on_own_line=is_own_line) <= terminal_width
+        ),
+        layouts[-1],
     )
-    if sys.stdout.isatty() and is_wider_than_terminal:
-        table_rows = [
-            row._replace(directory=shortened_directory(row.directory)) for row in table_rows
-        ]
-    for line in table_lines(table_rows, is_color=is_color_enabled()):
+    for line in table_lines(
+        table_rows, is_color=is_color_enabled(), is_detail_on_own_line=is_detail_on_own_line
+    ):
         print(line)
     if any(row.is_detail_time for row in rows):
         print("\nTimes are local.")
