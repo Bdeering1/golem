@@ -96,7 +96,9 @@ def test_watch_follows_running_task_to_its_end(
     executor = spawn.start_task_executor(support.TASK_ID, task)
 
     try:
-        support.wait_until(progress_log.progress_path(task["session_id"]).exists)
+        support.wait_until(
+            lambda: support.read_task(ledger_path)["status"] == ledger.STATUS_RUNNING
+        )
         with watch_subprocess_output() as watch_output_file:
             first_line = watch_output_file.readline()
             hold_path.unlink()
