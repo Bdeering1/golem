@@ -33,3 +33,20 @@ def test_launch_agent_executor_uses_only_saved_environment(
     assert fake_commands["claude-lang"].read_text(encoding="utf-8") == f"{support.SAVED_LANG}\n"
     assert fake_commands["claude-lc-time"].read_text(encoding="utf-8") == f"{support.CHILD_LANG}\n"
     assert fake_commands["claude-unrelated"].read_text(encoding="utf-8") == ""
+
+
+def test_golem_command_ignores_golem_package_in_working_directory(tmp_path):
+    shadow_package = tmp_path / "golem"
+    shadow_package.mkdir()
+    (shadow_package / "__init__.py").write_text("", encoding="utf-8")
+    (shadow_package / "__main__.py").write_text("print('shadow')\n", encoding="utf-8")
+
+    completed = spawn.subprocess.run(
+        [*spawn.golem_command(), "--help"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert completed.stdout.startswith("usage: golem")
