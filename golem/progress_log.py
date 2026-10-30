@@ -64,7 +64,9 @@ def is_usage_limit_pause(task: ledger.Task) -> bool:
 def task_end_line(task_id: str, task: ledger.Task) -> str:
     due_at = task.get("due_at")
     if due_at is not None and is_usage_limit_pause(task):
-        resume_time = display.display_due_at(due_at, datetime.now().astimezone().date())
+        today = datetime.now().astimezone().date()
+        zone = f"{datetime.fromisoformat(due_at).astimezone():%Z}"
+        resume_time = f"{display.display_time(due_at, today)} {zone}"
         return f"golem: task paused at the usage limit, resumes {resume_time}: {task_id}"
     return f"golem: task {task['status']}: {task_id}"
 

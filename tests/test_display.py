@@ -1,8 +1,9 @@
 import os
 import re
+import shutil
 import sys
 import time
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import override
 
@@ -12,6 +13,21 @@ from golem import display, ledger
 from tests import support
 
 ANSI_COLOR = re.compile(r"\033\[38;5;\d+m|\033\[0m")
+TODAY = date(2030, 3, 10)
+TIMES_FOOTNOTE = "\n\nTimes are local.\n"
+
+
+@pytest.fixture
+def toronto_time():
+    original_timezone = os.environ.get("TZ")
+    os.environ["TZ"] = "America/Toronto"
+    time.tzset()
+    yield
+    if original_timezone is None:
+        os.environ.pop("TZ", None)
+    else:
+        os.environ["TZ"] = original_timezone
+    time.tzset()
 
 
 def test_list_groups_visible_tasks_by_status_and_id(ledger_path, capsys):
@@ -30,18 +46,72 @@ def test_list_groups_visible_tasks_by_status_and_id(ledger_path, capsys):
 
     output = support.list_output(capsys)
 
-    assert [line.split()[0] for line in output.splitlines()[1:]] == [
+    table = output.split("\n\n")[0]
+    assert [line.split()[0] for line in table.splitlines()[1:]] == [
         "parent",
         "review",
         "a-failed",
         "z-failed",
         "running",
         "scheduled",
-        "waiting",
         "done",
         "cancelled",
     ]
-    assert support.list_row(output, "waiting").split()[-1] == "parent"
+
+
+def test_list_rows_show_each_chains_most_actionable_and_latest_task():
+    tasks = {
+        "lone": support.task_record(ledger.STATUS_DONE, task_id="lone"),
+        "root": support.task_record(ledger.STATUS_NEEDS_REVIEW, task_id="root"),
+        "branch-a": support.task_record(
+            ledger.STATUS_NEEDS_REVIEW, task_id="branch-a", after="root"
+        ),
+        "branch-b": support.task_record(
+            ledger.STATUS_NEEDS_REVIEW, task_id="branch-b", after="root"
+        ),
+        "leaf": support.task_record(ledger.STATUS_WAITING, task_id="leaf", after="branch-a"),
+    }
+
+    rows = display.list_rows(tasks, TODAY)
+
+    assert [(row.task_id, row.step) for row in rows] == [("branch-b", "2/3"), ("lone", "")]
+
+
+@pytest.mark.parametrize(
+    ("status", "fields", "detail"),
+    [
+        pytest.param(
+            ledger.STATUS_SCHEDULED,
+            {"due_at": datetime(2030, 3, 11, 13, tzinfo=UTC).isoformat()},
+            "tomorrow 9:00am",
+            id="scheduled-due-time",
+        ),
+        pytest.param(
+            ledger.STATUS_RUNNING,
+            {"started_at": datetime(2030, 3, 10, 13, tzinfo=UTC).isoformat()},
+            "today 9:00am",
+            id="running-start-time",
+        ),
+        pytest.param(ledger.STATUS_WAITING, {"after": "missing"}, "missing", id="waiting-after"),
+        pytest.param(
+            ledger.STATUS_NEEDS_REVIEW,
+            {"gate_stop_reason": "tests failed\ndetails"},
+            "tests failed",
+            id="gate-reason",
+        ),
+        pytest.param(
+            ledger.STATUS_WAITING,
+            {"after": "missing", "setup_failure_reason": "setup failed"},
+            "missing; setup failed",
+            id="status-value-and-reason",
+        ),
+        pytest.param(ledger.STATUS_DONE, {}, "", id="no-detail"),
+    ],
+)
+def test_list_rows_detail(toronto_time, status, fields, detail):
+    tasks = {"task": support.task_record(status, task_id="task", **fields)}
+
+    assert display.list_rows(tasks, TODAY)[0].detail == detail
 
 
 def test_list_abbreviates_only_home_and_its_descendants(ledger_path, capsys):
@@ -63,7 +133,9 @@ def test_list_abbreviates_only_home_and_its_descendants(ledger_path, capsys):
     assert prefix_directory in support.list_row(output, "prefix")
 
 
-def test_list_formats_due_times_in_local_time(ledger_path, capsys, monkeypatch):
+def test_list_formats_times_without_zone_and_notes_they_are_local(
+    ledger_path, capsys, monkeypatch, toronto_time
+):
     class FixedDateTime(datetime):
         @classmethod
         @override
@@ -78,43 +150,68 @@ def test_list_formats_due_times_in_local_time(ledger_path, capsys, monkeypatch):
             task_id="today",
             due_at=datetime(2030, 3, 11, 3, 30, tzinfo=UTC).isoformat(),
         ),
-        "tomorrow": support.task_record(
+        "this-year": support.task_record(
             ledger.STATUS_SCHEDULED,
-            task_id="tomorrow",
-            due_at=datetime(2030, 3, 11, 13, tzinfo=UTC).isoformat(),
-        ),
-        "daylight": support.task_record(
-            ledger.STATUS_SCHEDULED,
-            task_id="daylight",
+            task_id="this-year",
             due_at=datetime(2030, 11, 3, 5, 30, tzinfo=UTC).isoformat(),
         ),
-        "standard": support.task_record(
+        "next-year": support.task_record(
             ledger.STATUS_SCHEDULED,
-            task_id="standard",
-            due_at=datetime(2030, 11, 3, 6, 30, tzinfo=UTC).isoformat(),
+            task_id="next-year",
+            due_at=datetime(2031, 11, 3, 6, 30, tzinfo=UTC).isoformat(),
         ),
-        "no-due": support.task_record(ledger.STATUS_SCHEDULED, task_id="no-due"),
     }
-    tasks["no-due"].pop("due_at")
     support.write_tasks(ledger_path, tasks)
 
-    original_timezone = os.environ.get("TZ")
-    os.environ["TZ"] = "America/Toronto"
-    time.tzset()
-    try:
-        output = support.list_output(capsys)
-    finally:
-        if original_timezone is None:
-            os.environ.pop("TZ", None)
-        else:
-            os.environ["TZ"] = original_timezone
-        time.tzset()
+    output = support.list_output(capsys)
 
-    assert "today 11:30pm EDT" in support.list_row(output, "today")
-    assert "tomorrow 9:00am EDT" in support.list_row(output, "tomorrow")
-    assert "Nov 3, 2030 1:30am EDT" in support.list_row(output, "daylight")
-    assert "Nov 3, 2030 1:30am EST" in support.list_row(output, "standard")
-    assert support.list_row(output, "no-due").endswith(str(Path.cwd()))
+    assert support.list_row(output, "today").endswith("today 11:30pm")
+    assert support.list_row(output, "this-year").endswith("Nov 3 1:30am")
+    assert support.list_row(output, "next-year").endswith("Nov 3, 2031 1:30am")
+    assert output.endswith(TIMES_FOOTNOTE)
+
+
+def test_list_omits_times_footnote_without_times(ledger_path, capsys):
+    support.write_task(ledger_path, ledger.STATUS_DONE)
+
+    assert TIMES_FOOTNOTE.strip() not in support.list_output(capsys)
+
+
+@pytest.mark.parametrize(
+    ("is_tty", "terminal_width", "is_narrow_layout"),
+    [
+        pytest.param(True, 20, True, id="terminal-overflow"),
+        pytest.param(True, 500, False, id="terminal-fits"),
+        pytest.param(False, 20, False, id="not-a-terminal"),
+    ],
+)
+def test_list_shortens_directories_and_moves_detail_only_when_terminal_overflows(
+    ledger_path, capsys, monkeypatch, is_tty, terminal_width, is_narrow_layout
+):
+    home_directory = Path.home()
+    tasks = {
+        "home": support.task_record(ledger.STATUS_DONE, task_id="home", cwd=str(home_directory)),
+        "nested": support.task_record(
+            ledger.STATUS_NEEDS_REVIEW,
+            task_id="nested",
+            cwd=str(home_directory / "project" / "leaf"),
+            gate_stop_reason="gate",
+        ),
+    }
+    support.write_tasks(ledger_path, tasks)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: is_tty)
+    monkeypatch.setattr(shutil, "get_terminal_size", lambda: os.terminal_size((terminal_width, 24)))
+
+    output = support.list_output(capsys)
+
+    lines = ANSI_COLOR.sub("", output).splitlines()
+    nested_index = next(index for index, line in enumerate(lines) if line.startswith("nested "))
+    if is_narrow_layout:
+        assert lines[nested_index].endswith("  .../leaf")
+        assert lines[nested_index + 1] == f"{display.DETAIL_LINE_INDENT}gate"
+    else:
+        assert lines[nested_index].endswith("  ~/project/leaf  gate")
+    assert support.list_row(output, "home").endswith("  ~")
 
 
 def test_list_uses_distinct_status_colors_and_keeps_columns_aligned(
@@ -126,14 +223,13 @@ def test_list_uses_distinct_status_colors_and_keeps_columns_aligned(
         if status != ledger.STATUS_WAITING
     }
     tasks[ledger.STATUS_WAITING] = support.task_record(
-        ledger.STATUS_WAITING,
-        task_id=ledger.STATUS_WAITING,
-        after=ledger.STATUS_NEEDS_REVIEW,
+        ledger.STATUS_WAITING, task_id=ledger.STATUS_WAITING
     )
     support.write_tasks(ledger_path, tasks)
     monkeypatch.setenv("TERM", "xterm-256color")
     monkeypatch.delenv("NO_COLOR", raising=False)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(shutil, "get_terminal_size", lambda: os.terminal_size((500, 24)))
 
     colored_output = support.list_output(capsys)
 
