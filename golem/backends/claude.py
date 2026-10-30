@@ -24,6 +24,9 @@ PERMISSION_ARGUMENTS = {
     "--permission-mode",
 }
 VERBOSE_ARGUMENT = "--verbose"
+NAME: str = "Claude"
+IS_GATE_SUPPORTED: bool = True
+IS_AUTO_PICKUP_SUPPORTED: bool = True
 
 
 class ClaudeRateLimit(TypedDict):
@@ -148,6 +151,32 @@ def run_claude(
     if is_creating_worktree:
         task_directories.record_created_worktree_owner(task_id, task)
     return returncode, "".join(stdout_lines), stderr
+
+
+def run(
+    task_id: str, task: ledger.Task, lock_file_descriptors: tuple[int, ...]
+) -> common.RunOutcome:
+    returncode, output, stderr = run_claude(task_id, task, lock_file_descriptors)
+    result, is_usage_limit = claude_result_and_usage_limit(output)
+    return common.RunOutcome(
+        returncode,
+        result if output else None,
+        is_usage_limit,
+        stderr,
+        None if task.get("no_worktree") else claude_working_directory(output),
+    )
+
+
+def validate_run_arguments(agent_args: list[str]) -> None:
+    pass
+
+
+def conversation_id(task: ledger.Task) -> str | None:
+    return task["session_id"]
+
+
+def transcript_paths(task: ledger.Task) -> list[Path]:
+    return list((Path.home() / ".claude" / "projects").glob(f"*/{task['session_id']}.jsonl"))
 
 
 def next_reset_time() -> datetime | None:

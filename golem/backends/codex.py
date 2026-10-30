@@ -40,6 +40,9 @@ CODEX_UNSUPPORTED_ARGUMENTS = {
 }
 CODEX_PROVIDER_OVERRIDE = 'model_provider="openai"'
 CODEX_PROVIDER_ARGUMENTS = ("-c", CODEX_PROVIDER_OVERRIDE)
+NAME: str = "Codex"
+IS_GATE_SUPPORTED: bool = False
+IS_AUTO_PICKUP_SUPPORTED: bool = False
 type AppServerRequests = list[ledger.JsonObject]
 type AppServerResponses = dict[int, ledger.JsonObject]
 
@@ -306,6 +309,31 @@ def run_codex(
     return returncode, result, is_usage_limit
 
 
+def run(
+    task_id: str, task: ledger.Task, lock_file_descriptors: tuple[int, ...]
+) -> common.RunOutcome:
+    returncode, result, is_usage_limit = run_codex(task_id, task, lock_file_descriptors)
+    return common.RunOutcome(returncode, result or None, is_usage_limit)
+
+
+def validate_run_arguments(agent_args: list[str]) -> None:
+    reject_unsupported_codex_arguments(agent_args, is_run=True)
+    require_codex_subscription(os.environ.copy())
+
+
+def conversation_id(task: ledger.Task) -> str | None:
+    thread_id = task.get("thread_id")
+    return thread_id if isinstance(thread_id, str) else None
+
+
+def transcript_paths(task: ledger.Task) -> list[Path]:
+    thread_id = conversation_id(task)
+    if thread_id is None:
+        return []
+    codex_home = Path(task.get("environment", {}).get("CODEX_HOME", Path.home() / ".codex"))
+    return list((codex_home / "sessions").glob(f"**/rollout-*-{thread_id}.jsonl"))
+
+
 def codex_app_server_requests(*, has_rate_limits: bool) -> AppServerRequests:
     requests: AppServerRequests = [
         {
@@ -498,3 +526,7 @@ def next_codex_reset_time() -> datetime | None:
         if str(error) == CODEX_SUBSCRIPTION_ERROR:
             raise
         raise SystemExit(common.USAGE_ERROR) from error
+
+
+def next_reset_time() -> datetime | None:
+    return next_codex_reset_time()

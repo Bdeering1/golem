@@ -7,6 +7,7 @@ if TYPE_CHECKING:
     import io
 
 from golem import chains, gates, git, ledger, locks, notifications, spawn
+from golem.backends import registry
 
 SETUP_OUTPUT_ERROR = (
     "setup output must be a JSON object with optional string directory and prompt_suffix"
@@ -19,9 +20,7 @@ def setup_input_json(task_id: str, task: ledger.Task) -> str:
     return json.dumps(
         {
             "task_id": task_id,
-            "session_id": task["session_id"]
-            if ledger.task_backend(task) == ledger.BACKEND_CLAUDE
-            else None,
+            "session_id": registry.task_backend(task).conversation_id(task),
             "directory": ledger.task_directory(task),
             "prompt": task["prompt"],
         }

@@ -19,7 +19,7 @@ from golem import (
     task_directories,
     task_setup,
 )
-from golem.backends import claude, claude_hooks, codex
+from golem.backends import claude_hooks, common, registry
 
 MAX_USAGE_LIMIT_RESUMES = 2
 BACKGROUND_WORK_STOPPED_PATTERN = re.compile(
@@ -48,7 +48,7 @@ def mark_task_waiting_for_reset(task_id: str, result: str) -> bool:
         if task is None:
             return False
         when = scheduling.planned_execution_time(
-            ledger.task_backend(task), is_now=False, at_text=None
+            registry.task_backend(task), is_now=False, at_text=None
         )
     except SystemExit:
         return False
@@ -204,45 +204,32 @@ def drain_dependents(task_id: str, session_id: str) -> None:
 
 
 def execute_task(task_id: str, task: ledger.Task, lock_file_descriptors: tuple[int, ...]) -> int:
-    stderr = ""
     try:
-        if ledger.task_backend(task) == ledger.BACKEND_CODEX:
-            returncode, result, is_usage_limit = codex.run_codex(
-                task_id, task, lock_file_descriptors
-            )
-            output = "" if result is None else result
-        else:
-            returncode, output, stderr = claude.run_claude(task_id, task, lock_file_descriptors)
-            result, is_usage_limit = claude.claude_result_and_usage_limit(output)
+        outcome = registry.task_backend(task).run(task_id, task, lock_file_descriptors)
     except OSError as error:
         print(f"golem: could not execute task: {error}", file=sys.stderr)
-        returncode = 127
-        output = ""
-        result = None
-        is_usage_limit = False
-    if ledger.task_backend(task) == ledger.BACKEND_CLAUDE and not task.get("no_worktree"):
-        working_directory = claude.claude_working_directory(output)
-        if working_directory is not None and working_directory != task["cwd"]:
-            record_worktree(task_id, working_directory)
+        outcome = common.RunOutcome(127, None, is_usage_limit=False)
+    if outcome.working_directory is not None and outcome.working_directory != task["cwd"]:
+        record_worktree(task_id, outcome.working_directory)
     clear_recorded_worktree_pending(task_id)
     usage_limit_resume_count = task.get("usage_limit_resume_count", 0)
     if (
-        is_usage_limit
+        outcome.is_usage_limit
         and usage_limit_resume_count < MAX_USAGE_LIMIT_RESUMES
-        and result is not None
-        and mark_task_waiting_for_reset(task_id, result)
+        and outcome.result is not None
+        and mark_task_waiting_for_reset(task_id, outcome.result)
     ):
         return 0
-    stored_result = result if output else None
-    stop_line_match = BACKGROUND_WORK_STOPPED_PATTERN.search(stderr)
+    stored_result = outcome.result
+    stop_line_match = BACKGROUND_WORK_STOPPED_PATTERN.search(outcome.stderr)
     if stop_line_match is not None:
         stop_line = stop_line_match.group()
-        stored_result = f"{result}\n\n{stop_line}" if output else stop_line
+        stored_result = stop_line if outcome.result is None else f"{outcome.result}\n\n{stop_line}"
     finish_task(
         task_id,
         stored_result,
-        returncode,
-        is_usage_limit=is_usage_limit,
+        outcome.returncode,
+        is_usage_limit=outcome.is_usage_limit,
         is_background_work_stopped=stop_line_match is not None,
     )
     tasks = ledger.load_tasks()
@@ -252,7 +239,7 @@ def execute_task(task_id: str, task: ledger.Task, lock_file_descriptors: tuple[i
             notifications.notify_task(task_id, stored_task, notifications.OUTCOME_FAILED)
         elif review.is_ready_for_review(tasks, task_id):
             notifications.notify_task(task_id, stored_task, notifications.OUTCOME_NEEDS_REVIEW)
-    return returncode
+    return outcome.returncode
 
 
 def execute_claimed_task(

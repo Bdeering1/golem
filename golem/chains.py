@@ -1,4 +1,5 @@
 from golem import ledger
+from golem.backends import registry
 
 
 def can_start_dependents(task: ledger.Task) -> bool:
@@ -76,7 +77,7 @@ def reserve_dependent_task(records: ledger.Tasks, parent_id: str) -> bool:
             return False
         if tasks[parent_id].get("auto_pickup"):
             for record in records.values():
-                if record.get("backend") == ledger.BACKEND_CLAUDE:
+                if registry.task_backend(record).IS_AUTO_PICKUP_SUPPORTED:
                     record["auto_pickup"] = True
         tasks.update(records)
         return True

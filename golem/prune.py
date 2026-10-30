@@ -6,7 +6,7 @@ from datetime import timedelta
 from typing import TypedDict, cast
 
 from golem import chains, delete, git, ledger, locks
-from golem.backends import common
+from golem.backends import registry
 
 PRUNE_IDLE_DAYS = 7
 PULL_REQUEST_TIMEOUT_SECONDS = 30
@@ -72,7 +72,10 @@ def branch_pull_request(worktree: str | None) -> PullRequest | None:
 
 def session_idle_reason(task: ledger.Task) -> str | None:
     transcript_modified_time = max(
-        (transcript_path.stat().st_mtime for transcript_path in common.transcript_paths(task)),
+        (
+            transcript_path.stat().st_mtime
+            for transcript_path in registry.task_backend(task).transcript_paths(task)
+        ),
         default=None,
     )
     if transcript_modified_time is None:

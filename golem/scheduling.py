@@ -4,7 +4,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 
 from golem import chains, launch_agent, ledger, progress_log, spawn, task_directories
-from golem.backends import claude, claude_hooks, codex
+from golem.backends import claude_hooks, common, registry
 
 
 def new_session_id() -> str:
@@ -143,7 +143,7 @@ def retry_task(task_id: str, *, is_now: bool, at_text: str | None) -> int:
     task_directories.reject_missing_worktree(retryable, ledger.load_worktrees())
     launch_agent.require_launch_agent()
     when = (
-        planned_execution_time(ledger.task_backend(retryable), is_now=is_now, at_text=at_text)
+        planned_execution_time(registry.task_backend(retryable), is_now=is_now, at_text=at_text)
         or datetime.now(UTC).astimezone()
     )
 
@@ -196,7 +196,7 @@ def reschedule_task(task_id: str, *, is_now: bool, at_text: str | None) -> int:
     task = scheduled_task(ledger.load_tasks(), task_id)
     launch_agent.require_launch_agent()
     when = (
-        planned_execution_time(ledger.task_backend(task), is_now=is_now, at_text=at_text)
+        planned_execution_time(registry.task_backend(task), is_now=is_now, at_text=at_text)
         or datetime.now(UTC).astimezone()
     )
 
@@ -206,18 +206,12 @@ def reschedule_task(task_id: str, *, is_now: bool, at_text: str | None) -> int:
     return launch_agent.wake_launch_agent_and_report(task_id, when)
 
 
-def planned_execution_time(backend: str, *, is_now: bool, at_text: str | None) -> datetime | None:
+def planned_execution_time(
+    backend: common.Backend, *, is_now: bool, at_text: str | None
+) -> datetime | None:
     if is_now:
         return None
-    when = (
-        (
-            codex.next_codex_reset_time()
-            if backend == ledger.BACKEND_CODEX
-            else claude.next_reset_time()
-        )
-        if at_text is None
-        else scheduled_time(at_text)
-    )
+    when = backend.next_reset_time() if at_text is None else scheduled_time(at_text)
     if when is None:
         return None
     when = when.astimezone(UTC)
@@ -245,7 +239,9 @@ def schedule_run_task(
             )
             print(f"golem: {task_id} will run after {after}")
             return 0
-    when = planned_execution_time(arguments.backend, is_now=arguments.now, at_text=arguments.at)
+    when = planned_execution_time(
+        registry.BACKENDS[arguments.backend], is_now=arguments.now, at_text=arguments.at
+    )
     return schedule_new_task(
         task_id,
         prompt_text,
