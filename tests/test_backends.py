@@ -43,7 +43,8 @@ class StubBackend:
 @pytest.fixture
 def stub_backend(monkeypatch):
     backend = StubBackend()
-    monkeypatch.setitem(registry.BACKENDS, STUB_BACKEND_ID, backend)
+    registered_backend: common.Backend = backend
+    monkeypatch.setitem(registry.BACKENDS, STUB_BACKEND_ID, registered_backend)
     return backend
 
 
