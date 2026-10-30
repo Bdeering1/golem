@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import subprocess
@@ -219,6 +220,16 @@ def fake_commands(monkeypatch, tmp_path, fake_bin_path):
     monkeypatch.setenv("GOLEM_CODEX_", str(tmp_path / "codex-"))
     monkeypatch.chdir(work_path)
     return paths
+
+
+@pytest.fixture
+def write_pull_requests(fake_commands):
+    def write(branch: str, pull_requests: list[dict[str, object]]) -> None:
+        (fake_commands["gh-pull-requests"] / f"{branch}.json").write_text(
+            json.dumps(pull_requests), encoding="utf-8"
+        )
+
+    return write
 
 
 @pytest.fixture

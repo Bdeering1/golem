@@ -33,6 +33,19 @@ LIST_STATUS_ORDER = (
 ALL_STATUSES: set[str] = set(LIST_STATUS_ORDER)
 SUCCEEDED_STATUSES = {STATUS_NEEDS_REVIEW, STATUS_DONE}
 UNREVIEWED_STATUSES = {STATUS_SCHEDULED, STATUS_RUNNING, STATUS_WAITING, STATUS_NEEDS_REVIEW}
+PULL_REQUEST_STATE_OPEN = "open"
+PULL_REQUEST_STATE_MERGED = "merged"
+PULL_REQUEST_STATE_CLOSED = "closed"
+PULL_REQUEST_STATES = (
+    PULL_REQUEST_STATE_OPEN,
+    PULL_REQUEST_STATE_MERGED,
+    PULL_REQUEST_STATE_CLOSED,
+)
+
+
+class PullRequest(TypedDict):
+    url: str
+    state: str
 
 
 class Task(TypedDict):
@@ -61,6 +74,7 @@ class Task(TypedDict):
     setup_failure_reason: NotRequired[str]
     setup_directory: NotRequired[str]
     setup_busy_retry_count: NotRequired[int]
+    pull_requests: NotRequired[list[PullRequest]]
 
 
 class WorktreeResource(TypedDict):
@@ -245,3 +259,10 @@ def existing_task(tasks: Tasks, task_id: str) -> Task:
     if task_id not in tasks:
         raise SystemExit(f"golem: task not found: {task_id}")
     return tasks[task_id]
+
+
+def has_finished_pull_requests(task: Task) -> bool:
+    pull_requests = task.get("pull_requests", [])
+    return bool(pull_requests) and all(
+        pull_request["state"] != PULL_REQUEST_STATE_OPEN for pull_request in pull_requests
+    )

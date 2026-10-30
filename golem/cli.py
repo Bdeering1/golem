@@ -196,6 +196,16 @@ def add_prune_command(add_parser: Callable[..., argparse.ArgumentParser]) -> Non
     )
 
 
+def add_list_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
+    list_command = add_parser("list")
+    list_command.add_argument(
+        "--all", action="store_true", help="include done tasks whose pull requests are finished"
+    )
+    set_command_handler(
+        list_command, lambda arguments: display.list_tasks(is_showing_all=arguments.all)
+    )
+
+
 def add_continue_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
     continue_command = add_parser(
         "continue", description="Re-run a stopped task's gate and start its follow-ups."
@@ -381,7 +391,7 @@ def build_parser() -> tuple[argparse.ArgumentParser, dict[str, argparse.Argument
         ),
     )
     add_prune_command(commands.add_parser)
-    set_command_handler(commands.add_parser("list"), lambda _: display.list_tasks())
+    add_list_command(commands.add_parser)
     alias_command = commands.add_parser("alias")
     alias_commands = alias_command.add_subparsers(dest="alias_command", required=True)
     set_command_handler(alias_commands.add_parser("list"), lambda _: list_aliases(commands.choices))

@@ -3,11 +3,13 @@ import plistlib
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
 
 from golem import (
+    branch_pull_requests,
     chains,
     ledger,
     locks,
@@ -168,10 +170,17 @@ def has_pending_tasks(tasks: ledger.Tasks) -> bool:
 
 
 def run_launch_agent() -> int:
+    pull_request_refresh = threading.Thread(target=branch_pull_requests.refresh_pull_requests)
+    pull_request_refresh.start()
     worktree_cleanup.auto_remove_worktrees()
     processes = run_launch_agent_pass()
-    while has_pending_tasks(ledger.load_tasks()):
-        time.sleep(LAUNCH_AGENT_POLL_SECONDS)
+    while True:
+        if has_pending_tasks(ledger.load_tasks()):
+            time.sleep(LAUNCH_AGENT_POLL_SECONDS)
+        elif pull_request_refresh.is_alive():
+            # A wake while the agent still runs is dropped, so keep polling for queued tasks.
+            pull_request_refresh.join(LAUNCH_AGENT_POLL_SECONDS)
+        else:
+            return 0
         processes = spawn.reap_finished_executors(processes)
         processes.extend(run_launch_agent_pass())
-    return 0

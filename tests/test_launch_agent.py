@@ -5,17 +5,30 @@ import os
 import plistlib
 import re
 import subprocess
+import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Never
 
 import pytest
 
-from golem import cli, executor, launch_agent, ledger, locks, progress_log, scheduling, spawn
+from golem import (
+    branch_pull_requests,
+    cli,
+    executor,
+    launch_agent,
+    ledger,
+    locks,
+    progress_log,
+    scheduling,
+    spawn,
+)
 from golem.backends import claude
 from tests import support
 
 LAUNCH_AGENT_ERROR_PATTERN = re.escape(launch_agent.LAUNCH_AGENT_ERROR)
+PULL_REQUEST_URL = "https://github.com/owner/repository/pull/1"
 
 
 @pytest.mark.parametrize(
@@ -464,6 +477,33 @@ def test_launch_agent_reaps_finished_executor_while_future_task_is_pending(
     assert processes[0].returncode is not None
 
 
+def test_launch_agent_starts_due_tasks_while_pull_requests_refresh(ledger_path, monkeypatch):
+    support.write_tasks(ledger_path, {})
+    task_started = threading.Event()
+    was_started_during_refresh: list[bool] = []
+    processes: list[subprocess.Popen[bytes]] = []
+
+    def refresh_while_task_is_queued() -> None:
+        with ledger.locked_tasks() as tasks:
+            tasks[support.TASK_ID] = support.task_record(ledger.STATUS_SCHEDULED)
+        was_started_during_refresh.append(task_started.wait(5))
+
+    def finish_task(task_id: str, _: ledger.Task) -> subprocess.Popen[bytes]:
+        with ledger.locked_tasks() as tasks:
+            tasks[task_id]["status"] = ledger.STATUS_DONE
+        task_started.set()
+        processes.append(subprocess.Popen([sys.executable, "-c", ""]))
+        return processes[0]
+
+    monkeypatch.setattr(branch_pull_requests, "refresh_pull_requests", refresh_while_task_is_queued)
+    monkeypatch.setattr(spawn, "start_task_executor", finish_task)
+    monkeypatch.setattr(launch_agent, "LAUNCH_AGENT_POLL_SECONDS", 0.01)
+
+    assert launch_agent.run_launch_agent() == 0
+    processes[0].wait()
+    assert was_started_during_refresh == [True]
+
+
 def test_waiting_dependent_of_succeeded_parent_keeps_launch_agent_running():
     tasks: ledger.Tasks = {
         support.PARENT_ID: support.task_record(ledger.STATUS_DONE, task_id=support.PARENT_ID),
@@ -471,3 +511,16 @@ def test_waiting_dependent_of_succeeded_parent_keeps_launch_agent_running():
     }
 
     assert launch_agent.has_pending_tasks(tasks)
+
+
+def test_launch_agent_stores_pull_requests_of_done_tasks(
+    owned_worktree, write_pull_requests, ledger_path
+):
+    owned_worktree()
+    write_pull_requests(support.WORKTREE_BRANCH, [{"url": PULL_REQUEST_URL, "state": "MERGED"}])
+
+    assert launch_agent.run_launch_agent() == 0
+
+    assert support.read_task(ledger_path)["pull_requests"] == [
+        {"url": PULL_REQUEST_URL, "state": ledger.PULL_REQUEST_STATE_MERGED}
+    ]
