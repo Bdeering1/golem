@@ -59,10 +59,8 @@ def display_directory(directory: str) -> str:
 
 
 def shortened_directory(directory: str) -> str:
-    path = Path(directory)
-    if path.parent in (path, Path()):
-        return directory
-    return f".../{path.name}"
+    shortened = f".../{Path(directory).name}"
+    return shortened if len(shortened) < len(directory) else directory
 
 
 def display_time(timestamp: str, today: date) -> str:
@@ -160,7 +158,7 @@ def table_lines(rows: list[ListRow], *, is_color: bool) -> list[str]:
     for row in rows:
         cells = [value.ljust(width) for value, width in zip(row, widths, strict=True)]
         cells[LIST_STATUS_COLUMN] = display_status(
-            row[LIST_STATUS_COLUMN], widths[LIST_STATUS_COLUMN], is_color=is_color
+            row.status, widths[LIST_STATUS_COLUMN], is_color=is_color
         )
         lines.append("  ".join(cells))
     return [line.rstrip() for line in lines]
