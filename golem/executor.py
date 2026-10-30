@@ -48,7 +48,7 @@ def mark_task_waiting_for_reset(task_id: str, result: str) -> bool:
         if task is None:
             return False
         when = scheduling.planned_execution_time(
-            ledger.task_backend(task), is_now=False, at_text=None
+            registry.task_backend(task), is_now=False, at_text=None
         )
     except SystemExit:
         return False
