@@ -1,3 +1,4 @@
+import os
 import shutil
 
 import pytest
@@ -103,19 +104,56 @@ def test_refresh_leaves_stored_pull_requests(
     is_gh_available,
 ):
     worktree = owned_worktree()
+    if not is_gh_available:
+        monkeypatch.setenv("PATH", git_only_path(tmp_path))
     support.write_task(
         ledger_path, ledger.STATUS_DONE, worktree=str(worktree), pull_requests=stored
     )
     write_pull_requests(support.WORKTREE_BRANCH, [{"url": "new", "state": "OPEN"}])
-    if not is_gh_available:
-        git_only_path = tmp_path / "git-only-bin"
-        git_only_path.mkdir()
-        (git_only_path / "git").symlink_to(str(shutil.which("git")))
-        monkeypatch.setenv("PATH", str(git_only_path))
 
     branch_pull_requests.refresh_pull_requests()
 
     assert stored_pull_requests(ledger_path) == stored
+
+
+def git_only_path(tmp_path):
+    path = tmp_path / "git-only-bin"
+    path.mkdir()
+    (path / "git").symlink_to(str(shutil.which("git")))
+    return str(path)
+
+
+def test_refresh_finds_gh_on_task_path(
+    owned_worktree, ledger_path, write_pull_requests, monkeypatch, tmp_path
+):
+    worktree = owned_worktree()
+    support.write_task(
+        ledger_path,
+        ledger.STATUS_DONE,
+        worktree=str(worktree),
+        environment={"PATH": os.environ["PATH"]},
+    )
+    write_pull_requests(support.WORKTREE_BRANCH, [{"url": OPEN_URL, "state": "OPEN"}])
+    monkeypatch.setenv("PATH", git_only_path(tmp_path))
+
+    branch_pull_requests.refresh_pull_requests()
+
+    assert stored_pull_requests(ledger_path) == [
+        {"url": OPEN_URL, "state": ledger.PULL_REQUEST_STATE_OPEN}
+    ]
+
+
+def test_refresh_skips_worktree_directory_that_is_no_longer_a_repository(
+    owned_worktree, ledger_path, write_pull_requests
+):
+    worktree = owned_worktree()
+    (worktree / ".git").unlink()
+    support.write_task(ledger_path, ledger.STATUS_DONE, worktree=str(worktree))
+    write_pull_requests(DEFAULT_BRANCH, [])
+
+    branch_pull_requests.refresh_pull_requests()
+
+    assert stored_pull_requests(ledger_path) is None
 
 
 @pytest.mark.parametrize(

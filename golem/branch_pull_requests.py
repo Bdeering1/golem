@@ -3,7 +3,7 @@ import subprocess
 from pathlib import Path
 from typing import cast
 
-from golem import git, ledger, task_directories
+from golem import git, ledger, spawn, task_directories
 
 PULL_REQUEST_LOOKUP_TIMEOUT_SECONDS = 30
 
@@ -35,7 +35,9 @@ def repositories_within(repository: str) -> list[str] | None:
     return repositories
 
 
-def repository_pull_requests(repository: str) -> list[ledger.PullRequest] | None:
+def repository_pull_requests(
+    repository: str, environment: dict[str, str]
+) -> list[ledger.PullRequest] | None:
     branch = git.run_git(repository, "symbolic-ref", "--short", "HEAD")
     if branch.returncode:
         return []
@@ -50,6 +52,7 @@ def repository_pull_requests(repository: str) -> list[ledger.PullRequest] | None
         result = subprocess.run(
             ["gh", "pr", "list", "--head", branch_name, "--state", "all", "--json", "url,state"],
             cwd=repository,
+            env=environment,
             stdin=subprocess.DEVNULL,
             capture_output=True,
             encoding="utf-8",
@@ -69,16 +72,22 @@ def repository_pull_requests(repository: str) -> list[ledger.PullRequest] | None
         return None
 
 
-def directory_pull_requests(directory: str) -> list[ledger.PullRequest] | None:
+def directory_pull_requests(directory: str, task: ledger.Task) -> list[ledger.PullRequest] | None:
     top_level = git.run_git(directory, "rev-parse", "--show-toplevel")
     if top_level.returncode:
         return None
-    repositories = repositories_within(top_level.stdout.strip())
+    repository = top_level.stdout.strip()
+    # A removed worktree's leftover directory resolves to the main checkout around it.
+    if not task.get("no_worktree") and git.resolved_path(repository) != git.resolved_path(
+        directory
+    ):
+        return None
+    repositories = repositories_within(repository)
     if repositories is None:
         return None
     pull_requests: list[ledger.PullRequest] = []
     for repository in repositories:
-        found_pull_requests = repository_pull_requests(repository)
+        found_pull_requests = repository_pull_requests(repository, spawn.task_environment(task))
         if found_pull_requests is None:
             return None
         pull_requests.extend(found_pull_requests)
@@ -110,6 +119,6 @@ def refresh_pull_requests() -> None:
         if directory is not None:
             task_ids_by_directory.setdefault(directory, []).append(task_id)
     for directory, task_ids in task_ids_by_directory.items():
-        pull_requests = directory_pull_requests(directory)
+        pull_requests = directory_pull_requests(directory, tasks[task_ids[0]])
         if pull_requests is not None:
             store_pull_requests(tasks, task_ids, pull_requests)
