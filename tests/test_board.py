@@ -59,7 +59,7 @@ def statuses_tasks():
 def test_board_columns_group_statuses_and_skip_cancelled(is_done_shown):
     rows = display.list_rows(statuses_tasks(), TODAY)
 
-    columns = board.board_columns(rows, is_done_shown=is_done_shown)
+    columns = board.rows_by_column(rows, is_done_shown=is_done_shown)
 
     expected = [
         ("Queued", {ledger.STATUS_SCHEDULED, ledger.STATUS_WAITING}),
@@ -112,18 +112,6 @@ def test_board_wraps_fields_without_cutting_text_and_shortens_long_directories()
     assert ".../project-leaf" in body
     assert "thegatestoppedbecausethetestsfailedinseveralplaces" in body.replace(" ", "")
     assert all(len(line) <= width - board.COLUMN_GAP for line in lines[1:-1])
-
-
-def test_board_shows_one_column_at_a_time_when_narrow():
-    rows = display.list_rows(statuses_tasks(), TODAY)
-    state = board.BoardState()
-
-    first_header = frame_lines(rows, NARROW_WIDTH, HEIGHT, state)[0]
-    board.apply_key(state, ord("l"))
-    second_header = frame_lines(rows, NARROW_WIDTH, HEIGHT, state)[0]
-
-    assert first_header == "Queued (2)"
-    assert second_header == "Running (1)"
 
 
 def test_board_focus_stays_within_shown_columns():

@@ -4,7 +4,7 @@ import os
 import sys
 import textwrap
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from typing import TYPE_CHECKING, NamedTuple
 
 from golem import display, ledger
@@ -75,7 +75,7 @@ def shown_column_count(state: BoardState) -> int:
     return len(shown_board_columns(is_done_shown=state.is_done_shown))
 
 
-def board_columns(
+def rows_by_column(
     rows: list[display.ListRow], *, is_done_shown: bool
 ) -> list[tuple[BoardColumn, list[display.ListRow]]]:
     return [
@@ -145,7 +145,7 @@ def board_frame(
     column_width = width // fit_count
     content_width = max(1, column_width - COLUMN_GAP)
     body_height = height - HEADER_AND_FOOTER_LINE_COUNT
-    columns = board_columns(rows, is_done_shown=state.is_done_shown)
+    columns = rows_by_column(rows, is_done_shown=state.is_done_shown)
     segments: list[Segment] = []
     for offset in range(fit_count):
         column_index = state.first_column_index + offset
@@ -216,24 +216,24 @@ def start_colors() -> bool:
 
 def ledger_stat(task_ledger_path: Path) -> LedgerStat:
     try:
-        ledger_stat = task_ledger_path.stat()
+        stat_result = task_ledger_path.stat()
     except FileNotFoundError:
         return None
-    return (ledger_stat.st_ino, ledger_stat.st_mtime_ns, ledger_stat.st_size)
+    return (stat_result.st_ino, stat_result.st_mtime_ns, stat_result.st_size)
 
 
 def board_loop(screen: curses.window, *, is_color: bool) -> int:
     task_ledger_path = ledger.ledger_path()
     state = BoardState()
-    shown_redraw_key: tuple[LedgerStat, datetime] | None = None
+    shown_redraw_key: tuple[LedgerStat, date] | None = None
     rows: list[display.ListRow] = []
     is_redraw_needed = True
     while True:
-        now = datetime.now().astimezone()
-        redraw_key = (ledger_stat(task_ledger_path), now.replace(second=0, microsecond=0))
+        today = datetime.now().astimezone().date()
+        redraw_key = (ledger_stat(task_ledger_path), today)
         if redraw_key != shown_redraw_key:
             shown_redraw_key = redraw_key
-            rows = display.list_rows(ledger.load_tasks(), now.date())
+            rows = display.list_rows(ledger.load_tasks(), today)
             is_redraw_needed = True
         if is_redraw_needed:
             draw_board(screen, rows, state, is_color=is_color)
