@@ -183,6 +183,7 @@ class PtyBoard:
             env=environment,
             dimensions=(HEIGHT, PTY_WIDTH),
             cwd=REPO_ROOT,
+            timeout=PTY_TIMEOUT_SECONDS,
         )
 
     def text(self):

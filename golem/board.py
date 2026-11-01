@@ -1,6 +1,7 @@
 import contextlib
 import curses
 import os
+import signal
 import sys
 import textwrap
 from dataclasses import dataclass, field
@@ -19,6 +20,7 @@ STEP_SEPARATOR = "  "
 KEY_TIMEOUT_MILLISECONDS = 250
 INTERRUPTED_EXIT_STATUS = 130
 MIN_COLOR_COUNT = 256
+NOT_A_TERMINAL_MESSAGE = "golem: board needs a terminal; use golem list"
 STYLE_PLAIN = "plain"
 STYLE_BOLD = "bold"
 STYLE_DIM = "dim"
@@ -251,8 +253,12 @@ def is_terminal() -> bool:
 
 def run_board() -> int:
     if not is_terminal():
-        raise SystemExit("golem: board needs a terminal; use golem list")
-    screen = curses.initscr()
+        raise SystemExit(NOT_A_TERMINAL_MESSAGE)
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    try:
+        screen = curses.initscr()
+    except curses.error:
+        raise SystemExit(NOT_A_TERMINAL_MESSAGE) from None
     try:
         curses.noecho()
         curses.cbreak()
