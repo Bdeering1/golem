@@ -4,6 +4,7 @@ import locale
 import os
 import signal
 import sys
+import textwrap
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
@@ -18,7 +19,7 @@ CARD_HEIGHT = 5
 CARD_PITCH = CARD_HEIGHT + 1
 TITLE_LINE_COUNT = 2
 TAB_LINE_COUNT = 2
-DETAIL_PANE_LINE_COUNT = 6
+DETAIL_PANE_LINE_COUNT = 5
 KEY_TIMEOUT_MILLISECONDS = 250
 INTERRUPTED_EXIT_STATUS = 130
 MIN_COLOR_COUNT = 256
@@ -152,7 +153,7 @@ def board_layout(width: int, height: int) -> BoardLayout:
     column_width = (width - (fit_count - 1) * COLUMN_GAP) // fit_count
     header_y = TITLE_LINE_COUNT + (TAB_LINE_COUNT if fit_count < len(BOARD_COLUMNS) else 0)
     body_top = header_y + 3
-    detail_body_height = height - DETAIL_PANE_LINE_COUNT - 1 - body_top
+    detail_body_height = height - 1 - DETAIL_PANE_LINE_COUNT - 1 - body_top
     is_detail_shown = detail_body_height >= CARD_HEIGHT
     body_height = detail_body_height if is_detail_shown else height - 1 - body_top
     return BoardLayout(fit_count, column_width, header_y, body_top, body_height, is_detail_shown)
@@ -373,35 +374,56 @@ def title_segments(width: int, snapshot: BoardSnapshot, glyphs: Glyphs) -> list[
     return segments
 
 
+def tail_shortened_directory(directory: str, width: int, glyphs: Glyphs) -> str:
+    parts = directory.split("/")
+    while len(directory) > width and len(parts) > 1:
+        parts = parts[1:]
+        directory = f"{glyphs.ellipsis}/{'/'.join(parts)}"
+    return fitted(directory, width, glyphs)
+
+
 def detail_segments(
-    y: int, width: int, row: display.ListRow | None, snapshot: BoardSnapshot, glyphs: Glyphs
+    footer_y: int, width: int, row: display.ListRow | None, snapshot: BoardSnapshot, glyphs: Glyphs
 ) -> list[Segment]:
-    rule = glyphs.horizontal * (width - 1)
-    segments = [Segment(y, 0, rule, STYLE_DIM), Segment(y + 4, 0, rule, STYLE_DIM)]
-    if row is None:
-        return [*segments, Segment(y + 1, 0, "No task selected", STYLE_DIM)]
-    step_text = f"step {row.step} {glyphs.separator} " if row.step else ""
-    location_width = width - 1 - len(row.task_id) - len(row.status) - 4
-    directory = display.display_directory(row.directory)
-    if len(step_text) + len(directory) > location_width:
-        directory = display.shortened_directory(directory)
-    location_text = f"  {fitted(step_text + directory, location_width, glyphs)}"
-    first_line = [
-        (row.task_id, STYLE_BOLD, None),
-        (f"  {row.status}", STYLE_PLAIN, display.STATUS_COLORS[row.status]),
-        (location_text, STYLE_DIM, None),
-    ]
-    x = 0
-    for text, style, color in first_line:
-        segments.append(Segment(y + 1, x, text, style, color))
-        x += len(text)
-    prompt_line = snapshot.prompts.get(row.task_id, "").strip().partition("\n")[0]
-    detail_lines = [(row.detail, STYLE_PLAIN), (prompt_line, STYLE_DIM)]
-    for line_offset, (text, style) in enumerate(
-        [line for line in detail_lines if line[0]], start=2
-    ):
-        segments.append(Segment(y + line_offset, 0, fitted(text, width - 1, glyphs), style))
+    line_width = width - 1
+    lines: list[list[Part]] = [[("No task selected", STYLE_DIM, None)]]
+    if row is not None:
+        lines = detail_lines(row, line_width, snapshot, glyphs)
+    rule_y = footer_y - 1 - len(lines)
+    segments = [Segment(rule_y, 0, glyphs.horizontal * line_width, STYLE_DIM)]
+    for line_offset, parts in enumerate(lines, start=1):
+        segments += part_segments(rule_y + line_offset, 0, parts)
     return segments
+
+
+def detail_lines(
+    row: display.ListRow, line_width: int, snapshot: BoardSnapshot, glyphs: Glyphs
+) -> list[list[Part]]:
+    status_text = f"  {row.status}"
+    step_text = f"  step {row.step}" if row.step else ""
+    task_id = fitted(row.task_id, line_width - len(status_text) - len(step_text), glyphs)
+    directory = display.display_directory(row.directory)
+    lines: list[list[Part]] = [
+        [
+            (task_id, STYLE_BOLD, None),
+            (status_text, STYLE_PLAIN, display.STATUS_COLORS[row.status]),
+            (step_text, STYLE_DIM, None),
+        ],
+        [(tail_shortened_directory(directory, line_width, glyphs), STYLE_DIM, None)],
+    ]
+    if row.detail:
+        lines.append([(fitted(row.detail, line_width, glyphs), STYLE_PLAIN, None)])
+    prompt = " ".join(snapshot.prompts.get(row.task_id, "").split())
+    if prompt and line_width > len(glyphs.ellipsis) + 1:
+        prompt_lines = textwrap.wrap(
+            prompt,
+            line_width,
+            max_lines=DETAIL_PANE_LINE_COUNT - 1 - len(lines),
+            placeholder=f" {glyphs.ellipsis}",
+        )
+        prompt_parts: list[list[Part]] = [[(line, STYLE_DIM, None)] for line in prompt_lines]
+        lines += prompt_parts
+    return lines
 
 
 def footer_segments(y: int, width: int, state: BoardState, glyphs: Glyphs) -> list[Segment]:
@@ -478,9 +500,7 @@ def board_frame(
         selected_row = (
             focused_rows[state.selected_indices[state.focus_index]] if focused_rows else None
         )
-        segments += detail_segments(
-            height - DETAIL_PANE_LINE_COUNT, width, selected_row, snapshot, glyphs
-        )
+        segments += detail_segments(height - 1, width, selected_row, snapshot, glyphs)
     segments += footer_segments(height - 1, width, state, glyphs)
     return clipped(segments, width, height)
 

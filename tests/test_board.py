@@ -111,11 +111,18 @@ def test_board_shortens_card_text_and_shows_it_in_full_in_the_detail_pane():
 
     lines = frame_lines(tasks, WIDE_WIDTH, HEIGHT, board.BoardState(focus_index=1))
 
-    text = "\n".join(lines)
-    assert "a-very-long-tas…" in text
-    assert f"{task_id}  running  .../project-leaf" in text
-    assert "Polish the board" in text
-    assert "more" not in text
+    assert "a-very-long-tas…" in "\n".join(lines)
+    assert lines[-4:-1] == [f"{task_id}  running", directory, "Polish the board more"]
+
+
+def test_board_detail_pane_keeps_the_end_of_a_long_directory():
+    tasks = {
+        "task": support.task_record(ledger.STATUS_RUNNING, cwd="/somewhere/deeply/nested/leaf")
+    }
+
+    lines = frame_lines(tasks, NARROW_WIDTH, HEIGHT, board.BoardState(focus_index=1))
+
+    assert "…/deeply/nested/leaf" in lines
 
 
 @pytest.mark.parametrize(
@@ -258,7 +265,9 @@ class PtyBoard:
         )
 
     def selected_task_id(self):
-        return self.screen.display[HEIGHT - board.DETAIL_PANE_LINE_COUNT + 1].split()[0]
+        lines = self.screen.display
+        rule_y = max(y for y, line in enumerate(lines) if line.startswith(("──", "--")))
+        return lines[rule_y + 1].split()[0]
 
     def send(self, keys):
         self.child.send(keys)
