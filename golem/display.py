@@ -219,8 +219,6 @@ def list_tasks() -> int:
         table_rows, is_color=is_color_enabled(), is_detail_on_own_line=is_detail_on_own_line
     ):
         print(line)
-    if any(row.is_detail_time for row in rows):
-        print("\nTimes are local.")
     return 0
 
 
