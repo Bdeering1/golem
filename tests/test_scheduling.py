@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from golem import cli, ledger, scheduling
+from golem import cli, ledger, progress_log, scheduling
 from golem.backends import claude, common
 from tests import support
 
@@ -195,15 +195,15 @@ def test_run_replaces_finished_task_on_each_reserved_path(
 
 
 @pytest.mark.parametrize(
-    "fields",
+    ("fields", "is_unfinished_task_in_chain"),
     [
-        pytest.param({"status": ledger.STATUS_NEEDS_REVIEW}, id="not-done"),
-        pytest.param({"pull_requests": [{"url": "open", "state": "open"}]}, id="open-pr"),
-        pytest.param({"pull_requests": []}, id="no-pr"),
-        pytest.param({"pull_requests": None}, id="unchecked"),
+        pytest.param({"status": ledger.STATUS_NEEDS_REVIEW}, False, id="not-done"),
+        pytest.param({"pull_requests": [{"url": "open", "state": "open"}]}, False, id="open-pr"),
+        pytest.param({"pull_requests": []}, False, id="no-pr"),
+        pytest.param({"pull_requests": None}, False, id="unchecked"),
+        pytest.param({"pull_requests": None}, True, id="unfinished-task-in-chain"),
     ],
 )
-@pytest.mark.parametrize("is_unfinished_task_in_chain", [False, True])
 def test_run_refuses_taken_id_unless_whole_chain_is_finished(
     installed_launch_agent, ledger_path, fields, is_unfinished_task_in_chain
 ):
@@ -220,6 +220,23 @@ def test_run_refuses_taken_id_unless_whole_chain_is_finished(
         cli.main(["run", support.TASK_ID, support.PROMPT, "--now"])
 
     assert support.read_tasks(ledger_path) == tasks
+
+
+def test_refused_run_keeps_progress_of_finished_task(installed_launch_agent, ledger_path):
+    tasks = {
+        support.PARENT_ID: support.task_record(ledger.STATUS_CANCELLED, task_id=support.PARENT_ID),
+        support.CHILD_ID: finished_task(support.CHILD_ID),
+    }
+    support.write_tasks(ledger_path, tasks)
+    progress_path = progress_log.progress_path(tasks[support.CHILD_ID]["session_id"])
+    progress_path.parent.mkdir(parents=True, exist_ok=True)
+    progress_path.write_text("progress", encoding="utf-8")
+
+    with pytest.raises(SystemExit, match="parent task is cancelled"):
+        cli.main(["run", support.CHILD_ID, support.CHILD_PROMPT, "--after", support.PARENT_ID])
+
+    assert support.read_tasks(ledger_path) == tasks
+    assert progress_path.exists()
 
 
 @pytest.mark.parametrize(

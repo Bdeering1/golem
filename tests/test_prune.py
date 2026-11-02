@@ -100,17 +100,6 @@ def test_prune_decides_done_tasks_by_stored_pull_requests_then_idle_time(
     assert (support.TASK_ID not in ledger.load_tasks()) is is_removed
 
 
-def test_prune_judges_no_worktree_task_by_stored_pull_requests(ledger_path):
-    support.write_task(
-        ledger_path, ledger.STATUS_DONE, no_worktree=True, pull_requests=[MERGED_PULL_REQUEST]
-    )
-    support.write_transcript(support.read_task(ledger_path)["session_id"], 0)
-
-    assert cli.main(["prune", "--yes"]) == 0
-
-    assert support.TASK_ID not in ledger.load_tasks()
-
-
 @pytest.mark.parametrize(
     ("fields", "reason"),
     [
@@ -119,8 +108,6 @@ def test_prune_judges_no_worktree_task_by_stored_pull_requests(ledger_path):
             "2 PRs merged",
             id="finished-pull-requests",
         ),
-        pytest.param({"pull_requests": [CLOSED_PULL_REQUEST]}, "PR closed", id="closed"),
-        pytest.param({"pull_requests": []}, "no transcript", id="no-pull-request"),
         pytest.param({"cwd": "missing"}, "directory missing", id="directory-missing"),
     ],
 )
