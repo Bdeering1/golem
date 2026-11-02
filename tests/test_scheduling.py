@@ -195,42 +195,6 @@ def test_run_replaces_finished_task_on_each_reserved_path(
     assert support.read_task(ledger_path, replaced_id)["session_id"] != old_session_id
 
 
-def test_run_after_done_parent_keeps_finished_task_when_usage_lookup_fails(
-    installed_launch_agent, ledger_path, monkeypatch
-):
-    tasks = {
-        support.PARENT_ID: finished_task(support.PARENT_ID),
-        support.CHILD_ID: finished_task(support.CHILD_ID),
-    }
-    support.write_tasks(ledger_path, tasks)
-
-    def fail_usage_lookup() -> Never:
-        raise SystemExit(common.USAGE_ERROR)
-
-    monkeypatch.setattr(claude, "next_reset_time", fail_usage_lookup)
-
-    with pytest.raises(SystemExit, match=re.escape(common.USAGE_ERROR)):
-        cli.main(["run", support.CHILD_ID, support.CHILD_PROMPT, "--after", support.PARENT_ID])
-
-    assert support.read_tasks(ledger_path) == tasks
-
-
-def test_run_refuses_to_replace_chain_holding_its_parent(
-    installed_launch_agent, ledger_path, monkeypatch
-):
-    monkeypatch.setattr(claude, "next_reset_time", lambda: None)
-    tasks = {
-        support.PARENT_ID: finished_task(support.PARENT_ID),
-        support.CHILD_ID: finished_task(support.CHILD_ID, after=support.PARENT_ID),
-    }
-    support.write_tasks(ledger_path, tasks)
-
-    with pytest.raises(SystemExit, match=f"task already exists: {support.CHILD_ID}"):
-        cli.main(["run", support.CHILD_ID, support.CHILD_PROMPT, "--after", support.PARENT_ID])
-
-    assert support.read_tasks(ledger_path) == tasks
-
-
 @pytest.mark.parametrize(
     ("fields", "is_unfinished_task_in_chain"),
     [
@@ -259,17 +223,53 @@ def test_run_refuses_taken_id_unless_whole_chain_is_finished(
     assert support.read_tasks(ledger_path) == tasks
 
 
-def test_refused_run_keeps_progress_of_finished_task(installed_launch_agent, ledger_path):
+def fail_usage_lookup() -> Never:
+    raise SystemExit(common.USAGE_ERROR)
+
+
+@pytest.mark.parametrize(
+    ("parent_status", "child_fields", "next_reset_time", "error"),
+    [
+        pytest.param(
+            ledger.STATUS_CANCELLED, {}, None, "parent task is cancelled", id="cancelled-parent"
+        ),
+        pytest.param(
+            ledger.STATUS_DONE,
+            {},
+            fail_usage_lookup,
+            re.escape(common.USAGE_ERROR),
+            id="usage-lookup-fails",
+        ),
+        pytest.param(
+            ledger.STATUS_DONE,
+            {"after": support.PARENT_ID},
+            lambda: None,
+            f"task already exists: {support.CHILD_ID}",
+            id="chain-holds-parent",
+        ),
+    ],
+)
+def test_refused_run_after_keeps_finished_task_and_progress(
+    installed_launch_agent,
+    ledger_path,
+    monkeypatch,
+    parent_status,
+    child_fields,
+    next_reset_time,
+    error,
+):
+    if next_reset_time is not None:
+        monkeypatch.setattr(claude, "next_reset_time", next_reset_time)
     tasks = {
-        support.PARENT_ID: support.task_record(ledger.STATUS_CANCELLED, task_id=support.PARENT_ID),
-        support.CHILD_ID: finished_task(support.CHILD_ID),
+        support.PARENT_ID: finished_task(support.PARENT_ID, parent_status),
+        support.CHILD_ID: finished_task(support.CHILD_ID, **child_fields),
     }
     support.write_tasks(ledger_path, tasks)
     progress_path = progress_log.progress_path(tasks[support.CHILD_ID]["session_id"])
     progress_path.parent.mkdir(parents=True, exist_ok=True)
     progress_path.write_text("progress", encoding="utf-8")
 
-    with pytest.raises(SystemExit, match="parent task is cancelled"):
+    with pytest.raises(SystemExit, match=error):
         cli.main(["run", support.CHILD_ID, support.CHILD_PROMPT, "--after", support.PARENT_ID])
 
     assert support.read_tasks(ledger_path) == tasks

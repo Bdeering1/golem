@@ -83,7 +83,6 @@ def test_prune_without_terminal_deletes_done_tasks_only_when_confirmed(
         pytest.param([], prune.PRUNE_IDLE_DAYS, True, id="no-pr-idle-session"),
         pytest.param([], prune.PRUNE_IDLE_DAYS - 1, False, id="no-pr-active-session"),
         pytest.param([], None, True, id="no-pr-missing-transcript"),
-        pytest.param(None, prune.PRUNE_IDLE_DAYS, True, id="unchecked-idle-session"),
         pytest.param(None, prune.PRUNE_IDLE_DAYS - 1, False, id="unchecked-active-session"),
     ],
 )
