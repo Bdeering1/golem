@@ -13,15 +13,23 @@ def run_lookup_git(directory: str, *arguments: str) -> subprocess.CompletedProce
     return git.run_git(directory, *arguments, timeout=PULL_REQUEST_LOOKUP_TIMEOUT_SECONDS)
 
 
-def inspected_directory(tasks: ledger.Tasks, task: ledger.Task) -> str | None:
-    if task.get("no_worktree"):
-        directory = task["cwd"]
-    else:
-        recorded = task_directories.recorded_worktree(tasks, task)
-        if recorded is None:
-            return None
-        directory = recorded[0]
-    return directory if Path(directory).is_dir() else None
+def run_gh(
+    arguments: list[str], *, cwd: str | None = None, environment: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str] | None:
+    try:
+        result = subprocess.run(
+            ["gh", *arguments],
+            cwd=cwd,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            encoding="utf-8",
+            timeout=PULL_REQUEST_LOOKUP_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except OSError, subprocess.TimeoutExpired:
+        return None
+    return None if result.returncode else result
 
 
 def repositories_within(repository: str) -> list[str] | None:
@@ -40,9 +48,7 @@ def repositories_within(repository: str) -> list[str] | None:
     return repositories
 
 
-def repository_pull_requests(
-    repository: str, environment: dict[str, str]
-) -> list[ledger.PullRequest] | None:
+def repository_branches(repository: str) -> list[ledger.RepositoryBranch] | None:
     branch = run_lookup_git(repository, "symbolic-ref", "--short", "HEAD")
     if branch.returncode:
         return []
@@ -60,20 +66,64 @@ def repository_pull_requests(
         return None
     if not remotes.stdout.strip():
         return []
-    try:
-        result = subprocess.run(
-            ["gh", "pr", "list", "--head", branch_name, "--state", "all", "--json", "url,state"],
-            cwd=repository,
-            env=environment,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            encoding="utf-8",
-            timeout=PULL_REQUEST_LOOKUP_TIMEOUT_SECONDS,
-            check=False,
-        )
-    except OSError, subprocess.TimeoutExpired:
+    repository_name = run_gh(
+        ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"], cwd=repository
+    )
+    if repository_name is None:
         return None
-    if result.returncode:
+    return [{"repository": repository_name.stdout.strip(), "branch": branch_name}]
+
+
+def directory_branches(directory: str) -> list[ledger.RepositoryBranch] | None:
+    try:
+        top_level = run_lookup_git(directory, "rev-parse", "--show-toplevel")
+        if top_level.returncode:
+            return None
+        repositories = repositories_within(top_level.stdout.strip())
+        if repositories is None:
+            return None
+        branches: list[ledger.RepositoryBranch] = []
+        for repository in repositories:
+            found_branches = repository_branches(repository)
+            if found_branches is None:
+                return None
+            branches.extend(found_branches)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        print(f"golem: could not record branches: {directory}: {error}", file=sys.stderr)
+        return None
+    return branches
+
+
+def task_branches(task_id: str) -> list[ledger.RepositoryBranch] | None:
+    tasks = ledger.load_tasks()
+    task = tasks.get(task_id)
+    if task is None:
+        return None
+    if task.get("no_worktree"):
+        return directory_branches(task["cwd"])
+    recorded = task_directories.recorded_worktree(tasks, task)
+    return None if recorded is None else directory_branches(recorded[0])
+
+
+def branch_pull_requests(
+    branch: ledger.RepositoryBranch, environment: dict[str, str]
+) -> list[ledger.PullRequest] | None:
+    result = run_gh(
+        [
+            "pr",
+            "list",
+            "--repo",
+            branch["repository"],
+            "--head",
+            branch["branch"],
+            "--state",
+            "all",
+            "--json",
+            "url,state",
+        ],
+        environment=environment,
+    )
+    if result is None:
         return None
     try:
         pull_requests = [
@@ -89,22 +139,10 @@ def repository_pull_requests(
     return cast("list[ledger.PullRequest]", pull_requests)
 
 
-def directory_pull_requests(directory: str, task: ledger.Task) -> list[ledger.PullRequest] | None:
-    top_level = run_lookup_git(directory, "rev-parse", "--show-toplevel")
-    if top_level.returncode:
-        return None
-    repository = top_level.stdout.strip()
-    # A removed worktree's leftover directory resolves to the main checkout around it.
-    if not task.get("no_worktree") and git.resolved_path(repository) != git.resolved_path(
-        directory
-    ):
-        return None
-    repositories = repositories_within(repository)
-    if repositories is None:
-        return None
+def task_pull_requests(task: ledger.Task) -> list[ledger.PullRequest] | None:
     pull_requests: list[ledger.PullRequest] = []
-    for repository in repositories:
-        found_pull_requests = repository_pull_requests(repository, spawn.task_environment(task))
+    for branch in task.get("repository_branches", []):
+        found_pull_requests = branch_pull_requests(branch, spawn.task_environment(task))
         if found_pull_requests is None:
             return None
         pull_requests.extend(found_pull_requests)
@@ -128,18 +166,17 @@ def store_pull_requests(
 
 def refresh_pull_requests() -> None:
     tasks = ledger.load_tasks()
-    task_ids_by_directory: dict[str, list[str]] = {}
+    task_ids_by_branches: dict[str, list[str]] = {}
     for task_id, task in tasks.items():
-        if task["status"] != ledger.STATUS_DONE or ledger.has_finished_pull_requests(task):
+        if (
+            task["status"] != ledger.STATUS_DONE
+            or "repository_branches" not in task
+            or ledger.has_finished_pull_requests(task)
+        ):
             continue
-        directory = inspected_directory(tasks, task)
-        if directory is not None:
-            task_ids_by_directory.setdefault(directory, []).append(task_id)
-    for directory, task_ids in task_ids_by_directory.items():
-        try:
-            pull_requests = directory_pull_requests(directory, tasks[task_ids[0]])
-        except (OSError, subprocess.TimeoutExpired) as error:
-            print(f"golem: pull request lookup failed: {directory}: {error}", file=sys.stderr)
-            continue
+        branches_key = json.dumps(task["repository_branches"], sort_keys=True)
+        task_ids_by_branches.setdefault(branches_key, []).append(task_id)
+    for task_ids in task_ids_by_branches.values():
+        pull_requests = task_pull_requests(tasks[task_ids[0]])
         if pull_requests is not None:
             store_pull_requests(tasks, task_ids, pull_requests)

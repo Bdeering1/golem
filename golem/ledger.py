@@ -43,6 +43,11 @@ PULL_REQUEST_STATES = (
 )
 
 
+class RepositoryBranch(TypedDict):
+    repository: str
+    branch: str
+
+
 class PullRequest(TypedDict):
     url: str
     state: Literal["open", "merged", "closed"]
@@ -74,6 +79,7 @@ class Task(TypedDict):
     setup_failure_reason: NotRequired[str]
     setup_directory: NotRequired[str]
     setup_busy_retry_count: NotRequired[int]
+    repository_branches: NotRequired[list[RepositoryBranch]]
     pull_requests: NotRequired[list[PullRequest]]
 
 

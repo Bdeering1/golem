@@ -100,10 +100,8 @@ def git_output(repository_path, *arguments: str):
     return result.stdout.strip()
 
 
-def add_github_remote(repository_path):
-    git_output(
-        repository_path, "remote", "add", "origin", "https://github.com/owner/repository.git"
-    )
+def add_github_remote(repository_path, name="repository"):
+    git_output(repository_path, "remote", "add", "origin", f"https://github.com/owner/{name}.git")
 
 
 def git_worktree(repository_path):

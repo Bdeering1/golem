@@ -513,11 +513,12 @@ def test_waiting_dependent_of_succeeded_parent_keeps_launch_agent_running():
     assert launch_agent.has_pending_tasks(tasks)
 
 
-def test_launch_agent_stores_pull_requests_of_done_tasks(
-    git_repository, owned_worktree, write_pull_requests, ledger_path
-):
-    support.add_github_remote(git_repository)
-    owned_worktree()
+def test_launch_agent_stores_pull_requests_of_done_tasks(write_pull_requests, ledger_path):
+    support.write_task(
+        ledger_path,
+        ledger.STATUS_DONE,
+        repository_branches=[{"repository": "owner/repository", "branch": support.WORKTREE_BRANCH}],
+    )
     write_pull_requests(support.WORKTREE_BRANCH, [{"url": PULL_REQUEST_URL, "state": "MERGED"}])
 
     assert launch_agent.run_launch_agent() == 0

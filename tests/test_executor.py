@@ -67,6 +67,21 @@ def test_dependent_runs_in_parent_worktree_with_its_own_environment(
     ]
 
 
+def test_finished_task_records_its_branch(
+    installed_launch_agent, git_repository, ledger_path, monkeypatch
+):
+    monkeypatch.chdir(git_repository)
+    support.git_output(git_repository, "checkout", "-qb", "feature")
+    support.add_github_remote(git_repository)
+    cli.main(["run", support.TASK_ID, support.PROMPT, "--now", "--no-worktree"])
+
+    cli.main(["_execute", support.TASK_ID, support.read_task(ledger_path)["session_id"]])
+
+    assert support.read_task(ledger_path)["repository_branches"] == [
+        {"repository": "owner/repository", "branch": "feature"}
+    ]
+
+
 @pytest.mark.parametrize(
     ("exit_code", "output", "expected_result", "expected_status"),
     [

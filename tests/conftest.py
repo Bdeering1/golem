@@ -158,6 +158,12 @@ printf '\036\\n' >> "$GOLEM_OSASCRIPT_ARGS"
 printf '%s\\n' "$@" >> "$GOLEM_OSASCRIPT_ARGS"
 """,
         "gh": """#!/bin/sh
+if [ "$1" = repo ]; then
+    url=$(git remote get-url origin) || exit 1
+    name=${url##*/}
+    printf 'owner/%s\\n' "${name%.git}"
+    exit 0
+fi
 head=''
 state=''
 while [ "$#" -gt 0 ]; do
