@@ -151,6 +151,11 @@ def task_pull_requests(task: ledger.Task) -> list[ledger.PullRequest] | None:
     for branch in task.get("repository_branches", []):
         found_pull_requests = pull_requests_on_branch(branch, environment)
         if found_pull_requests is None:
+            print(
+                f"golem: could not look up pull requests: {branch['repository']}: "
+                f"{branch['branch']}",
+                file=sys.stderr,
+            )
             return None
         pull_requests.extend(found_pull_requests)
     return pull_requests
