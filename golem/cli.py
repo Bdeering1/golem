@@ -220,8 +220,9 @@ def add_prune_command(add_parser: Callable[..., argparse.ArgumentParser]) -> Non
     prune_command = add_parser(
         "prune",
         description=(
-            "Delete cancelled tasks, and done tasks whose PR is merged or closed or whose "
-            f"session has been idle for {prune.PRUNE_IDLE_DAYS} days, after asking."
+            "Delete cancelled tasks, and done tasks whose PRs are all merged or closed, whose "
+            f"directory is missing, or whose session has been idle for {prune.PRUNE_IDLE_DAYS} "
+            "days, after asking."
         ),
     )
     prune_command.add_argument(

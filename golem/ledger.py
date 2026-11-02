@@ -236,14 +236,6 @@ def remove_interrupted_ledger_writes() -> None:
         temporary_path.unlink(missing_ok=True)
 
 
-def reserve_tasks(records: Tasks) -> None:
-    with locked_tasks() as tasks:
-        for task_id in records:
-            if task_id in tasks:
-                raise SystemExit(f"golem: task already exists: {task_id}")
-        tasks.update(records)
-
-
 def task_backend(task: Task) -> str:
     return task.get("backend", BACKEND_CLAUDE)
 

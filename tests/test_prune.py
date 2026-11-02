@@ -2,7 +2,6 @@ import contextlib
 import io
 import itertools
 import os
-import shutil
 import sys
 from pathlib import Path
 from typing import override
@@ -31,11 +30,15 @@ class TerminalInput(io.StringIO):
         return super().readline(size)
 
 
-@pytest.fixture
-def done_worktree(git_repository, ledger_path):
-    worktree = support.git_worktree(git_repository)
-    support.write_task(ledger_path, ledger.STATUS_DONE, worktree=str(worktree))
-    return worktree
+MERGED_PULL_REQUEST: ledger.PullRequest = {
+    "url": "merged",
+    "state": ledger.PULL_REQUEST_STATE_MERGED,
+}
+CLOSED_PULL_REQUEST: ledger.PullRequest = {
+    "url": "closed",
+    "state": ledger.PULL_REQUEST_STATE_CLOSED,
+}
+OPEN_PULL_REQUEST: ledger.PullRequest = {"url": "open", "state": ledger.PULL_REQUEST_STATE_OPEN}
 
 
 @pytest.mark.parametrize(
@@ -68,27 +71,40 @@ def test_prune_without_terminal_deletes_done_tasks_only_when_confirmed(
     assert set(ledger.load_tasks()) == set(statuses) - removed_ids
 
 
+MISSING_CWD = "/nonexistent/golem-task"
+
+
 @pytest.mark.parametrize(
-    ("pull_requests", "idle_days", "is_removed"),
+    ("fields", "idle_days", "is_removed"),
     [
-        pytest.param([{"number": 1, "state": "MERGED"}], 0, True, id="merged-pr"),
-        pytest.param([{"number": 1, "state": "CLOSED"}], 0, True, id="closed-pr"),
-        pytest.param([{"number": 1, "state": "OPEN"}], None, False, id="open-pr"),
+        pytest.param({"pull_requests": [MERGED_PULL_REQUEST]}, 0, True, id="merged-pr"),
+        pytest.param({"pull_requests": [CLOSED_PULL_REQUEST]}, 0, True, id="closed-pr"),
+        pytest.param({"pull_requests": [OPEN_PULL_REQUEST]}, None, False, id="open-pr"),
         pytest.param(
-            [{"number": 2, "state": "MERGED"}, {"number": 1, "state": "OPEN"}],
+            {"pull_requests": [MERGED_PULL_REQUEST, OPEN_PULL_REQUEST]},
             None,
             False,
             id="open-and-merged-pr",
         ),
-        pytest.param([], prune.PRUNE_IDLE_DAYS, True, id="idle-session"),
-        pytest.param([], prune.PRUNE_IDLE_DAYS - 1, False, id="active-session"),
-        pytest.param([], None, True, id="missing-transcript"),
+        pytest.param(
+            {"pull_requests": [OPEN_PULL_REQUEST], "cwd": MISSING_CWD},
+            None,
+            False,
+            id="open-pr-missing-directory",
+        ),
+        pytest.param({"cwd": MISSING_CWD}, 0, True, id="missing-directory"),
+        pytest.param({"pull_requests": []}, prune.PRUNE_IDLE_DAYS, True, id="no-pr-idle-session"),
+        pytest.param(
+            {"pull_requests": []}, prune.PRUNE_IDLE_DAYS - 1, False, id="no-pr-active-session"
+        ),
+        pytest.param({"pull_requests": []}, None, True, id="no-pr-missing-transcript"),
+        pytest.param({}, prune.PRUNE_IDLE_DAYS - 1, False, id="unchecked-active-session"),
     ],
 )
-def test_prune_decides_done_tasks_by_pull_request_then_idle_time(
-    done_worktree, write_pull_requests, ledger_path, pull_requests, idle_days, is_removed
+def test_prune_decides_done_tasks_by_stored_pull_requests_then_directory_then_idle_time(
+    ledger_path, fields, idle_days, is_removed
 ):
-    write_pull_requests(support.WORKTREE_BRANCH, pull_requests)
+    support.write_task(ledger_path, ledger.STATUS_DONE, **fields)
     if idle_days is not None:
         support.write_transcript(support.read_task(ledger_path)["session_id"], idle_days)
 
@@ -125,9 +141,9 @@ def test_prune_uses_codex_conversation_idle_time(ledger_path, tmp_path, idle_day
     assert (support.TASK_ID not in ledger.load_tasks()) is is_removed
 
 
-def test_prune_keeps_done_task_with_attached_pickup(done_worktree, write_pull_requests):
-    write_pull_requests(support.WORKTREE_BRANCH, [{"number": 1, "state": "MERGED"}])
-    pickup_lock_file = locks.acquire_lock(locks.directory_lock_path(str(done_worktree)))
+def test_prune_keeps_done_task_with_attached_pickup(ledger_path):
+    support.write_task(ledger_path, ledger.STATUS_DONE, pull_requests=[MERGED_PULL_REQUEST])
+    pickup_lock_file = locks.acquire_lock(locks.directory_lock_path(str(Path.cwd())))
     assert pickup_lock_file is not None
     try:
         assert cli.main(["prune", "--yes"]) == 0
@@ -135,22 +151,6 @@ def test_prune_keeps_done_task_with_attached_pickup(done_worktree, write_pull_re
         locks.release_lock(pickup_lock_file)
 
     assert support.TASK_ID in ledger.load_tasks()
-
-
-@pytest.mark.parametrize(("idle_days", "is_removed"), [(prune.PRUNE_IDLE_DAYS, True), (0, False)])
-def test_prune_without_gh_applies_only_idle_rule(
-    done_worktree, write_pull_requests, ledger_path, monkeypatch, tmp_path, idle_days, is_removed
-):
-    write_pull_requests(support.WORKTREE_BRANCH, [{"number": 1, "state": "MERGED"}])
-    support.write_transcript(support.read_task(ledger_path)["session_id"], idle_days)
-    git_only_path = tmp_path / "git-only-bin"
-    git_only_path.mkdir()
-    (git_only_path / "git").symlink_to(str(shutil.which("git")))
-    monkeypatch.setenv("PATH", str(git_only_path))
-
-    assert cli.main(["prune", "--yes"]) == 0
-
-    assert (support.TASK_ID not in ledger.load_tasks()) is is_removed
 
 
 @pytest.mark.parametrize(
