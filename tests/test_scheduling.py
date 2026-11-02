@@ -131,37 +131,27 @@ def finished_task(task_id, status=ledger.STATUS_DONE, **fields: object):
     )
 
 
-def test_run_replaces_done_task_with_finished_pull_requests(
+def test_run_replaces_whole_finished_chain(
     installed_launch_agent, owned_worktree, ledger_path, capsys
 ):
     worktree = owned_worktree()
     support.write_tasks(
-        ledger_path, {support.TASK_ID: finished_task(support.TASK_ID, worktree=str(worktree))}
-    )
-    old_session_id = support.read_task(ledger_path)["session_id"]
-
-    assert cli.main(["run", support.TASK_ID, support.PROMPT, "--now"]) == 0
-
-    assert f"golem: replaced task: {support.TASK_ID}" in capsys.readouterr().out
-    task = support.read_task(ledger_path)
-    assert task["session_id"] != old_session_id
-    assert task["status"] == ledger.STATUS_SCHEDULED
-    assert ledger.load_worktrees()[str(worktree.resolve())].get("released_at")
-
-
-def test_run_replaces_whole_finished_chain(installed_launch_agent, ledger_path):
-    support.write_tasks(
         ledger_path,
         {
-            support.PARENT_ID: finished_task(support.PARENT_ID),
+            support.PARENT_ID: finished_task(support.PARENT_ID, worktree=str(worktree)),
             support.CHILD_ID: finished_task(support.CHILD_ID, after=support.PARENT_ID),
             support.SIBLING_ID: finished_task(support.SIBLING_ID, after=support.PARENT_ID),
         },
     )
+    old_session_id = support.read_task(ledger_path, support.CHILD_ID)["session_id"]
 
     assert cli.main(["run", support.CHILD_ID, support.CHILD_PROMPT, "--now"]) == 0
 
-    assert set(support.read_tasks(ledger_path)) == {support.CHILD_ID}
+    assert f"golem: replaced task: {support.CHILD_ID}" in capsys.readouterr().out
+    tasks = support.read_tasks(ledger_path)
+    assert set(tasks) == {support.CHILD_ID}
+    assert tasks[support.CHILD_ID]["session_id"] != old_session_id
+    assert ledger.load_worktrees()[str(worktree.resolve())].get("released_at")
 
 
 @pytest.mark.parametrize(
@@ -203,7 +193,6 @@ def test_run_replaces_finished_task_on_each_reserved_path(
         pytest.param({"status": ledger.STATUS_NEEDS_REVIEW}, False, id="not-done"),
         pytest.param({"pull_requests": [{"url": "open", "state": "open"}]}, False, id="open-pr"),
         pytest.param({"pull_requests": []}, False, id="no-pr"),
-        pytest.param({"pull_requests": None}, False, id="unchecked"),
         pytest.param({"pull_requests": None}, True, id="unfinished-task-in-chain"),
     ],
 )

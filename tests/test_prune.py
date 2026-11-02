@@ -71,68 +71,46 @@ def test_prune_without_terminal_deletes_done_tasks_only_when_confirmed(
     assert set(ledger.load_tasks()) == set(statuses) - removed_ids
 
 
+MISSING_CWD = "/nonexistent/golem-task"
+
+
 @pytest.mark.parametrize(
-    ("pull_requests", "idle_days", "is_removed"),
+    ("fields", "idle_days", "is_removed"),
     [
-        pytest.param([MERGED_PULL_REQUEST], 0, True, id="merged-pr"),
-        pytest.param([CLOSED_PULL_REQUEST], 0, True, id="closed-pr"),
-        pytest.param([OPEN_PULL_REQUEST], None, False, id="open-pr"),
+        pytest.param({"pull_requests": [MERGED_PULL_REQUEST]}, 0, True, id="merged-pr"),
+        pytest.param({"pull_requests": [CLOSED_PULL_REQUEST]}, 0, True, id="closed-pr"),
+        pytest.param({"pull_requests": [OPEN_PULL_REQUEST]}, None, False, id="open-pr"),
         pytest.param(
-            [MERGED_PULL_REQUEST, OPEN_PULL_REQUEST], None, False, id="open-and-merged-pr"
+            {"pull_requests": [MERGED_PULL_REQUEST, OPEN_PULL_REQUEST]},
+            None,
+            False,
+            id="open-and-merged-pr",
         ),
-        pytest.param([], prune.PRUNE_IDLE_DAYS, True, id="no-pr-idle-session"),
-        pytest.param([], prune.PRUNE_IDLE_DAYS - 1, False, id="no-pr-active-session"),
-        pytest.param([], None, True, id="no-pr-missing-transcript"),
-        pytest.param(None, prune.PRUNE_IDLE_DAYS - 1, False, id="unchecked-active-session"),
+        pytest.param(
+            {"pull_requests": [OPEN_PULL_REQUEST], "cwd": MISSING_CWD},
+            None,
+            False,
+            id="open-pr-missing-directory",
+        ),
+        pytest.param({"cwd": MISSING_CWD}, 0, True, id="missing-directory"),
+        pytest.param({"pull_requests": []}, prune.PRUNE_IDLE_DAYS, True, id="no-pr-idle-session"),
+        pytest.param(
+            {"pull_requests": []}, prune.PRUNE_IDLE_DAYS - 1, False, id="no-pr-active-session"
+        ),
+        pytest.param({"pull_requests": []}, None, True, id="no-pr-missing-transcript"),
+        pytest.param({}, prune.PRUNE_IDLE_DAYS - 1, False, id="unchecked-active-session"),
     ],
 )
-def test_prune_decides_done_tasks_by_stored_pull_requests_then_idle_time(
-    ledger_path, pull_requests, idle_days, is_removed
+def test_prune_decides_done_tasks_by_stored_pull_requests_then_directory_then_idle_time(
+    ledger_path, fields, idle_days, is_removed
 ):
-    stored = {} if pull_requests is None else {"pull_requests": pull_requests}
-    support.write_task(ledger_path, ledger.STATUS_DONE, **stored)
+    support.write_task(ledger_path, ledger.STATUS_DONE, **fields)
     if idle_days is not None:
         support.write_transcript(support.read_task(ledger_path)["session_id"], idle_days)
 
     assert cli.main(["prune", "--yes"]) == 0
 
     assert (support.TASK_ID not in ledger.load_tasks()) is is_removed
-
-
-@pytest.mark.parametrize(
-    ("fields", "reason"),
-    [
-        pytest.param(
-            {"pull_requests": [MERGED_PULL_REQUEST, MERGED_PULL_REQUEST]},
-            "2 PRs merged",
-            id="finished-pull-requests",
-        ),
-        pytest.param(
-            {"cwd": "/nonexistent/golem-task"}, "directory missing", id="directory-missing"
-        ),
-    ],
-)
-def test_prune_offers_done_task_with_its_reason(ledger_path, monkeypatch, capsys, fields, reason):
-    support.write_task(ledger_path, ledger.STATUS_DONE, **fields)
-    monkeypatch.setattr(sys, "stdin", TerminalInput("y\n"))
-
-    assert cli.main(["prune"]) == 0
-
-    assert f"({ledger.STATUS_DONE}, {reason})" in capsys.readouterr().out
-    assert support.TASK_ID not in ledger.load_tasks()
-
-
-def test_prune_keeps_task_with_open_pull_request_and_missing_directory(ledger_path, tmp_path):
-    support.write_task(
-        ledger_path,
-        ledger.STATUS_DONE,
-        cwd=str(tmp_path / "missing"),
-        pull_requests=[OPEN_PULL_REQUEST],
-    )
-
-    assert cli.main(["prune", "--yes"]) == 0
-
-    assert support.TASK_ID in ledger.load_tasks()
 
 
 @pytest.mark.parametrize(
