@@ -14,7 +14,6 @@ from tests import support
 
 ANSI_COLOR = re.compile(r"\033\[38;5;\d+m|\033\[0m")
 TODAY = date(2030, 3, 10)
-TIMES_FOOTNOTE = "\n\nTimes are local.\n"
 
 
 @pytest.fixture
@@ -133,9 +132,7 @@ def test_list_abbreviates_only_home_and_its_descendants(ledger_path, capsys):
     assert prefix_directory in support.list_row(output, "prefix")
 
 
-def test_list_formats_times_without_zone_and_notes_they_are_local(
-    ledger_path, capsys, monkeypatch, toronto_time
-):
+def test_list_formats_times_without_zone(ledger_path, capsys, monkeypatch, toronto_time):
     class FixedDateTime(datetime):
         @classmethod
         @override
@@ -168,13 +165,6 @@ def test_list_formats_times_without_zone_and_notes_they_are_local(
     assert support.list_row(output, "today").endswith("today 11:30pm")
     assert support.list_row(output, "this-year").endswith("Nov 3 1:30am")
     assert support.list_row(output, "next-year").endswith("Nov 3, 2031 1:30am")
-    assert output.endswith(TIMES_FOOTNOTE)
-
-
-def test_list_omits_times_footnote_without_times(ledger_path, capsys):
-    support.write_task(ledger_path, ledger.STATUS_DONE)
-
-    assert TIMES_FOOTNOTE.strip() not in support.list_output(capsys)
 
 
 @pytest.mark.parametrize(
