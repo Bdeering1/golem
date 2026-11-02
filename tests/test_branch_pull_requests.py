@@ -49,15 +49,7 @@ def test_task_branches_cover_repository_and_nested_repositories(
         nested_path, "default", git_repository_template, DEFAULT_BRANCH
     )
     support.add_github_remote(default_branch_path, "default")
-    support.git_output(
-        default_branch_path, "update-ref", f"refs/remotes/origin/{DEFAULT_BRANCH}", "HEAD"
-    )
-    support.git_output(
-        default_branch_path,
-        "symbolic-ref",
-        "refs/remotes/origin/HEAD",
-        f"refs/remotes/origin/{DEFAULT_BRANCH}",
-    )
+    (git_repository / "nested-link").symlink_to(nested_path)
     support.write_task(ledger_path, ledger.STATUS_DONE, cwd=str(git_repository), no_worktree=True)
 
     assert branch_pull_requests.task_branches(support.TASK_ID) == [

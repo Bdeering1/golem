@@ -161,7 +161,7 @@ printf '%s\\n' "$@" >> "$GOLEM_OSASCRIPT_ARGS"
 if [ "$1" = repo ]; then
     url=$(git remote get-url origin) || exit 1
     name=${url##*/}
-    printf 'owner/%s\\n' "${name%.git}"
+    printf 'owner/%s\\nmain\\n' "${name%.git}"
     exit 0
 fi
 head=''

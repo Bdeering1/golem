@@ -6,11 +6,11 @@ from typing import cast
 
 from golem import git, ledger, spawn, task_directories
 
-PULL_REQUEST_LOOKUP_TIMEOUT_SECONDS = 30
+COMMAND_TIMEOUT_SECONDS = 30
 
 
-def run_lookup_git(directory: str, *arguments: str) -> subprocess.CompletedProcess[str]:
-    return git.run_git(directory, *arguments, timeout=PULL_REQUEST_LOOKUP_TIMEOUT_SECONDS)
+def run_git_with_timeout(directory: str, *arguments: str) -> subprocess.CompletedProcess[str]:
+    return git.run_git(directory, *arguments, timeout=COMMAND_TIMEOUT_SECONDS)
 
 
 def run_gh(
@@ -24,7 +24,7 @@ def run_gh(
             stdin=subprocess.DEVNULL,
             capture_output=True,
             encoding="utf-8",
-            timeout=PULL_REQUEST_LOOKUP_TIMEOUT_SECONDS,
+            timeout=COMMAND_TIMEOUT_SECONDS,
             check=False,
         )
     except OSError, subprocess.TimeoutExpired:
@@ -33,13 +33,13 @@ def run_gh(
 
 
 def repositories_within(repository: str) -> list[str] | None:
-    untracked = run_lookup_git(repository, "ls-files", "-z", "--others", "--directory")
+    untracked = run_git_with_timeout(repository, "ls-files", "-z", "--others", "--directory")
     if untracked.returncode:
         return None
     repositories = [repository]
     for entry in untracked.stdout.split("\0"):
         nested_repository = Path(repository) / entry
-        if not entry or not (nested_repository / ".git").exists():
+        if not entry or nested_repository.is_symlink() or not (nested_repository / ".git").exists():
             continue
         nested_repositories = repositories_within(str(nested_repository))
         if nested_repositories is None:
@@ -48,35 +48,41 @@ def repositories_within(repository: str) -> list[str] | None:
     return repositories
 
 
-def repository_branches(repository: str) -> list[ledger.RepositoryBranch] | None:
-    branch = run_lookup_git(repository, "symbolic-ref", "--short", "HEAD")
-    if branch.returncode:
+def branches_to_record(repository: str) -> list[ledger.RepositoryBranch] | None:
+    branch_result = run_git_with_timeout(repository, "symbolic-ref", "--short", "HEAD")
+    if branch_result.returncode:
         return []
-    branch_name = branch.stdout.strip()
-    default_branch = run_lookup_git(
-        repository, "symbolic-ref", "--quiet", "--short", git.ORIGIN_HEAD
-    )
-    if (
-        not default_branch.returncode
-        and default_branch.stdout.strip().removeprefix("origin/") == branch_name
-    ):
-        return []
-    remotes = run_lookup_git(repository, "remote")
+    remotes = run_git_with_timeout(repository, "remote")
     if remotes.returncode:
         return None
     if not remotes.stdout.strip():
         return []
-    repository_name = run_gh(
-        ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"], cwd=repository
+    repository_view = run_gh(
+        [
+            "repo",
+            "view",
+            "--json",
+            "nameWithOwner,defaultBranchRef",
+            "--jq",
+            ".nameWithOwner, .defaultBranchRef.name",
+        ],
+        cwd=repository,
     )
-    if repository_name is None:
+    if repository_view is None:
+        print(
+            f"golem: could not record branches: {repository}: gh repo view failed", file=sys.stderr
+        )
         return None
-    return [{"repository": repository_name.stdout.strip(), "branch": branch_name}]
+    repository_name, _, default_branch = repository_view.stdout.partition("\n")
+    branch = branch_result.stdout.strip()
+    if branch == default_branch.strip():
+        return []
+    return [{"repository": repository_name, "branch": branch}]
 
 
 def directory_branches(directory: str) -> list[ledger.RepositoryBranch] | None:
     try:
-        top_level = run_lookup_git(directory, "rev-parse", "--show-toplevel")
+        top_level = run_git_with_timeout(directory, "rev-parse", "--show-toplevel")
         if top_level.returncode:
             return None
         repositories = repositories_within(top_level.stdout.strip())
@@ -84,7 +90,7 @@ def directory_branches(directory: str) -> list[ledger.RepositoryBranch] | None:
             return None
         branches: list[ledger.RepositoryBranch] = []
         for repository in repositories:
-            found_branches = repository_branches(repository)
+            found_branches = branches_to_record(repository)
             if found_branches is None:
                 return None
             branches.extend(found_branches)
