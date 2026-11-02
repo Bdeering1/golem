@@ -46,14 +46,16 @@ def is_replaceable_task(task: ledger.Task) -> bool:
 
 
 def replace_finished_tasks(
-    tasks: ledger.Tasks, worktrees: ledger.Worktrees, task_ids: list[str]
+    tasks: ledger.Tasks, worktrees: ledger.Worktrees, task_ids: list[str], parent_id: str | None
 ) -> ReplacedTasks:
     replaced_ids: set[str] = set()
     for task_id in task_ids:
         if task_id not in tasks:
             continue
         chain_ids = chains.chain_task_ids(tasks, task_id)
-        if not all(is_replaceable_task(tasks[chain_id]) for chain_id in chain_ids):
+        if parent_id in chain_ids or not all(
+            is_replaceable_task(tasks[chain_id]) for chain_id in chain_ids
+        ):
             raise SystemExit(f"golem: task already exists: {task_id}")
         replaced_ids |= chain_ids
     ordered_ids = [task_id for task_id in tasks if task_id in replaced_ids]
@@ -64,7 +66,7 @@ def replace_finished_tasks(
     return ReplacedTasks(ordered_ids, session_ids, directories)
 
 
-def report_replaced_tasks(replaced: ReplacedTasks) -> None:
+def finish_task_replacement(replaced: ReplacedTasks) -> None:
     for session_id in replaced.session_ids:
         progress_log.remove_progress(session_id)
     for task_id in replaced.task_ids:

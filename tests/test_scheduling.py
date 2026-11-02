@@ -2,6 +2,7 @@ import json
 import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Never
 
 import pytest
 
@@ -192,6 +193,42 @@ def test_run_replaces_finished_task_on_each_reserved_path(
 
     assert f"golem: replaced task: {replaced_id}" in capsys.readouterr().out
     assert support.read_task(ledger_path, replaced_id)["session_id"] != old_session_id
+
+
+def test_run_after_done_parent_keeps_finished_task_when_usage_lookup_fails(
+    installed_launch_agent, ledger_path, monkeypatch
+):
+    tasks = {
+        support.PARENT_ID: finished_task(support.PARENT_ID),
+        support.CHILD_ID: finished_task(support.CHILD_ID),
+    }
+    support.write_tasks(ledger_path, tasks)
+
+    def fail_usage_lookup() -> Never:
+        raise SystemExit(common.USAGE_ERROR)
+
+    monkeypatch.setattr(claude, "next_reset_time", fail_usage_lookup)
+
+    with pytest.raises(SystemExit, match=re.escape(common.USAGE_ERROR)):
+        cli.main(["run", support.CHILD_ID, support.CHILD_PROMPT, "--after", support.PARENT_ID])
+
+    assert support.read_tasks(ledger_path) == tasks
+
+
+def test_run_refuses_to_replace_chain_holding_its_parent(
+    installed_launch_agent, ledger_path, monkeypatch
+):
+    monkeypatch.setattr(claude, "next_reset_time", lambda: None)
+    tasks = {
+        support.PARENT_ID: finished_task(support.PARENT_ID),
+        support.CHILD_ID: finished_task(support.CHILD_ID, after=support.PARENT_ID),
+    }
+    support.write_tasks(ledger_path, tasks)
+
+    with pytest.raises(SystemExit, match=f"task already exists: {support.CHILD_ID}"):
+        cli.main(["run", support.CHILD_ID, support.CHILD_PROMPT, "--after", support.PARENT_ID])
+
+    assert support.read_tasks(ledger_path) == tasks
 
 
 @pytest.mark.parametrize(

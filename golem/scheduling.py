@@ -129,9 +129,9 @@ def schedule_new_task(
     record = new_task_record(placement, prompt, agent_args, due_time, backend, after=after)
     records = {task_id: record, **follow_up_records}
     with ledger.locked_ledger() as (tasks, worktrees):
-        replaced = delete.replace_finished_tasks(tasks, worktrees, list(records))
+        replaced = delete.replace_finished_tasks(tasks, worktrees, list(records), after)
         tasks.update(records)
-    delete.report_replaced_tasks(replaced)
+    delete.finish_task_replacement(replaced)
     return launch_agent.wake_launch_agent_and_report(task_id, due_time)
 
 
@@ -227,10 +227,12 @@ def planned_execution_time(
 
 def reserve_dependent_task(records: ledger.Tasks, parent_id: str) -> bool:
     with ledger.locked_ledger() as (tasks, worktrees):
-        replaced = delete.replace_finished_tasks(tasks, worktrees, list(records))
-        is_reserved = chains.reserve_dependent_task(tasks, records, parent_id)
-    delete.report_replaced_tasks(replaced)
-    return is_reserved
+        if not chains.is_dependent_reservable(tasks, parent_id):
+            return False
+        replaced = delete.replace_finished_tasks(tasks, worktrees, list(records), parent_id)
+        chains.reserve_dependent_task(tasks, records, parent_id)
+    delete.finish_task_replacement(replaced)
+    return True
 
 
 def schedule_run_task(
