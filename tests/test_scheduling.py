@@ -173,11 +173,24 @@ def test_run_replaces_whole_finished_chain(
             },
             id="after-pending-parent",
         ),
+        pytest.param(
+            support.CHILD_ID,
+            ["--after", support.PARENT_ID],
+            {support.PARENT_ID: finished_task(support.PARENT_ID)},
+            id="after-done-parent",
+        ),
     ],
 )
 def test_run_replaces_finished_task_on_each_reserved_path(
-    installed_launch_agent, ledger_path, capsys, replaced_id, schedule_arguments, existing_tasks
+    installed_launch_agent,
+    ledger_path,
+    monkeypatch,
+    capsys,
+    replaced_id,
+    schedule_arguments,
+    existing_tasks,
 ):
+    monkeypatch.setattr(claude, "next_reset_time", lambda: None)
     support.write_tasks(ledger_path, {**existing_tasks, replaced_id: finished_task(replaced_id)})
     old_session_id = support.read_task(ledger_path, replaced_id)["session_id"]
 
