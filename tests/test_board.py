@@ -1,7 +1,7 @@
 import os
 import sys
 import time
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import pexpect
@@ -12,7 +12,8 @@ from golem import board, cli, display, ledger
 from tests import support
 
 TODAY = date(2030, 3, 10)
-WIDE_WIDTH = 4 * board.MIN_COLUMN_WIDTH
+NOW = datetime(2030, 3, 10, 12).astimezone()
+WIDE_WIDTH = 88
 NARROW_WIDTH = board.MIN_COLUMN_WIDTH + 8
 HEIGHT = 24
 PTY_WIDTH = 100
@@ -25,17 +26,18 @@ LETTER_KEYS = ("h", "l", "k", "j")
 MERGED_PULL_REQUEST = {"url": "https://github.com/owner/repository/pull/2", "state": "merged"}
 
 
-def frame_lines(rows, width, height, state):
+def frame_lines(tasks, width, height, state, glyphs=board.UNICODE_GLYPHS):
+    snapshot = board.board_snapshot(tasks, NOW)
     lines = [[" "] * width for _ in range(height)]
-    board.fit_state_to_layout(rows, width, height, state)
-    for segment in board.board_frame(rows, width, height, state):
+    board.fit_state_to_layout(snapshot.rows, width, height, state)
+    for segment in board.board_frame(snapshot, width, height, state, glyphs):
         for offset, character in enumerate(segment.text):
             lines[segment.y][segment.x + offset] = character
     return ["".join(line).rstrip() for line in lines]
 
 
-def frame_text(rows, width=WIDE_WIDTH, height=HEIGHT, state=None):
-    return "\n".join(frame_lines(rows, width, height, state or board.BoardState()))
+def frame_text(tasks, width=WIDE_WIDTH, height=HEIGHT, state=None):
+    return "\n".join(frame_lines(tasks, width, height, state or board.BoardState()))
 
 
 def running_tasks():
@@ -90,67 +92,83 @@ def test_board_shows_a_chain_as_one_card_with_its_step_and_list_detail():
         ),
         "child": support.task_record(ledger.STATUS_WAITING, task_id="child", after="root"),
     }
-    rows = display.list_rows(tasks, TODAY)
 
-    text = frame_text(rows)
+    text = frame_text(tasks, state=board.BoardState(focus_index=2))
 
-    assert len(rows) == 1
-    assert "root  1/2" in text
+    assert "1/2" in text
     assert "child" not in text
     assert display.list_detail(tasks["root"], TODAY) in text
 
 
-def test_board_wraps_fields_without_cutting_text_and_shortens_long_directories():
-    task_id = "a-very-long-task-identifier-that-wraps"
-    directory = "/somewhere/deeply/nested/inside/a/long/path/project-leaf"
+def test_board_shortens_card_text_and_shows_it_in_full_in_the_detail_pane():
+    task_id = "a-very-long-task-identifier-that-is-shortened"
+    directory = "/somewhere/deeply/nested/project-leaf"
     tasks = {
         task_id: support.task_record(
-            ledger.STATUS_FAILED,
-            task_id=task_id,
-            cwd=directory,
-            gate_stop_reason="the gate stopped because the tests failed in several places",
+            ledger.STATUS_RUNNING, task_id=task_id, cwd=directory, prompt="Polish the board\nmore"
         )
     }
-    rows = display.list_rows(tasks, TODAY)
-    width = 24
 
-    lines = frame_lines(rows, width, HEIGHT, board.BoardState(focus_index=2))
+    lines = frame_lines(tasks, WIDE_WIDTH, HEIGHT, board.BoardState(focus_index=1))
 
-    body = "".join(line.strip() for line in lines[1:-1])
-    assert task_id in body
-    assert ".../project-leaf" in body
-    assert "thegatestoppedbecausethetestsfailedinseveralplaces" in body.replace(" ", "")
-    assert all(len(line) <= width - board.COLUMN_GAP for line in lines[1:-1])
+    text = "\n".join(lines)
+    assert "a-very-long-tas…" in text
+    assert f"{task_id}  running  .../project-leaf" in text
+    assert "Polish the board" in text
+    assert "more" not in text
 
 
-def test_board_scroll_stops_at_the_end_of_a_column():
-    tasks = running_tasks()
-    rows = display.list_rows(tasks, TODAY)
+@pytest.mark.parametrize(
+    ("width", "shown_titles", "has_tabs"),
+    [
+        pytest.param(WIDE_WIDTH, ["Queued", "Running", "Review", "Done"], False, id="all-fit"),
+        pytest.param(46, ["Queued", "Running"], True, id="two-fit"),
+        pytest.param(NARROW_WIDTH, ["Queued"], True, id="one-fits"),
+    ],
+)
+def test_board_shows_as_many_columns_as_fit(width, shown_titles, has_tabs):
+    lines = frame_lines(statuses_tasks(), width, HEIGHT, board.BoardState())
+
+    header_line = lines[board.board_layout(width, HEIGHT).header_y]
+    assert [title for title, *_ in board.BOARD_COLUMNS if title in header_line] == shown_titles
+    assert (" · " in lines[board.TITLE_LINE_COUNT]) == has_tabs
+
+
+def test_board_selection_moves_within_a_column_and_scrolls_to_stay_visible():
     state = board.BoardState(focus_index=1)
-    height = 8
 
     for _ in range(100):
         board.apply_key(state, ord("j"))
-    bottom_lines = frame_lines(rows, NARROW_WIDTH, height, state)
+    bottom_text = frame_text(running_tasks(), state=state)
     board.apply_key(state, ord("k"))
-    scrolled_up_lines = frame_lines(rows, NARROW_WIDTH, height, state)
+    scrolled_up_text = frame_text(running_tasks(), state=state)
 
-    assert "task-09" in "\n".join(bottom_lines)
-    assert bottom_lines[height - 2]
-    assert scrolled_up_lines[2:-1] == bottom_lines[1:-2]
+    assert "task-09  running" in bottom_text
+    assert "more" in bottom_text
+    assert "task-08  running" in scrolled_up_text
 
 
-@pytest.mark.parametrize(("width", "height"), [(10, 3), (1, 1), (40, 2)])
+def test_board_marks_empty_columns():
+    assert "No tasks" in frame_text({})
+
+
+@pytest.mark.parametrize(("width", "height"), [(10, 3), (1, 1), (40, 2), (WIDE_WIDTH, 9)])
 def test_board_frame_fits_tiny_terminals(width, height):
-    rows = display.list_rows(statuses_tasks(), TODAY)
+    snapshot = board.board_snapshot(statuses_tasks(), NOW)
 
-    segments = board.board_frame(rows, width, height, board.BoardState())
+    segments = board.board_frame(snapshot, width, height, board.BoardState())
 
     assert all(0 <= segment.y < height for segment in segments)
     assert all(segment.x + len(segment.text) <= width for segment in segments)
     assert all(
         segment.x + len(segment.text) < width for segment in segments if segment.y == height - 1
     )
+
+
+def test_board_draws_only_ascii_with_ascii_glyphs():
+    lines = frame_lines(running_tasks(), WIDE_WIDTH, HEIGHT, board.BoardState(), board.ASCII_GLYPHS)
+
+    assert all(line.isascii() for line in lines)
 
 
 @pytest.mark.parametrize(
@@ -201,8 +219,15 @@ class PtyBoard:
         self.wait_until(lambda: text in self.text())
 
     def is_focused(self, title):
-        header_line = self.screen.display[0]
-        return title in header_line and self.screen.buffer[0][header_line.index(title)].reverse
+        return any(
+            self.screen.buffer[y][x].bold and not self.screen.buffer[y][x].underscore
+            for y, line in enumerate(self.screen.display)
+            for x in range(len(line))
+            if line.startswith(f"{title} ", x)
+        )
+
+    def selected_task_id(self):
+        return self.screen.display[HEIGHT - board.DETAIL_PANE_LINE_COUNT + 1].split()[0]
 
     def send(self, keys):
         self.child.send(keys)
@@ -252,34 +277,31 @@ def test_board_redraws_after_a_ledger_change(pty_board):
 
     ledger.save_tasks(tasks)
 
-    running_board.wait_for_text("Running (2)")
+    running_board.wait_for_text("Running 2")
 
 
 def test_board_switches_columns_after_resizing_to_one_column(pty_board):
     running_board = pty_board()
 
     running_board.resize(NARROW_WIDTH)
-    running_board.wait_until(lambda: "Running" not in running_board.text())
+    running_board.wait_for_text(" · R 2 · D 1")
     running_board.send("lll")
-    running_board.wait_for_text("Review (2)")
-    running_board.send("l")
 
-    running_board.wait_for_text("Done (1)")
+    running_board.wait_until(lambda: running_board.is_focused("Done"))
 
 
 @pytest.mark.parametrize("keys", [ARROW_KEYS, LETTER_KEYS], ids=["arrows", "letters"])
-def test_board_keys_switch_columns_and_scroll(pty_board, keys):
+def test_board_keys_switch_columns_and_select_tasks(pty_board, keys):
     left, right, up, down = keys
     tasks = statuses_tasks() | running_tasks()
     running_board = pty_board(tasks=tasks)
-    top_lines = running_board.screen.display[1:]
 
     running_board.send(right)
-    running_board.wait_until(lambda: running_board.is_focused("Running"))
+    running_board.wait_until(lambda: running_board.selected_task_id() == ledger.STATUS_RUNNING)
     running_board.send(down)
-    running_board.wait_until(lambda: running_board.screen.display[1:] != top_lines)
+    running_board.wait_until(lambda: running_board.selected_task_id() == "task-00")
     running_board.send(up)
-    running_board.wait_until(lambda: running_board.screen.display[1:] == top_lines)
+    running_board.wait_until(lambda: running_board.selected_task_id() == ledger.STATUS_RUNNING)
     running_board.send(left)
 
     running_board.wait_until(lambda: running_board.is_focused("Queued"))
@@ -294,7 +316,6 @@ def test_board_keeps_the_terminal_background(pty_board, is_color):
     ]
 
     assert all(character.bg == "default" for character in characters)
-    assert any(character.reverse for character in characters)
     assert any(character.bold for character in characters)
     has_foreground_color = any(character.fg != "default" for character in characters)
     assert has_foreground_color == is_color

@@ -70,6 +70,10 @@ def shortened_directory(directory: str) -> str:
     return shortened if len(shortened) < len(directory) else directory
 
 
+def clock_time(local_time: datetime) -> str:
+    return local_time.strftime("%I:%M%p").lstrip("0").lower()
+
+
 def display_time(timestamp: str, today: date) -> str:
     local_time = datetime.fromisoformat(timestamp).astimezone()
     day_text = f"{local_time:%b} {local_time.day}"
@@ -79,8 +83,7 @@ def display_time(timestamp: str, today: date) -> str:
         day_text = "today"
     elif local_time.date() == today + timedelta(days=1):
         day_text = "tomorrow"
-    time_text = local_time.strftime("%I:%M%p").lstrip("0").lower()
-    return f"{day_text} {time_text}"
+    return f"{day_text} {clock_time(local_time)}"
 
 
 def is_color_enabled() -> bool:
