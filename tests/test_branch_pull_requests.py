@@ -9,9 +9,11 @@ from tests import support
 FEATURE_BRANCH = "feature"
 NESTED_BRANCH = "nested-feature"
 LOCAL_BRANCH = "local-feature"
+DEEP_BRANCH = "deep-feature"
 DEFAULT_BRANCH = "main"
 REPOSITORY = "owner/repository"
 NESTED_REPOSITORY = "owner/nested"
+DEEP_REPOSITORY = "owner/deep"
 OPEN_URL = "https://github.com/owner/repository/pull/1"
 MERGED_URL = "https://github.com/owner/nested/pull/2"
 
@@ -49,12 +51,15 @@ def test_task_branches_cover_repository_and_nested_repositories(
         nested_path, "default", git_repository_template, DEFAULT_BRANCH
     )
     support.add_github_remote(default_branch_path, "default")
+    deep_path = nested_repository(nested_path, "deep", git_repository_template, DEEP_BRANCH)
+    support.add_github_remote(deep_path, "deep")
     (git_repository / "nested-link").symlink_to(nested_path)
     support.write_task(ledger_path, ledger.STATUS_DONE, cwd=str(git_repository), no_worktree=True)
 
     assert branch_pull_requests.task_branches(support.TASK_ID) == [
         {"repository": REPOSITORY, "branch": FEATURE_BRANCH},
         {"repository": NESTED_REPOSITORY, "branch": NESTED_BRANCH},
+        {"repository": DEEP_REPOSITORY, "branch": DEEP_BRANCH},
     ]
 
 
@@ -99,20 +104,30 @@ def test_refresh_stores_pull_requests_of_recorded_branches(ledger_path, write_pu
 
 
 @pytest.mark.parametrize(
-    ("stored", "is_gh_available"),
+    ("stored", "is_gh_available", "found_state"),
     [
         pytest.param(
-            [{"url": OPEN_URL, "state": ledger.PULL_REQUEST_STATE_OPEN}], False, id="failed-lookup"
+            [{"url": OPEN_URL, "state": ledger.PULL_REQUEST_STATE_OPEN}],
+            False,
+            "OPEN",
+            id="failed-lookup",
+        ),
+        pytest.param(
+            [{"url": OPEN_URL, "state": ledger.PULL_REQUEST_STATE_OPEN}],
+            True,
+            "UNKNOWN",
+            id="unknown-state",
         ),
         pytest.param(
             [{"url": MERGED_URL, "state": ledger.PULL_REQUEST_STATE_MERGED}],
             True,
+            "OPEN",
             id="finished",
         ),
     ],
 )
 def test_refresh_leaves_stored_pull_requests(
-    ledger_path, write_pull_requests, monkeypatch, tmp_path, stored, is_gh_available
+    ledger_path, write_pull_requests, monkeypatch, tmp_path, stored, is_gh_available, found_state
 ):
     if not is_gh_available:
         monkeypatch.setenv("PATH", git_only_path(tmp_path))
@@ -122,7 +137,7 @@ def test_refresh_leaves_stored_pull_requests(
         repository_branches=[{"repository": REPOSITORY, "branch": FEATURE_BRANCH}],
         pull_requests=stored,
     )
-    write_pull_requests(FEATURE_BRANCH, [{"url": "new", "state": "OPEN"}])
+    write_pull_requests(FEATURE_BRANCH, [{"url": "new", "state": found_state}])
 
     branch_pull_requests.refresh_pull_requests()
 

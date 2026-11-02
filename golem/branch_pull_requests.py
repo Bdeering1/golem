@@ -111,7 +111,7 @@ def task_branches(task_id: str) -> list[ledger.RepositoryBranch] | None:
     return None if recorded is None else directory_branches(recorded[0])
 
 
-def branch_pull_requests(
+def pull_requests_on_branch(
     branch: ledger.RepositoryBranch, environment: dict[str, str]
 ) -> list[ledger.PullRequest] | None:
     result = run_gh(
@@ -146,9 +146,10 @@ def branch_pull_requests(
 
 
 def task_pull_requests(task: ledger.Task) -> list[ledger.PullRequest] | None:
+    environment = spawn.task_environment(task)
     pull_requests: list[ledger.PullRequest] = []
     for branch in task.get("repository_branches", []):
-        found_pull_requests = branch_pull_requests(branch, spawn.task_environment(task))
+        found_pull_requests = pull_requests_on_branch(branch, environment)
         if found_pull_requests is None:
             return None
         pull_requests.extend(found_pull_requests)

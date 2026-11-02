@@ -488,7 +488,7 @@ def test_launch_agent_starts_due_tasks_while_pull_requests_refresh(ledger_path, 
             tasks[support.TASK_ID] = support.task_record(ledger.STATUS_SCHEDULED)
         was_started_during_refresh.append(task_started.wait(5))
 
-    def finish_task(task_id: str, _: ledger.Task) -> subprocess.Popen[bytes]:
+    def start_executor_that_finishes(task_id: str, _: ledger.Task) -> subprocess.Popen[bytes]:
         with ledger.locked_tasks() as tasks:
             tasks[task_id]["status"] = ledger.STATUS_DONE
         task_started.set()
@@ -496,7 +496,7 @@ def test_launch_agent_starts_due_tasks_while_pull_requests_refresh(ledger_path, 
         return processes[0]
 
     monkeypatch.setattr(branch_pull_requests, "refresh_pull_requests", refresh_while_task_is_queued)
-    monkeypatch.setattr(spawn, "start_task_executor", finish_task)
+    monkeypatch.setattr(spawn, "start_task_executor", start_executor_that_finishes)
     monkeypatch.setattr(launch_agent, "LAUNCH_AGENT_POLL_SECONDS", 0.01)
 
     assert launch_agent.run_launch_agent() == 0

@@ -151,9 +151,7 @@ def test_list_abbreviates_only_home_and_its_descendants(ledger_path, capsys):
     assert prefix_directory in support.list_row(output, "prefix")
 
 
-def test_list_formats_times_without_zone_and_notes_they_are_local(
-    ledger_path, capsys, monkeypatch, toronto_time
-):
+def test_list_formats_times_without_zone(ledger_path, capsys, monkeypatch, toronto_time):
     class FixedDateTime(datetime):
         @classmethod
         @override
