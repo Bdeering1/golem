@@ -7,6 +7,7 @@ if TYPE_CHECKING:
     import io
 
 from golem import (
+    branch_pull_requests,
     chains,
     gates,
     git,
@@ -72,6 +73,7 @@ def finish_task(
     task_id: str,
     result: str | None,
     returncode: int,
+    repository_branches: list[ledger.RepositoryBranch] | None,
     *,
     is_usage_limit: bool,
     is_background_work_stopped: bool,
@@ -85,6 +87,8 @@ def finish_task(
             return
         if result is not None:
             task_record["result"] = result
+        if repository_branches is not None:
+            task_record["repository_branches"] = repository_branches
         task_record["status"] = (
             ledger.STATUS_NEEDS_REVIEW
             if returncode == 0 and not is_usage_limit and not is_background_work_stopped
@@ -229,6 +233,7 @@ def execute_task(task_id: str, task: ledger.Task, lock_file_descriptors: tuple[i
         task_id,
         stored_result,
         outcome.returncode,
+        branch_pull_requests.task_branches(task_id),
         is_usage_limit=outcome.is_usage_limit,
         is_background_work_stopped=stop_line_match is not None,
     )

@@ -233,6 +233,16 @@ def add_prune_command(add_parser: Callable[..., argparse.ArgumentParser]) -> Non
     )
 
 
+def add_list_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
+    list_command = add_parser("list")
+    list_command.add_argument(
+        "--all", action="store_true", help="include done tasks whose pull requests are finished"
+    )
+    set_command_handler(
+        list_command, lambda arguments: display.list_tasks(is_showing_all=arguments.all)
+    )
+
+
 def add_continue_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
     continue_command = add_parser(
         "continue", description="Re-run a stopped task's gate and start its follow-ups."
@@ -434,10 +444,6 @@ def add_delete_command(add_parser: Callable[..., argparse.ArgumentParser]) -> No
             is_removing_worktree=arguments.remove_worktree,
         ),
     )
-
-
-def add_list_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
-    set_command_handler(add_parser("list"), lambda _: display.list_tasks())
 
 
 def add_board_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
