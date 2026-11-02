@@ -22,6 +22,7 @@ EXIT_ALTERNATE_SCREEN = b"\x1b[?1049l"
 REPO_ROOT = Path(__file__).parent.parent
 ARROW_KEYS = ("\x1bOD", "\x1bOC", "\x1bOA", "\x1bOB")
 LETTER_KEYS = ("h", "l", "k", "j")
+MERGED_PULL_REQUEST = {"url": "https://github.com/owner/repository/pull/2", "state": "merged"}
 
 
 def frame_lines(rows, width, height, state):
@@ -56,19 +57,26 @@ def statuses_tasks():
     }
 
 
-@pytest.mark.parametrize("is_done_shown", [False, True])
-def test_board_columns_group_statuses_and_skip_cancelled(is_done_shown):
-    rows = display.list_rows(statuses_tasks(), TODAY)
+@pytest.mark.parametrize(
+    ("is_showing_all", "done_ids"),
+    [(False, {ledger.STATUS_DONE}), (True, {ledger.STATUS_DONE, "merged"})],
+)
+def test_board_columns_group_statuses_and_hide_what_list_hides(is_showing_all, done_ids):
+    tasks = statuses_tasks() | {
+        "merged": support.task_record(
+            ledger.STATUS_DONE, task_id="merged", pull_requests=[MERGED_PULL_REQUEST]
+        )
+    }
+    rows = display.list_rows(tasks, TODAY)
 
-    columns = board.rows_by_column(rows, is_done_shown=is_done_shown)
+    columns = board.rows_by_column(rows, is_showing_all=is_showing_all)
 
     expected = [
         ("Queued", {ledger.STATUS_SCHEDULED, ledger.STATUS_WAITING}),
         ("Running", {ledger.STATUS_RUNNING}),
         ("Review", {ledger.STATUS_NEEDS_REVIEW, ledger.STATUS_FAILED}),
+        ("Done", done_ids),
     ]
-    if is_done_shown:
-        expected.append(("Done", {ledger.STATUS_DONE}))
     assert [
         (board_column.title, {row.task_id for row in column_rows})
         for board_column, column_rows in columns
@@ -113,17 +121,6 @@ def test_board_wraps_fields_without_cutting_text_and_shortens_long_directories()
     assert ".../project-leaf" in body
     assert "thegatestoppedbecausethetestsfailedinseveralplaces" in body.replace(" ", "")
     assert all(len(line) <= width - board.COLUMN_GAP for line in lines[1:-1])
-
-
-def test_board_focus_stays_within_shown_columns():
-    rows = display.list_rows(statuses_tasks(), TODAY)
-    state = board.BoardState(is_done_shown=True)
-    for _ in range(len(board.BOARD_COLUMNS)):
-        board.apply_key(state, ord("l"))
-
-    board.apply_key(state, ord("a"))
-
-    assert frame_lines(rows, NARROW_WIDTH, HEIGHT, state)[0] == "Review (2)"
 
 
 def test_board_scroll_stops_at_the_end_of_a_column():
@@ -265,7 +262,7 @@ def test_board_switches_columns_after_resizing_to_one_column(pty_board):
     running_board.wait_until(lambda: "Running" not in running_board.text())
     running_board.send("lll")
     running_board.wait_for_text("Review (2)")
-    running_board.send("al")
+    running_board.send("l")
 
     running_board.wait_for_text("Done (1)")
 

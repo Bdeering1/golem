@@ -65,24 +65,23 @@ BOARD_COLUMNS = (
 class BoardState:
     focus_index: int = 0
     first_column_index: int = 0
-    is_done_shown: bool = False
+    is_showing_all: bool = False
     scroll_offsets: list[int] = field(default_factory=lambda: [0] * len(BOARD_COLUMNS))
 
 
-def shown_board_columns(*, is_done_shown: bool) -> tuple[BoardColumn, ...]:
-    return BOARD_COLUMNS if is_done_shown else BOARD_COLUMNS[:-1]
-
-
-def shown_column_count(state: BoardState) -> int:
-    return len(shown_board_columns(is_done_shown=state.is_done_shown))
-
-
 def rows_by_column(
-    rows: list[display.ListRow], *, is_done_shown: bool
+    rows: list[display.ListRow], *, is_showing_all: bool
 ) -> list[tuple[BoardColumn, list[display.ListRow]]]:
     return [
-        (board_column, [row for row in rows if row.status in board_column.statuses])
-        for board_column in shown_board_columns(is_done_shown=is_done_shown)
+        (
+            board_column,
+            [
+                row
+                for row in rows
+                if row.status in board_column.statuses and (is_showing_all or not row.is_hidden)
+            ],
+        )
+        for board_column in BOARD_COLUMNS
     ]
 
 
@@ -126,8 +125,8 @@ def line_segments(y: int, x: int, line: Line) -> list[Segment]:
 
 
 def footer_text(state: BoardState) -> str:
-    done_action = "hide" if state.is_done_shown else "show"
-    return f"h/l column  j/k scroll  a {done_action} done  q quit"
+    finished_action = "hide" if state.is_showing_all else "show"
+    return f"h/l column  j/k scroll  a {finished_action} finished  q quit"
 
 
 class BoardLayout(NamedTuple):
@@ -137,8 +136,8 @@ class BoardLayout(NamedTuple):
     body_height: int
 
 
-def board_layout(width: int, height: int, state: BoardState) -> BoardLayout:
-    fit_count = min(shown_column_count(state), max(1, width // MIN_COLUMN_WIDTH))
+def board_layout(width: int, height: int) -> BoardLayout:
+    fit_count = min(len(BOARD_COLUMNS), max(1, width // MIN_COLUMN_WIDTH))
     column_width = width // fit_count
     return BoardLayout(
         fit_count,
@@ -151,15 +150,15 @@ def board_layout(width: int, height: int, state: BoardState) -> BoardLayout:
 def fit_state_to_layout(
     rows: list[display.ListRow], width: int, height: int, state: BoardState
 ) -> None:
-    layout = board_layout(width, height, state)
+    layout = board_layout(width, height)
     state.first_column_index = min(
         max(
             state.focus_index - layout.fit_count + 1,
             min(state.first_column_index, state.focus_index),
         ),
-        shown_column_count(state) - layout.fit_count,
+        len(BOARD_COLUMNS) - layout.fit_count,
     )
-    columns = rows_by_column(rows, is_done_shown=state.is_done_shown)
+    columns = rows_by_column(rows, is_showing_all=state.is_showing_all)
     for column_index, (_, column_rows) in enumerate(columns):
         line_count = len(column_lines(column_rows, layout.content_width))
         state.scroll_offsets[column_index] = min(
@@ -174,8 +173,8 @@ def board_frame(
     footer = Segment(height - 1, 0, footer_text(state)[: width - 1], STYLE_DIM)
     if height < HEADER_AND_FOOTER_LINE_COUNT:
         return [footer]
-    layout = board_layout(width, height, state)
-    columns = rows_by_column(rows, is_done_shown=state.is_done_shown)
+    layout = board_layout(width, height)
+    columns = rows_by_column(rows, is_showing_all=state.is_showing_all)
     segments: list[Segment] = []
     for offset in range(layout.fit_count):
         column_index = state.first_column_index + offset
@@ -197,14 +196,13 @@ def apply_key(state: BoardState, key: int) -> None:
     if key in LEFT_KEYS:
         state.focus_index = max(state.focus_index - 1, 0)
     elif key in RIGHT_KEYS:
-        state.focus_index = min(state.focus_index + 1, shown_column_count(state) - 1)
+        state.focus_index = min(state.focus_index + 1, len(BOARD_COLUMNS) - 1)
     elif key in DOWN_KEYS:
         state.scroll_offsets[state.focus_index] += 1
     elif key in UP_KEYS:
         state.scroll_offsets[state.focus_index] -= 1
     elif key == ord("a"):
-        state.is_done_shown = not state.is_done_shown
-        state.focus_index = min(state.focus_index, shown_column_count(state) - 1)
+        state.is_showing_all = not state.is_showing_all
 
 
 def segment_attribute(style: str, *, is_color: bool) -> int:
