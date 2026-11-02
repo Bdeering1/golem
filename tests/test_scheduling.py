@@ -164,6 +164,37 @@ def test_run_replaces_whole_finished_chain(installed_launch_agent, ledger_path):
 
 
 @pytest.mark.parametrize(
+    ("replaced_id", "schedule_arguments"),
+    [
+        pytest.param(
+            support.GRANDCHILD_ID,
+            ["--now", "--then", support.GRANDCHILD_ID, support.GRANDCHILD_PROMPT],
+            id="follow-up",
+        ),
+        pytest.param(support.CHILD_ID, ["--after", support.PARENT_ID], id="after-pending-parent"),
+    ],
+)
+def test_run_replaces_finished_task_on_each_reserved_path(
+    installed_launch_agent, ledger_path, capsys, replaced_id, schedule_arguments
+):
+    support.write_tasks(
+        ledger_path,
+        {
+            support.PARENT_ID: support.task_record(
+                ledger.STATUS_SCHEDULED, task_id=support.PARENT_ID
+            ),
+            replaced_id: finished_task(replaced_id),
+        },
+    )
+    old_session_id = support.read_task(ledger_path, replaced_id)["session_id"]
+
+    assert cli.main(["run", support.CHILD_ID, support.CHILD_PROMPT, *schedule_arguments]) == 0
+
+    assert f"golem: replaced task: {replaced_id}" in capsys.readouterr().out
+    assert support.read_task(ledger_path, replaced_id)["session_id"] != old_session_id
+
+
+@pytest.mark.parametrize(
     "fields",
     [
         pytest.param({"status": ledger.STATUS_NEEDS_REVIEW}, id="not-done"),
