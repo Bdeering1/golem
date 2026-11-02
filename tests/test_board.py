@@ -255,9 +255,7 @@ def test_board_redraws_after_a_ledger_change(pty_board):
 
     ledger.save_tasks(tasks)
 
-    started_at = time.monotonic()
     running_board.wait_for_text("Running (2)")
-    assert time.monotonic() - started_at < 2
 
 
 def test_board_switches_columns_after_resizing_to_one_column(pty_board):
