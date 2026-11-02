@@ -1,6 +1,6 @@
 import re
 import uuid
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 
 from golem import chains, launch_agent, ledger, progress_log, spawn, task_directories
@@ -18,6 +18,7 @@ class RunPlacement:
     is_no_worktree: bool = False
     gate: str | None = None
     setup: str | None = None
+    environment: dict[str, str] = field(default_factory=dict)
 
 
 def new_task_record(
@@ -35,7 +36,7 @@ def new_task_record(
         "agent_args": list(agent_args),
         "status": ledger.STATUS_WAITING,
         "session_id": new_session_id(),
-        "environment": spawn.captured_environment(),
+        "environment": {**spawn.captured_environment(), **placement.environment},
         "backend": backend,
     }
     if after is not None:

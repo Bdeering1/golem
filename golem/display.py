@@ -248,8 +248,6 @@ def list_tasks(*, is_showing_all: bool) -> int:
         table_rows, is_color=is_color_enabled(), is_detail_on_own_line=is_detail_on_own_line
     ):
         print(line)
-    if any(row.is_detail_time for row in rows):
-        print("\nTimes are local.")
     if len(rows) < len(all_rows):
         print(f"\n{hidden_footnote}")
     return 0
