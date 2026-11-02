@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import subprocess
@@ -157,6 +158,12 @@ printf '\036\\n' >> "$GOLEM_OSASCRIPT_ARGS"
 printf '%s\\n' "$@" >> "$GOLEM_OSASCRIPT_ARGS"
 """,
         "gh": """#!/bin/sh
+if [ "$1" = repo ]; then
+    url=$(git remote get-url origin) || exit 1
+    name=${url##*/}
+    printf 'owner/%s\\nmain\\n' "${name%.git}"
+    exit 0
+fi
 head=''
 state=''
 while [ "$#" -gt 0 ]; do
@@ -219,6 +226,16 @@ def fake_commands(monkeypatch, tmp_path, fake_bin_path):
     monkeypatch.setenv("GOLEM_CODEX_", str(tmp_path / "codex-"))
     monkeypatch.chdir(work_path)
     return paths
+
+
+@pytest.fixture
+def write_pull_requests(fake_commands):
+    def write(branch: str, pull_requests: list[dict[str, object]]) -> None:
+        (fake_commands["gh-pull-requests"] / f"{branch}.json").write_text(
+            json.dumps(pull_requests), encoding="utf-8"
+        )
+
+    return write
 
 
 @pytest.fixture

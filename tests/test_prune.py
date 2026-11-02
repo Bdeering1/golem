@@ -1,7 +1,6 @@
 import contextlib
 import io
 import itertools
-import json
 import os
 import shutil
 import sys
@@ -30,16 +29,6 @@ class TerminalInput(io.StringIO):
         self.on_first_read()
         self.on_first_read = lambda: None
         return super().readline(size)
-
-
-@pytest.fixture
-def write_pull_requests(fake_commands):
-    def write(branch: str, pull_requests: list[dict[str, object]]) -> None:
-        (fake_commands["gh-pull-requests"] / f"{branch}.json").write_text(
-            json.dumps(pull_requests), encoding="utf-8"
-        )
-
-    return write
 
 
 @pytest.fixture

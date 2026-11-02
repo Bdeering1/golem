@@ -1,6 +1,7 @@
 import os
 import shutil
 import sys
+from collections import Counter
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import NamedTuple
@@ -29,6 +30,7 @@ class ListRow(NamedTuple):
     directory: str
     detail: str
     is_detail_time: bool
+    is_hidden: bool
 
     def cells(self) -> tuple[str, str, str, str, str]:
         return (self.task_id, self.step, self.status, self.directory, self.detail)
@@ -114,11 +116,28 @@ def detail_timestamp(task: ledger.Task) -> str | None:
     return None
 
 
+def pull_request_summary(pull_requests: list[ledger.PullRequest]) -> str:
+    if not pull_requests:
+        return "no PR"
+    state_counts = Counter(pull_request["state"] for pull_request in pull_requests)
+    if len(state_counts) > 1:
+        counts_text = ", ".join(
+            f"{state_counts[state]} {state}"
+            for state in ledger.PULL_REQUEST_STATES
+            if state_counts[state]
+        )
+        return f"{len(pull_requests)} PRs: {counts_text}"
+    state = pull_requests[0]["state"]
+    return f"PR {state}" if len(pull_requests) == 1 else f"{len(pull_requests)} PRs {state}"
+
+
 def list_detail(task: ledger.Task, today: date) -> str:
     timestamp = detail_timestamp(task)
     status_detail = display_time(timestamp, today) if timestamp is not None else ""
     if task["status"] == ledger.STATUS_WAITING:
         status_detail = task.get("after", "")
+    if task["status"] == ledger.STATUS_DONE and "pull_requests" in task:
+        status_detail = pull_request_summary(task["pull_requests"])
     return "; ".join(text for text in (status_detail, list_reason(task)) if text)
 
 
@@ -148,6 +167,11 @@ def list_rows(tasks: ledger.Tasks, today: date) -> list[ListRow]:
                 shown_task["cwd"],
                 list_detail(shown_task, today),
                 detail_timestamp(shown_task) is not None,
+                all(
+                    tasks[chain_id]["status"] == ledger.STATUS_DONE
+                    and ledger.has_finished_pull_requests(tasks[chain_id])
+                    for chain_id in chain_ids
+                ),
             )
         )
     rows.sort(key=lambda row: (ledger.LIST_STATUS_ORDER.index(row.status), row.task_id))
@@ -188,12 +212,17 @@ def table_width(rows: list[ListRow], *, is_detail_on_own_line: bool) -> int:
     return max(len(line) for line in lines)
 
 
-def list_tasks() -> int:
+def list_tasks(*, is_showing_all: bool) -> int:
     tasks = ledger.load_tasks()
     if not tasks:
         print("golem: no tasks")
         return 0
-    rows = list_rows(tasks, datetime.now().astimezone().date())
+    all_rows = list_rows(tasks, datetime.now().astimezone().date())
+    rows = [row for row in all_rows if is_showing_all or not row.is_hidden]
+    hidden_footnote = f"{len(all_rows) - len(rows)} hidden; --all shows them"
+    if not rows:
+        print(hidden_footnote)
+        return 0
     full_rows = [row._replace(directory=display_directory(row.directory)) for row in rows]
     shortened_rows = [
         row._replace(directory=shortened_directory(row.directory)) for row in full_rows
@@ -219,6 +248,8 @@ def list_tasks() -> int:
         table_rows, is_color=is_color_enabled(), is_detail_on_own_line=is_detail_on_own_line
     ):
         print(line)
+    if len(rows) < len(all_rows):
+        print(f"\n{hidden_footnote}")
     return 0
 
 

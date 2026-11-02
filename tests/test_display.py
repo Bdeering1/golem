@@ -9,12 +9,14 @@ from typing import override
 
 import pytest
 
-from golem import display, ledger
+from golem import cli, display, ledger
 from tests import support
 
 ANSI_COLOR = re.compile(r"\033\[38;5;\d+m|\033\[0m")
 TODAY = date(2030, 3, 10)
-TIMES_FOOTNOTE = "\n\nTimes are local.\n"
+OPEN_PULL_REQUEST = {"url": "https://github.com/owner/repository/pull/1", "state": "open"}
+MERGED_PULL_REQUEST = {"url": "https://github.com/owner/repository/pull/2", "state": "merged"}
+CLOSED_PULL_REQUEST = {"url": "https://github.com/owner/repository/pull/3", "state": "closed"}
 
 
 @pytest.fixture
@@ -106,6 +108,22 @@ def test_list_rows_show_each_chains_most_actionable_and_latest_task():
             id="status-value-and-reason",
         ),
         pytest.param(ledger.STATUS_DONE, {}, "", id="no-detail"),
+        pytest.param(
+            ledger.STATUS_DONE, {"pull_requests": [OPEN_PULL_REQUEST]}, "PR open", id="one-pr"
+        ),
+        pytest.param(
+            ledger.STATUS_DONE,
+            {"pull_requests": [MERGED_PULL_REQUEST, MERGED_PULL_REQUEST]},
+            "2 PRs merged",
+            id="prs-same-state",
+        ),
+        pytest.param(
+            ledger.STATUS_DONE,
+            {"pull_requests": [MERGED_PULL_REQUEST, OPEN_PULL_REQUEST]},
+            "2 PRs: 1 open, 1 merged",
+            id="prs-different-states",
+        ),
+        pytest.param(ledger.STATUS_DONE, {"pull_requests": []}, "no PR", id="no-pr-found"),
     ],
 )
 def test_list_rows_detail(toronto_time, status, fields, detail):
@@ -133,9 +151,7 @@ def test_list_abbreviates_only_home_and_its_descendants(ledger_path, capsys):
     assert prefix_directory in support.list_row(output, "prefix")
 
 
-def test_list_formats_times_without_zone_and_notes_they_are_local(
-    ledger_path, capsys, monkeypatch, toronto_time
-):
+def test_list_formats_times_without_zone(ledger_path, capsys, monkeypatch, toronto_time):
     class FixedDateTime(datetime):
         @classmethod
         @override
@@ -168,13 +184,6 @@ def test_list_formats_times_without_zone_and_notes_they_are_local(
     assert support.list_row(output, "today").endswith("today 11:30pm")
     assert support.list_row(output, "this-year").endswith("Nov 3 1:30am")
     assert support.list_row(output, "next-year").endswith("Nov 3, 2031 1:30am")
-    assert output.endswith(TIMES_FOOTNOTE)
-
-
-def test_list_omits_times_footnote_without_times(ledger_path, capsys):
-    support.write_task(ledger_path, ledger.STATUS_DONE)
-
-    assert TIMES_FOOTNOTE.strip() not in support.list_output(capsys)
 
 
 @pytest.mark.parametrize(
@@ -262,3 +271,51 @@ def test_list_suppresses_status_colors(ledger_path, capsys, monkeypatch, is_tty,
     output = support.list_output(capsys)
 
     assert ANSI_COLOR.search(output) is None
+
+
+@pytest.mark.parametrize(
+    ("list_args", "listed_ids", "footnote"),
+    [
+        pytest.param(
+            ["list"], ["none", "open", "partial-child"], "2 hidden; --all shows them", id="default"
+        ),
+        pytest.param(
+            ["list", "--all"],
+            ["finished-child", "merged", "none", "open", "partial-child"],
+            None,
+            id="all",
+        ),
+    ],
+)
+def test_list_hides_done_chains_whose_pull_requests_are_all_finished(
+    ledger_path, capsys, list_args, listed_ids, footnote
+):
+    def done_task(task_id: str, **fields: object) -> ledger.Task:
+        return support.task_record(ledger.STATUS_DONE, task_id=task_id, **fields)
+
+    support.write_tasks(
+        ledger_path,
+        {
+            "merged": done_task("merged", pull_requests=[MERGED_PULL_REQUEST]),
+            "open": done_task("open", pull_requests=[MERGED_PULL_REQUEST, OPEN_PULL_REQUEST]),
+            "none": done_task("none", pull_requests=[]),
+            "finished-parent": done_task("finished-parent", pull_requests=[MERGED_PULL_REQUEST]),
+            "finished-child": done_task(
+                "finished-child", after="finished-parent", pull_requests=[CLOSED_PULL_REQUEST]
+            ),
+            "partial-parent": done_task("partial-parent", pull_requests=[MERGED_PULL_REQUEST]),
+            "partial-child": done_task("partial-child", after="partial-parent"),
+        },
+    )
+
+    assert cli.main(list_args) == 0
+
+    table, *footnotes = capsys.readouterr().out.split("\n\n")
+    assert [line.split()[0] for line in table.splitlines()[1:]] == listed_ids
+    assert footnotes == ([f"{footnote}\n"] if footnote is not None else [])
+
+
+def test_list_shows_only_hidden_footnote_when_every_row_is_hidden(ledger_path, capsys):
+    support.write_task(ledger_path, ledger.STATUS_DONE, pull_requests=[MERGED_PULL_REQUEST])
+
+    assert support.list_output(capsys) == "1 hidden; --all shows them\n"
