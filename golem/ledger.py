@@ -5,7 +5,7 @@ import os
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, NotRequired, TypedDict, cast
+from typing import TYPE_CHECKING, Literal, NotRequired, TypedDict, cast, get_args
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator
@@ -33,14 +33,11 @@ LIST_STATUS_ORDER = (
 ALL_STATUSES: set[str] = set(LIST_STATUS_ORDER)
 SUCCEEDED_STATUSES = {STATUS_NEEDS_REVIEW, STATUS_DONE}
 UNREVIEWED_STATUSES = {STATUS_SCHEDULED, STATUS_RUNNING, STATUS_WAITING, STATUS_NEEDS_REVIEW}
-PULL_REQUEST_STATE_OPEN = "open"
-PULL_REQUEST_STATE_MERGED = "merged"
-PULL_REQUEST_STATE_CLOSED = "closed"
-PULL_REQUEST_STATES = (
-    PULL_REQUEST_STATE_OPEN,
-    PULL_REQUEST_STATE_MERGED,
-    PULL_REQUEST_STATE_CLOSED,
-)
+PullRequestState = Literal["open", "merged", "closed"]
+PULL_REQUEST_STATES: tuple[PullRequestState, ...] = get_args(PullRequestState)
+PULL_REQUEST_STATE_OPEN: PullRequestState = "open"
+PULL_REQUEST_STATE_MERGED: PullRequestState = "merged"
+PULL_REQUEST_STATE_CLOSED: PullRequestState = "closed"
 
 
 class RepositoryBranch(TypedDict):
@@ -50,7 +47,7 @@ class RepositoryBranch(TypedDict):
 
 class PullRequest(TypedDict):
     url: str
-    state: Literal["open", "merged", "closed"]
+    state: PullRequestState
 
 
 class Task(TypedDict):
