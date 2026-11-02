@@ -63,24 +63,20 @@ def mark_task_done(tasks: ledger.Tasks, task: ledger.Task) -> None:
     mark_ancestors_done(tasks, task)
 
 
-def reserve_dependent_task(records: ledger.Tasks, parent_id: str) -> bool:
-    with ledger.locked_tasks() as tasks:
-        for task_id in records:
-            if task_id in tasks:
-                raise SystemExit(f"golem: task already exists: {task_id}")
-        if parent_id not in tasks:
-            raise SystemExit(f"golem: task not found: {parent_id}")
-        parent_status = tasks[parent_id]["status"]
-        if parent_status == ledger.STATUS_CANCELLED:
-            raise SystemExit(f"golem: parent task is cancelled: {parent_id}")
-        if can_start_dependents(tasks[parent_id]) and not is_gate_pending(tasks, parent_id):
-            return False
-        if tasks[parent_id].get("auto_pickup"):
-            for record in records.values():
-                if registry.task_backend(record).IS_AUTO_PICKUP_SUPPORTED:
-                    record["auto_pickup"] = True
-        tasks.update(records)
-        return True
+def reserve_dependent_task(tasks: ledger.Tasks, records: ledger.Tasks, parent_id: str) -> bool:
+    if parent_id not in tasks:
+        raise SystemExit(f"golem: task not found: {parent_id}")
+    parent_status = tasks[parent_id]["status"]
+    if parent_status == ledger.STATUS_CANCELLED:
+        raise SystemExit(f"golem: parent task is cancelled: {parent_id}")
+    if can_start_dependents(tasks[parent_id]) and not is_gate_pending(tasks, parent_id):
+        return False
+    if tasks[parent_id].get("auto_pickup"):
+        for record in records.values():
+            if registry.task_backend(record).IS_AUTO_PICKUP_SUPPORTED:
+                record["auto_pickup"] = True
+    tasks.update(records)
+    return True
 
 
 def is_gate_pending(tasks: ledger.Tasks, task_id: str) -> bool:

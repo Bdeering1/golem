@@ -164,11 +164,12 @@ def test_agent_cleanup_waits_for_active_ledger_write(ledger_path, monkeypatch):
         return replace(temporary_path, task_ledger_path)
 
     monkeypatch.setattr(Path, "replace", pause_write)
-    writer = context.Process(
-        target=lambda: ledger.reserve_tasks(
-            {support.TASK_ID: support.task_record(ledger.STATUS_DONE)}
-        )
-    )
+
+    def write_done_task() -> None:
+        with ledger.locked_tasks() as tasks:
+            tasks[support.TASK_ID] = support.task_record(ledger.STATUS_DONE)
+
+    writer = context.Process(target=write_done_task)
     writer.start()
 
     def resume_write(lock_file, operation) -> None:

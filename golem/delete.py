@@ -26,6 +26,36 @@ def delete_task_and_release_worktrees(
             resource.setdefault("released_at", datetime.now(UTC).isoformat())
 
 
+def is_replaceable_task(task: ledger.Task) -> bool:
+    return task["status"] == ledger.STATUS_DONE and ledger.has_finished_pull_requests(task)
+
+
+def replace_finished_tasks(
+    tasks: ledger.Tasks, worktrees: ledger.Worktrees, task_ids: list[str]
+) -> tuple[list[str], set[str]]:
+    replaced_ids: set[str] = set()
+    for task_id in task_ids:
+        if task_id not in tasks:
+            continue
+        chain_ids = chains.chain_task_ids(tasks, task_id)
+        if not all(is_replaceable_task(tasks[chain_id]) for chain_id in chain_ids):
+            raise SystemExit(f"golem: task already exists: {task_id}")
+        replaced_ids |= chain_ids
+    ordered_ids = [task_id for task_id in tasks if task_id in replaced_ids]
+    directories: set[str] = set()
+    for task_id in ordered_ids:
+        directories |= claude_hooks.hook_affected_directories(tasks, tasks[task_id])
+    delete_task_and_release_worktrees(tasks, worktrees, ordered_ids)
+    return ordered_ids, directories
+
+
+def report_replaced_tasks(replaced_ids: list[str], directories: set[str]) -> None:
+    for task_id in replaced_ids:
+        print(f"golem: replaced task: {task_id}")
+    for directory in directories:
+        claude_hooks.sync_hooks(directory)
+
+
 def selected_delete_task_ids(
     tasks: ledger.Tasks, task_ids: list[str], *, is_chain: bool
 ) -> tuple[list[str], list[str]]:

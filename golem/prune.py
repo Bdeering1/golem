@@ -1,73 +1,17 @@
-import json
-import subprocess
 import sys
 import time
 from datetime import timedelta
-from typing import TypedDict, cast
+from pathlib import Path
 
-from golem import chains, delete, git, ledger, locks
+from golem import chains, delete, display, ledger, locks
 from golem.backends import registry
 
 PRUNE_IDLE_DAYS = 7
-PULL_REQUEST_TIMEOUT_SECONDS = 30
-PULL_REQUEST_STATE_OPEN = "OPEN"
 PRUNE_ANSWER_YES = "y"
 PRUNE_ANSWER_NO = "n"
 PRUNE_ANSWER_ALL = "a"
 PRUNE_ANSWER_QUIT = "q"
 PRUNE_ANSWERS = (PRUNE_ANSWER_YES, PRUNE_ANSWER_NO, PRUNE_ANSWER_ALL, PRUNE_ANSWER_QUIT)
-
-
-class PullRequest(TypedDict):
-    number: int
-    state: str
-
-
-type PullRequestCache = dict[str | None, PullRequest | None]
-
-
-def branch_pull_request(worktree: str | None) -> PullRequest | None:
-    if worktree is None:
-        return None
-    branch = git.run_git(worktree, "symbolic-ref", "--short", "HEAD")
-    if branch.returncode:
-        return None
-    try:
-        result = subprocess.run(
-            [
-                "gh",
-                "pr",
-                "list",
-                "--head",
-                branch.stdout.strip(),
-                "--state",
-                "all",
-                "--json",
-                "number,state",
-            ],
-            cwd=worktree,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            encoding="utf-8",
-            timeout=PULL_REQUEST_TIMEOUT_SECONDS,
-            check=False,
-        )
-    except OSError, subprocess.TimeoutExpired:
-        return None
-    if result.returncode:
-        return None
-    pull_requests = cast("list[PullRequest]", json.loads(result.stdout))
-    open_pull_request = next(
-        (
-            pull_request
-            for pull_request in pull_requests
-            if pull_request["state"] == PULL_REQUEST_STATE_OPEN
-        ),
-        None,
-    )
-    if open_pull_request is not None:
-        return open_pull_request
-    return max(pull_requests, key=lambda pull_request: pull_request["number"], default=None)
 
 
 def session_idle_reason(task: ledger.Task) -> str | None:
@@ -86,18 +30,20 @@ def session_idle_reason(task: ledger.Task) -> str | None:
     return f"idle {idle_days}d"
 
 
-def done_task_prune_reason(task: ledger.Task, pull_requests: PullRequestCache) -> str | None:
-    worktree = task.get("worktree")
-    if locks.is_directory_busy(ledger.directory_to_lock(task, worktree)):
+def done_task_prune_reason(task: ledger.Task) -> str | None:
+    directory = ledger.directory_to_lock(task, task.get("worktree"))
+    if locks.is_directory_busy(directory):
         return None
-    if worktree not in pull_requests:
-        pull_requests[worktree] = branch_pull_request(worktree)
-    pull_request = pull_requests[worktree]
-    if pull_request is None:
-        return session_idle_reason(task)
-    if pull_request["state"] == PULL_REQUEST_STATE_OPEN:
+    pull_requests = task.get("pull_requests", [])
+    if ledger.has_finished_pull_requests(task):
+        return display.pull_request_summary(pull_requests)
+    if any(
+        pull_request["state"] == ledger.PULL_REQUEST_STATE_OPEN for pull_request in pull_requests
+    ):
         return None
-    return f"PR #{pull_request['number']} {pull_request['state'].lower()}"
+    if not Path(directory).is_dir():
+        return "directory missing"
+    return session_idle_reason(task)
 
 
 def prune_question(candidates: list[tuple[str, str]]) -> str:
@@ -127,7 +73,6 @@ def prune_answer(candidates: list[tuple[str, str]]) -> str:
 def chain_prune_selection(
     tasks: ledger.Tasks,
     chain_ids: list[str],
-    pull_requests: PullRequestCache,
     *,
     is_offering_done_tasks: bool,
 ) -> tuple[ledger.Tasks, dict[str, str]]:
@@ -145,7 +90,7 @@ def chain_prune_selection(
             continue
         if task["status"] != ledger.STATUS_DONE or not is_offering_done_tasks:
             continue
-        reason = done_task_prune_reason(task, pull_requests)
+        reason = done_task_prune_reason(task)
         if reason is None:
             continue
         done_reasons[task_id] = reason
@@ -155,7 +100,6 @@ def chain_prune_selection(
 
 def prune_selection(
     tasks: ledger.Tasks,
-    pull_requests: PullRequestCache,
     *,
     is_confirmed: bool,
     is_keeping_done_tasks: bool,
@@ -170,7 +114,7 @@ def prune_selection(
         chain_ids = chains.dependents_first_task_ids(tasks, [root_task_id])
         is_offering_done_tasks = not is_keeping_done_tasks and answer != PRUNE_ANSWER_QUIT
         chain_selected_tasks, done_reasons = chain_prune_selection(
-            tasks, chain_ids, pull_requests, is_offering_done_tasks=is_offering_done_tasks
+            tasks, chain_ids, is_offering_done_tasks=is_offering_done_tasks
         )
         has_candidates = has_candidates or bool(chain_selected_tasks)
         if done_reasons and answer != PRUNE_ANSWER_ALL:
@@ -179,16 +123,13 @@ def prune_selection(
             )
             if answer not in {PRUNE_ANSWER_YES, PRUNE_ANSWER_ALL}:
                 chain_selected_tasks, _ = chain_prune_selection(
-                    tasks, chain_ids, pull_requests, is_offering_done_tasks=False
+                    tasks, chain_ids, is_offering_done_tasks=False
                 )
         selected_tasks |= chain_selected_tasks
     return selected_tasks, has_candidates
 
 
-def delete_pruned_tasks(
-    selected_tasks: ledger.Tasks,
-    pull_requests: PullRequestCache,
-) -> None:
+def delete_pruned_tasks(selected_tasks: ledger.Tasks) -> None:
     with ledger.locked_ledger() as (tasks, worktrees):
         for task_id, evaluated_task in selected_tasks.items():
             if (
@@ -196,7 +137,7 @@ def delete_pruned_tasks(
                 or chains.dependent_task_ids(tasks, task_id)
                 or (
                     evaluated_task["status"] == ledger.STATUS_DONE
-                    and done_task_prune_reason(evaluated_task, pull_requests) is None
+                    and done_task_prune_reason(evaluated_task) is None
                 )
             ):
                 print(f"golem: kept {task_id}: no longer eligible", file=sys.stderr)
@@ -208,11 +149,9 @@ def delete_pruned_tasks(
 def prune_tasks(*, is_confirmed: bool) -> int:
     tasks = ledger.load_tasks()
     is_keeping_done_tasks = not is_confirmed and not sys.stdin.isatty()
-    pull_requests: PullRequestCache = {}
     try:
         selected_tasks, has_candidates = prune_selection(
             tasks,
-            pull_requests,
             is_confirmed=is_confirmed,
             is_keeping_done_tasks=is_keeping_done_tasks,
         )
@@ -226,5 +165,5 @@ def prune_tasks(*, is_confirmed: bool) -> int:
     elif not has_candidates:
         print("golem: no tasks to prune")
         return 0
-    delete_pruned_tasks(selected_tasks, pull_requests)
+    delete_pruned_tasks(selected_tasks)
     return 0

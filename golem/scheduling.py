@@ -3,7 +3,7 @@ import uuid
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 
-from golem import chains, launch_agent, ledger, progress_log, spawn, task_directories
+from golem import chains, delete, launch_agent, ledger, progress_log, spawn, task_directories
 from golem.backends import claude_hooks, common, registry
 
 
@@ -127,7 +127,11 @@ def schedule_new_task(
 ) -> int:
     due_time = when or datetime.now(UTC).astimezone()
     record = new_task_record(placement, prompt, agent_args, due_time, backend, after=after)
-    ledger.reserve_tasks({task_id: record, **follow_up_records})
+    records = {task_id: record, **follow_up_records}
+    with ledger.locked_ledger() as (tasks, worktrees):
+        replaced_ids, directories = delete.replace_finished_tasks(tasks, worktrees, list(records))
+        tasks.update(records)
+    delete.report_replaced_tasks(replaced_ids, directories)
     return launch_agent.wake_launch_agent_and_report(task_id, due_time)
 
 
@@ -221,6 +225,14 @@ def planned_execution_time(
     return when.replace(second=0, microsecond=0).astimezone()
 
 
+def reserve_dependent_task(records: ledger.Tasks, parent_id: str) -> bool:
+    with ledger.locked_ledger() as (tasks, worktrees):
+        replaced_ids, directories = delete.replace_finished_tasks(tasks, worktrees, list(records))
+        is_reserved = chains.reserve_dependent_task(tasks, records, parent_id)
+    delete.report_replaced_tasks(replaced_ids, directories)
+    return is_reserved
+
+
 def schedule_run_task(
     arguments: ledger.Arguments,
     task_id: str,
@@ -234,7 +246,7 @@ def schedule_run_task(
         dependent_record = new_task_record(
             placement, prompt_text, task_args, None, arguments.backend, after=after
         )
-        if chains.reserve_dependent_task({task_id: dependent_record, **follow_up_records}, after):
+        if reserve_dependent_task({task_id: dependent_record, **follow_up_records}, after):
             claude_hooks.sync_hooks(
                 ledger.task_directory(ledger.existing_task(ledger.load_tasks(), after))
             )

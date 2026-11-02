@@ -118,6 +118,79 @@ def test_run_then_refuses_ids_without_changing_the_ledger(
     assert support.read_tasks(ledger_path) == tasks
 
 
+def finished_task(task_id, status=ledger.STATUS_DONE, **fields: object):
+    fields = {
+        "pull_requests": [{"url": "merged", "state": ledger.PULL_REQUEST_STATE_MERGED}],
+        **fields,
+    }
+    return support.task_record(
+        status,
+        task_id=task_id,
+        **{name: value for name, value in fields.items() if value is not None},
+    )
+
+
+def test_run_replaces_done_task_with_finished_pull_requests(
+    installed_launch_agent, owned_worktree, ledger_path, capsys
+):
+    worktree = owned_worktree()
+    support.write_tasks(
+        ledger_path, {support.TASK_ID: finished_task(support.TASK_ID, worktree=str(worktree))}
+    )
+    old_session_id = support.read_task(ledger_path)["session_id"]
+
+    assert cli.main(["run", support.TASK_ID, support.PROMPT, "--now"]) == 0
+
+    assert f"golem: replaced task: {support.TASK_ID}" in capsys.readouterr().out
+    task = support.read_task(ledger_path)
+    assert task["session_id"] != old_session_id
+    assert task["status"] == ledger.STATUS_SCHEDULED
+    assert ledger.load_worktrees()[str(worktree.resolve())].get("released_at")
+
+
+def test_run_replaces_whole_finished_chain(installed_launch_agent, ledger_path):
+    support.write_tasks(
+        ledger_path,
+        {
+            support.PARENT_ID: finished_task(support.PARENT_ID),
+            support.CHILD_ID: finished_task(support.CHILD_ID, after=support.PARENT_ID),
+            support.SIBLING_ID: finished_task(support.SIBLING_ID, after=support.PARENT_ID),
+        },
+    )
+
+    assert cli.main(["run", support.CHILD_ID, support.CHILD_PROMPT, "--now"]) == 0
+
+    assert set(support.read_tasks(ledger_path)) == {support.CHILD_ID}
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        pytest.param({"status": ledger.STATUS_NEEDS_REVIEW}, id="not-done"),
+        pytest.param({"pull_requests": [{"url": "open", "state": "open"}]}, id="open-pr"),
+        pytest.param({"pull_requests": []}, id="no-pr"),
+        pytest.param({"pull_requests": None}, id="unchecked"),
+    ],
+)
+@pytest.mark.parametrize("is_unfinished_task_in_chain", [False, True])
+def test_run_refuses_taken_id_unless_whole_chain_is_finished(
+    installed_launch_agent, ledger_path, fields, is_unfinished_task_in_chain
+):
+    unfinished_task = finished_task(support.TASK_ID, **fields)
+    tasks = {support.TASK_ID: unfinished_task}
+    if is_unfinished_task_in_chain:
+        tasks = {
+            support.TASK_ID: finished_task(support.TASK_ID),
+            support.CHILD_ID: {**unfinished_task, "after": support.TASK_ID},
+        }
+    support.write_tasks(ledger_path, tasks)
+
+    with pytest.raises(SystemExit, match=f": {support.TASK_ID}$"):
+        cli.main(["run", support.TASK_ID, support.PROMPT, "--now"])
+
+    assert support.read_tasks(ledger_path) == tasks
+
+
 @pytest.mark.parametrize(
     ("cancel_id", "expected_statuses"),
     [
