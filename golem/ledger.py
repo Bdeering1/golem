@@ -5,7 +5,7 @@ import os
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, NotRequired, TypedDict, cast
+from typing import TYPE_CHECKING, Literal, NotRequired, TypedDict, cast
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator
@@ -45,7 +45,7 @@ PULL_REQUEST_STATES = (
 
 class PullRequest(TypedDict):
     url: str
-    state: str
+    state: Literal["open", "merged", "closed"]
 
 
 class Task(TypedDict):

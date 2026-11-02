@@ -8,6 +8,7 @@ from tests import support
 
 FEATURE_BRANCH = "feature"
 NESTED_BRANCH = "nested-feature"
+LOCAL_BRANCH = "local-feature"
 DEFAULT_BRANCH = "main"
 OPEN_URL = "https://github.com/owner/repository/pull/1"
 MERGED_URL = "https://github.com/owner/nested/pull/2"
@@ -28,10 +29,13 @@ def test_refresh_stores_pull_requests_of_repository_and_nested_repositories(
     git_repository, git_repository_template, ledger_path, write_pull_requests
 ):
     support.git_output(git_repository, "checkout", "-qb", FEATURE_BRANCH)
-    (git_repository / ".gitignore").write_text("nested/\n", encoding="utf-8")
+    support.add_github_remote(git_repository)
+    (git_repository / ".gitignore").write_text("nested/\nlocal/\n", encoding="utf-8")
     nested_path = nested_repository(
         git_repository, "nested", git_repository_template, NESTED_BRANCH
     )
+    support.add_github_remote(nested_path)
+    nested_repository(git_repository, "local", git_repository_template, LOCAL_BRANCH)
     default_branch_path = nested_repository(
         nested_path, "default", git_repository_template, DEFAULT_BRANCH
     )
@@ -50,6 +54,7 @@ def test_refresh_stores_pull_requests_of_repository_and_nested_repositories(
     )
     write_pull_requests(NESTED_BRANCH, [{"url": MERGED_URL, "state": "MERGED"}])
     write_pull_requests(DEFAULT_BRANCH, [{"url": "unexpected", "state": "OPEN"}])
+    write_pull_requests(LOCAL_BRANCH, [{"url": "unexpected", "state": "OPEN"}])
     support.write_task(ledger_path, ledger.STATUS_DONE, cwd=str(git_repository), no_worktree=True)
 
     branch_pull_requests.refresh_pull_requests()
@@ -62,8 +67,9 @@ def test_refresh_stores_pull_requests_of_repository_and_nested_repositories(
 
 
 def test_refresh_stores_worktree_task_pull_requests_and_tells_none_found_apart(
-    owned_worktree, ledger_path, write_pull_requests
+    git_repository, owned_worktree, ledger_path, write_pull_requests
 ):
+    support.add_github_remote(git_repository)
     worktree = owned_worktree()
     support.write_tasks(
         ledger_path,
@@ -95,6 +101,7 @@ def test_refresh_stores_worktree_task_pull_requests_and_tells_none_found_apart(
     ],
 )
 def test_refresh_leaves_stored_pull_requests(
+    git_repository,
     owned_worktree,
     ledger_path,
     write_pull_requests,
@@ -103,6 +110,7 @@ def test_refresh_leaves_stored_pull_requests(
     stored,
     is_gh_available,
 ):
+    support.add_github_remote(git_repository)
     worktree = owned_worktree()
     if not is_gh_available:
         monkeypatch.setenv("PATH", git_only_path(tmp_path))
@@ -124,8 +132,9 @@ def git_only_path(tmp_path):
 
 
 def test_refresh_finds_gh_on_task_path(
-    owned_worktree, ledger_path, write_pull_requests, monkeypatch, tmp_path
+    git_repository, owned_worktree, ledger_path, write_pull_requests, monkeypatch, tmp_path
 ):
+    support.add_github_remote(git_repository)
     worktree = owned_worktree()
     support.write_task(
         ledger_path,

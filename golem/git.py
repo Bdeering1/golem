@@ -13,11 +13,14 @@ def resolved_path(path: str) -> str:
     return str(Path(path).resolve())
 
 
-def run_git(directory: str, *arguments: str) -> subprocess.CompletedProcess[str]:
+def run_git(
+    directory: str, *arguments: str, timeout: float | None = None
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", "-C", directory, *arguments],
         capture_output=True,
         encoding="utf-8",
+        timeout=timeout,
         check=False,
     )
 

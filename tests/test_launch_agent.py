@@ -514,8 +514,9 @@ def test_waiting_dependent_of_succeeded_parent_keeps_launch_agent_running():
 
 
 def test_launch_agent_stores_pull_requests_of_done_tasks(
-    owned_worktree, write_pull_requests, ledger_path
+    git_repository, owned_worktree, write_pull_requests, ledger_path
 ):
+    support.add_github_remote(git_repository)
     owned_worktree()
     write_pull_requests(support.WORKTREE_BRANCH, [{"url": PULL_REQUEST_URL, "state": "MERGED"}])
 

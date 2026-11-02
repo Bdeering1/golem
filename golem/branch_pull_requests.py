@@ -1,11 +1,16 @@
 import json
 import subprocess
+import sys
 from pathlib import Path
 from typing import cast
 
 from golem import git, ledger, spawn, task_directories
 
 PULL_REQUEST_LOOKUP_TIMEOUT_SECONDS = 30
+
+
+def run_lookup_git(directory: str, *arguments: str) -> subprocess.CompletedProcess[str]:
+    return git.run_git(directory, *arguments, timeout=PULL_REQUEST_LOOKUP_TIMEOUT_SECONDS)
 
 
 def inspected_directory(tasks: ledger.Tasks, task: ledger.Task) -> str | None:
@@ -20,7 +25,7 @@ def inspected_directory(tasks: ledger.Tasks, task: ledger.Task) -> str | None:
 
 
 def repositories_within(repository: str) -> list[str] | None:
-    untracked = git.run_git(repository, "ls-files", "-z", "--others", "--directory")
+    untracked = run_lookup_git(repository, "ls-files", "-z", "--others", "--directory")
     if untracked.returncode:
         return None
     repositories = [repository]
@@ -38,15 +43,22 @@ def repositories_within(repository: str) -> list[str] | None:
 def repository_pull_requests(
     repository: str, environment: dict[str, str]
 ) -> list[ledger.PullRequest] | None:
-    branch = git.run_git(repository, "symbolic-ref", "--short", "HEAD")
+    branch = run_lookup_git(repository, "symbolic-ref", "--short", "HEAD")
     if branch.returncode:
         return []
     branch_name = branch.stdout.strip()
-    default_branch = git.run_git(repository, "symbolic-ref", "--quiet", "--short", git.ORIGIN_HEAD)
+    default_branch = run_lookup_git(
+        repository, "symbolic-ref", "--quiet", "--short", git.ORIGIN_HEAD
+    )
     if (
         not default_branch.returncode
         and default_branch.stdout.strip().removeprefix("origin/") == branch_name
     ):
+        return []
+    remotes = run_lookup_git(repository, "remote")
+    if remotes.returncode:
+        return None
+    if not remotes.stdout.strip():
         return []
     try:
         result = subprocess.run(
@@ -64,16 +76,21 @@ def repository_pull_requests(
     if result.returncode:
         return None
     try:
-        return [
+        pull_requests = [
             {"url": pull_request["url"], "state": pull_request["state"].lower()}
-            for pull_request in cast("list[ledger.PullRequest]", json.loads(result.stdout))
+            for pull_request in cast("list[dict[str, str]]", json.loads(result.stdout))
         ]
     except ValueError, KeyError, TypeError, AttributeError:
         return None
+    if any(
+        pull_request["state"] not in ledger.PULL_REQUEST_STATES for pull_request in pull_requests
+    ):
+        return None
+    return cast("list[ledger.PullRequest]", pull_requests)
 
 
 def directory_pull_requests(directory: str, task: ledger.Task) -> list[ledger.PullRequest] | None:
-    top_level = git.run_git(directory, "rev-parse", "--show-toplevel")
+    top_level = run_lookup_git(directory, "rev-parse", "--show-toplevel")
     if top_level.returncode:
         return None
     repository = top_level.stdout.strip()
@@ -119,6 +136,10 @@ def refresh_pull_requests() -> None:
         if directory is not None:
             task_ids_by_directory.setdefault(directory, []).append(task_id)
     for directory, task_ids in task_ids_by_directory.items():
-        pull_requests = directory_pull_requests(directory, tasks[task_ids[0]])
+        try:
+            pull_requests = directory_pull_requests(directory, tasks[task_ids[0]])
+        except (OSError, subprocess.TimeoutExpired) as error:
+            print(f"golem: pull request lookup failed: {directory}: {error}", file=sys.stderr)
+            continue
         if pull_requests is not None:
             store_pull_requests(tasks, task_ids, pull_requests)
