@@ -129,9 +129,40 @@ def test_board_shortens_card_text_and_shows_it_in_full_in_the_detail_pane():
 def test_board_shows_as_many_columns_as_fit(width, shown_titles, has_tabs):
     lines = frame_lines(statuses_tasks(), width, HEIGHT, board.BoardState())
 
-    header_line = lines[board.board_layout(width, HEIGHT).header_y]
+    header_y = board.board_layout(width, HEIGHT).header_y
+    header_line = lines[header_y]
     assert [title for title, *_ in board.BOARD_COLUMNS if title in header_line] == shown_titles
-    assert (" · " in lines[board.TITLE_LINE_COUNT]) == has_tabs
+    assert (header_y > board.TITLE_LINE_COUNT and bool(lines[board.TITLE_LINE_COUNT])) == has_tabs
+
+
+@pytest.mark.parametrize(
+    ("width", "focus_index", "left_text", "right_text"),
+    [
+        pytest.param(46, 2, "← Queued 2", "Done 1 →", id="both-sides"),
+        pytest.param(28, 1, "← Queued 2", "Review 2  +1 →", id="folds-farthest"),
+        pytest.param(28, 0, "", "Running 1  Review 2  +1 →", id="right-only"),
+    ],
+)
+def test_board_lists_hidden_columns_on_the_side_they_scroll_in_from(
+    width, focus_index, left_text, right_text
+):
+    lines = frame_lines(statuses_tasks(), width, HEIGHT, board.BoardState(focus_index=focus_index))
+
+    tab_line = lines[board.TITLE_LINE_COUNT]
+    assert tab_line.startswith(left_text)
+    assert tab_line.endswith(right_text)
+
+
+@pytest.mark.parametrize(
+    ("width", "footer"),
+    [
+        (WIDE_WIDTH, "←→ column  ↑↓ select  a show finished  q quit"),
+        (40, "←→ col  ↑↓ sel  a finished  q quit"),
+        (NARROW_WIDTH, "←→  ↑↓  a  q"),
+    ],
+)
+def test_board_footer_shortens_to_fit(width, footer):
+    assert frame_lines(statuses_tasks(), width, HEIGHT, board.BoardState())[-1] == footer
 
 
 def test_board_selection_moves_within_a_column_and_scrolls_to_stay_visible():
@@ -284,7 +315,7 @@ def test_board_switches_columns_after_resizing_to_one_column(pty_board):
     running_board = pty_board()
 
     running_board.resize(NARROW_WIDTH)
-    running_board.wait_for_text(" · R 2 · D 1")
+    running_board.wait_until(lambda: "Done 1" not in running_board.text())
     running_board.send("lll")
 
     running_board.wait_until(lambda: running_board.is_focused("Done"))

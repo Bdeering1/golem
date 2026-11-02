@@ -27,12 +27,10 @@ NOT_A_TERMINAL_MESSAGE = "golem: board needs a terminal; use golem list"
 STYLE_PLAIN = "plain"
 STYLE_BOLD = "bold"
 STYLE_DIM = "dim"
-STYLE_BOLD_UNDERLINE = "bold underline"
 STYLE_ATTRIBUTES = {
     STYLE_PLAIN: curses.A_NORMAL,
     STYLE_BOLD: curses.A_BOLD,
     STYLE_DIM: curses.A_DIM,
-    STYLE_BOLD_UNDERLINE: curses.A_BOLD | curses.A_UNDERLINE,
 }
 LEFT_KEYS = {ord("h"), curses.KEY_LEFT}
 RIGHT_KEYS = {ord("l"), curses.KEY_RIGHT}
@@ -66,6 +64,8 @@ class Glyphs(NamedTuple):
     separator: str
     up: str
     down: str
+    left: str
+    right: str
     column_keys: str
     select_keys: str
 
@@ -104,8 +104,12 @@ COLOR_PAIRS = {
         start=1,
     )
 }
-UNICODE_GLYPHS = Glyphs("╭╮╰╯", "┏┓┗┛", "─", "━", "│", "┃", "▌", "…", "·", "↑", "↓", "←→", "↑↓")
-ASCII_GLYPHS = Glyphs("++++", "####", "-", "=", "|", "#", ">", "~", "|", "^", "v", "h/l", "j/k")
+UNICODE_GLYPHS = Glyphs(
+    "╭╮╰╯", "┏┓┗┛", "─", "━", "│", "┃", "▌", "…", "·", "↑", "↓", "←", "→", "←→", "↑↓"
+)
+ASCII_GLYPHS = Glyphs(
+    "++++", "####", "-", "=", "|", "#", ">", "~", "|", "^", "v", "<", ">", "h/l", "j/k"
+)
 
 
 @dataclass
@@ -264,38 +268,96 @@ def column_segments(
     return segments
 
 
+type Part = tuple[str, str, int | None]
+
+
+def parts_width(parts: list[Part]) -> int:
+    return sum(len(text) for text, _, _ in parts)
+
+
+def part_segments(y: int, x: int, parts: list[Part]) -> list[Segment]:
+    segments: list[Segment] = []
+    for text, style, color in parts:
+        segments.append(Segment(y, x, text, style, color))
+        x += len(text)
+    return segments
+
+
+def joined_parts(tokens: list[list[Part]], arrow_index: int) -> list[Part]:
+    parts: list[Part] = []
+    for token_index, token in enumerate(tokens):
+        if token_index:
+            is_beside_arrow = arrow_index in {token_index, token_index - 1}
+            parts.append((" " if is_beside_arrow else "  ", STYLE_PLAIN, None))
+        parts += token
+    return parts
+
+
+def hidden_side_options(
+    hidden_columns: list[tuple[BoardColumn, list[display.ListRow]]],
+    glyphs: Glyphs,
+    *,
+    is_left: bool,
+) -> list[list[Part]]:
+    options: list[list[Part]] = []
+    for shown_count in range(len(hidden_columns), -1, -1):
+        folded_count = len(hidden_columns) - shown_count
+        shown_columns = hidden_columns[folded_count:] if is_left else hidden_columns[:shown_count]
+        labels: list[list[Part]] = [
+            [
+                (board_column.title, STYLE_PLAIN, board_column.color),
+                (f" {len(column_rows)}", STYLE_DIM, None),
+            ]
+            for board_column, column_rows in shown_columns
+        ]
+        folded: list[list[Part]] = [[(f"+{folded_count}", STYLE_DIM, None)]] if folded_count else []
+        if is_left:
+            left_arrow: list[Part] = [(glyphs.left, STYLE_DIM, None)]
+            options.append(joined_parts([left_arrow, *folded, *labels], 0))
+        else:
+            right_arrow: list[Part] = [(glyphs.right, STYLE_DIM, None)]
+            right_tokens = [*labels, *folded, right_arrow]
+            options.append(joined_parts(right_tokens, len(right_tokens) - 1))
+    return options
+
+
 def tab_segments(
     y: int,
     width: int,
     columns: list[tuple[BoardColumn, list[display.ListRow]]],
+    layout: BoardLayout,
     state: BoardState,
     glyphs: Glyphs,
 ) -> list[Segment]:
-    labels = [f"{board_column.title} {len(column_rows)}" for board_column, column_rows in columns]
-    separator = f" {glyphs.separator} "
-    if len(separator.join(labels)) >= width:
-        labels = [
-            label
-            if column_index == state.focus_index
-            else f"{board_column.title[0]} {len(column_rows)}"
-            for column_index, (label, (board_column, column_rows)) in enumerate(
-                zip(labels, columns, strict=True)
-            )
-        ]
-    segments: list[Segment] = []
-    x = 0
-    for column_index, label in enumerate(labels):
-        if column_index:
-            segments.append(Segment(y, x, separator, STYLE_DIM))
-            x += len(separator)
-        if column_index == state.focus_index:
-            segments.append(
-                Segment(y, x, label, STYLE_BOLD_UNDERLINE, columns[column_index][0].color)
-            )
+    last_shown_index = state.first_column_index + layout.fit_count
+    hidden_sides = [columns[: state.first_column_index], columns[last_shown_index:]]
+    no_hidden_options: list[list[Part]] = [[]]
+    left_options, right_options = [
+        hidden_side_options(hidden_columns, glyphs, is_left=is_left)
+        if hidden_columns
+        else no_hidden_options
+        for hidden_columns, is_left in zip(hidden_sides, (True, False), strict=True)
+    ]
+    left_index = right_index = 0
+    while (
+        parts_width(left_options[left_index]) + parts_width(right_options[right_index]) + 2 >= width
+    ):
+        can_shrink_left = left_index < len(left_options) - 1
+        can_shrink_right = right_index < len(right_options) - 1
+        if not can_shrink_left and not can_shrink_right:
+            break
+        is_left_wider = parts_width(left_options[left_index]) > parts_width(
+            right_options[right_index]
+        )
+        if can_shrink_left and (is_left_wider or not can_shrink_right):
+            left_index += 1
         else:
-            segments.append(Segment(y, x, label, STYLE_DIM))
-        x += len(label)
-    return segments
+            right_index += 1
+    right_parts = right_options[right_index]
+    return [
+        *part_segments(y, 0, left_options[left_index]),
+        *part_segments(y, width - 1 - parts_width(right_parts), right_parts),
+    ]
 
 
 def title_segments(width: int, snapshot: BoardSnapshot, glyphs: Glyphs) -> list[Segment]:
@@ -303,10 +365,9 @@ def title_segments(width: int, snapshot: BoardSnapshot, glyphs: Glyphs) -> list[
     review_count = statuses.count(ledger.STATUS_NEEDS_REVIEW) + statuses.count(ledger.STATUS_FAILED)
     summary = f"  {statuses.count(ledger.STATUS_RUNNING)} running {glyphs.separator} {review_count} to review"
     updated = f"updated {snapshot.updated_at}"
-    segments = [
-        Segment(0, 0, BOARD_TITLE, STYLE_BOLD),
-        Segment(0, len(BOARD_TITLE), summary, STYLE_DIM),
-    ]
+    segments = [Segment(0, 0, BOARD_TITLE, STYLE_BOLD)]
+    if len(BOARD_TITLE) + len(summary) < width:
+        segments.append(Segment(0, len(BOARD_TITLE), summary, STYLE_DIM))
     if len(BOARD_TITLE) + len(summary) + 2 + len(updated) < width:
         segments.append(Segment(0, width - 1 - len(updated), updated, STYLE_DIM))
     return segments
@@ -343,19 +404,39 @@ def detail_segments(
     return segments
 
 
-def footer_segments(y: int, state: BoardState, glyphs: Glyphs) -> list[Segment]:
+def footer_segments(y: int, width: int, state: BoardState, glyphs: Glyphs) -> list[Segment]:
     finished_action = "hide" if state.is_showing_all else "show"
-    keys = [
-        (glyphs.column_keys, "column"),
-        (glyphs.select_keys, "select"),
-        ("a", f"{finished_action} finished"),
-        ("q", "quit"),
+    key_sets = [
+        [
+            (glyphs.column_keys, "column"),
+            (glyphs.select_keys, "select"),
+            ("a", f"{finished_action} finished"),
+            ("q", "quit"),
+        ],
+        [
+            (glyphs.column_keys, "col"),
+            (glyphs.select_keys, "sel"),
+            ("a", "finished"),
+            ("q", "quit"),
+        ],
+        [(glyphs.column_keys, ""), (glyphs.select_keys, ""), ("a", ""), ("q", "")],
     ]
+    keys = next(
+        (
+            key_set
+            for key_set in key_sets
+            if sum(len(key) + len(label) + 3 for key, label in key_set) - 2 < width
+        ),
+        key_sets[-1],
+    )
     segments: list[Segment] = []
     x = 0
     for key, label in keys:
-        segments += [Segment(y, x, key, STYLE_BOLD), Segment(y, x + len(key) + 1, label, STYLE_DIM)]
-        x += len(key) + len(label) + 3
+        segments.append(Segment(y, x, key, STYLE_BOLD))
+        if label:
+            segments.append(Segment(y, x + len(key) + 1, label, STYLE_DIM))
+            x += len(label) + 1
+        x += len(key) + 2
     return segments
 
 
@@ -381,7 +462,7 @@ def board_frame(
     columns = rows_by_column(snapshot.rows, is_showing_all=state.is_showing_all)
     segments = title_segments(width, snapshot, glyphs)
     if layout.fit_count < len(BOARD_COLUMNS):
-        segments += tab_segments(TITLE_LINE_COUNT, width, columns, state, glyphs)
+        segments += tab_segments(TITLE_LINE_COUNT, width, columns, layout, state, glyphs)
     body_bottom = layout.body_top + layout.body_height
     for offset in range(layout.fit_count):
         column_index = state.first_column_index + offset
@@ -400,7 +481,7 @@ def board_frame(
         segments += detail_segments(
             height - DETAIL_PANE_LINE_COUNT, width, selected_row, snapshot, glyphs
         )
-    segments += footer_segments(height - 1, state, glyphs)
+    segments += footer_segments(height - 1, width, state, glyphs)
     return clipped(segments, width, height)
 
 
