@@ -26,6 +26,7 @@ LETTER_KEYS = ("h", "l", "k", "j")
 
 def frame_lines(rows, width, height, state):
     lines = [[" "] * width for _ in range(height)]
+    board.fit_state_to_layout(rows, width, height, state)
     for segment in board.board_frame(rows, width, height, state):
         for offset, character in enumerate(segment.text):
             lines[segment.y][segment.x + offset] = character
@@ -119,7 +120,6 @@ def test_board_focus_stays_within_shown_columns():
     state = board.BoardState(is_done_shown=True)
     for _ in range(len(board.BOARD_COLUMNS)):
         board.apply_key(state, ord("l"))
-    frame_lines(rows, NARROW_WIDTH, HEIGHT, state)
 
     board.apply_key(state, ord("a"))
 

@@ -130,6 +130,43 @@ def footer_text(state: BoardState) -> str:
     return f"h/l column  j/k scroll  a {done_action} done  q quit"
 
 
+class BoardLayout(NamedTuple):
+    fit_count: int
+    column_width: int
+    content_width: int
+    body_height: int
+
+
+def board_layout(width: int, height: int, state: BoardState) -> BoardLayout:
+    fit_count = min(shown_column_count(state), max(1, width // MIN_COLUMN_WIDTH))
+    column_width = width // fit_count
+    return BoardLayout(
+        fit_count,
+        column_width,
+        max(1, column_width - COLUMN_GAP),
+        height - HEADER_AND_FOOTER_LINE_COUNT,
+    )
+
+
+def fit_state_to_layout(
+    rows: list[display.ListRow], width: int, height: int, state: BoardState
+) -> None:
+    layout = board_layout(width, height, state)
+    state.first_column_index = min(
+        max(
+            state.focus_index - layout.fit_count + 1,
+            min(state.first_column_index, state.focus_index),
+        ),
+        shown_column_count(state) - layout.fit_count,
+    )
+    columns = rows_by_column(rows, is_done_shown=state.is_done_shown)
+    for column_index, (_, column_rows) in enumerate(columns):
+        line_count = len(column_lines(column_rows, layout.content_width))
+        state.scroll_offsets[column_index] = min(
+            max(state.scroll_offsets[column_index], 0), max(0, line_count - layout.body_height)
+        )
+
+
 def board_frame(
     rows: list[display.ListRow], width: int, height: int, state: BoardState
 ) -> list[Segment]:
@@ -137,31 +174,21 @@ def board_frame(
     footer = Segment(height - 1, 0, footer_text(state)[: width - 1], STYLE_DIM)
     if height < HEADER_AND_FOOTER_LINE_COUNT:
         return [footer]
-    column_count = shown_column_count(state)
-    fit_count = min(column_count, max(1, width // MIN_COLUMN_WIDTH))
-    state.focus_index = min(max(state.focus_index, 0), column_count - 1)
-    state.first_column_index = min(
-        max(state.focus_index - fit_count + 1, min(state.first_column_index, state.focus_index)),
-        column_count - fit_count,
-    )
-    column_width = width // fit_count
-    content_width = max(1, column_width - COLUMN_GAP)
-    body_height = height - HEADER_AND_FOOTER_LINE_COUNT
+    layout = board_layout(width, height, state)
     columns = rows_by_column(rows, is_done_shown=state.is_done_shown)
     segments: list[Segment] = []
-    for offset in range(fit_count):
+    for offset in range(layout.fit_count):
         column_index = state.first_column_index + offset
         board_column, column_rows = columns[column_index]
-        x = offset * column_width
+        x = offset * layout.column_width
         header_style = STYLE_REVERSE if column_index == state.focus_index else STYLE_BOLD
         header = f"{board_column.title} ({len(column_rows)})"
-        segments.append(Segment(0, x, header[:content_width], header_style))
-        lines = column_lines(column_rows, content_width)
-        scroll_offset = min(
-            max(state.scroll_offsets[column_index], 0), max(0, len(lines) - body_height)
-        )
-        state.scroll_offsets[column_index] = scroll_offset
-        for y, line in enumerate(lines[scroll_offset : scroll_offset + body_height], start=1):
+        segments.append(Segment(0, x, header[: layout.content_width], header_style))
+        lines = column_lines(column_rows, layout.content_width)
+        scroll_offset = state.scroll_offsets[column_index]
+        for y, line in enumerate(
+            lines[scroll_offset : scroll_offset + layout.body_height], start=1
+        ):
             segments += line_segments(y, x, line)
     return [*segments, footer]
 
@@ -177,6 +204,7 @@ def apply_key(state: BoardState, key: int) -> None:
         state.scroll_offsets[state.focus_index] -= 1
     elif key == ord("a"):
         state.is_done_shown = not state.is_done_shown
+        state.focus_index = min(state.focus_index, shown_column_count(state) - 1)
 
 
 def segment_attribute(style: str, *, is_color: bool) -> int:
@@ -190,6 +218,7 @@ def draw_board(
 ) -> None:
     height, width = screen.getmaxyx()
     screen.erase()
+    fit_state_to_layout(rows, width, height, state)
     for segment in board_frame(rows, width, height, state):
         with contextlib.suppress(curses.error):
             screen.addstr(
