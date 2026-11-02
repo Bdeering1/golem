@@ -108,14 +108,12 @@ def test_prune_decides_done_tasks_by_stored_pull_requests_then_idle_time(
             "2 PRs merged",
             id="finished-pull-requests",
         ),
-        pytest.param({"cwd": "missing"}, "directory missing", id="directory-missing"),
+        pytest.param(
+            {"cwd": "/nonexistent/golem-task"}, "directory missing", id="directory-missing"
+        ),
     ],
 )
-def test_prune_offers_done_task_with_its_reason(
-    ledger_path, monkeypatch, capsys, tmp_path, fields, reason
-):
-    if "cwd" in fields:
-        fields = {"cwd": str(tmp_path / fields["cwd"])}
+def test_prune_offers_done_task_with_its_reason(ledger_path, monkeypatch, capsys, fields, reason):
     support.write_task(ledger_path, ledger.STATUS_DONE, **fields)
     monkeypatch.setattr(sys, "stdin", TerminalInput("y\n"))
 
