@@ -129,7 +129,9 @@ def schedule_new_task(
     record = new_task_record(placement, prompt, agent_args, due_time, backend, after=after)
     records = {task_id: record, **follow_up_records}
     with ledger.locked_ledger() as (tasks, worktrees):
-        replaced = delete.replace_finished_tasks(tasks, worktrees, list(records), after)
+        if after is not None and chains.is_dependent_reservable(tasks, after):
+            raise SystemExit(f"golem: parent task changed: {after}")
+        replaced = delete.remove_replaceable_tasks(tasks, worktrees, list(records), after)
         tasks.update(records)
     delete.finish_task_replacement(replaced)
     return launch_agent.wake_launch_agent_and_report(task_id, due_time)
@@ -229,8 +231,8 @@ def reserve_dependent_task(records: ledger.Tasks, parent_id: str) -> bool:
     with ledger.locked_ledger() as (tasks, worktrees):
         if not chains.is_dependent_reservable(tasks, parent_id):
             return False
-        replaced = delete.replace_finished_tasks(tasks, worktrees, list(records), parent_id)
-        chains.reserve_dependent_task(tasks, records, parent_id)
+        replaced = delete.remove_replaceable_tasks(tasks, worktrees, list(records), parent_id)
+        chains.add_dependent_records(tasks, records, parent_id)
     delete.finish_task_replacement(replaced)
     return True
 

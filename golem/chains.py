@@ -72,7 +72,7 @@ def is_dependent_reservable(tasks: ledger.Tasks, parent_id: str) -> bool:
     return not can_start_dependents(tasks[parent_id]) or is_gate_pending(tasks, parent_id)
 
 
-def reserve_dependent_task(tasks: ledger.Tasks, records: ledger.Tasks, parent_id: str) -> None:
+def add_dependent_records(tasks: ledger.Tasks, records: ledger.Tasks, parent_id: str) -> None:
     if tasks[parent_id].get("auto_pickup"):
         for record in records.values():
             if registry.task_backend(record).IS_AUTO_PICKUP_SUPPORTED:

@@ -45,7 +45,7 @@ def is_replaceable_task(task: ledger.Task) -> bool:
     return task["status"] == ledger.STATUS_DONE and ledger.has_finished_pull_requests(task)
 
 
-def replace_finished_tasks(
+def remove_replaceable_tasks(
     tasks: ledger.Tasks, worktrees: ledger.Worktrees, task_ids: list[str], parent_id: str | None
 ) -> ReplacedTasks:
     replaced_ids: set[str] = set()

@@ -165,28 +165,30 @@ def test_run_replaces_whole_finished_chain(installed_launch_agent, ledger_path):
 
 
 @pytest.mark.parametrize(
-    ("replaced_id", "schedule_arguments"),
+    ("replaced_id", "schedule_arguments", "existing_tasks"),
     [
         pytest.param(
             support.GRANDCHILD_ID,
             ["--now", "--then", support.GRANDCHILD_ID, support.GRANDCHILD_PROMPT],
+            {},
             id="follow-up",
         ),
-        pytest.param(support.CHILD_ID, ["--after", support.PARENT_ID], id="after-pending-parent"),
+        pytest.param(
+            support.CHILD_ID,
+            ["--after", support.PARENT_ID],
+            {
+                support.PARENT_ID: support.task_record(
+                    ledger.STATUS_SCHEDULED, task_id=support.PARENT_ID
+                )
+            },
+            id="after-pending-parent",
+        ),
     ],
 )
 def test_run_replaces_finished_task_on_each_reserved_path(
-    installed_launch_agent, ledger_path, capsys, replaced_id, schedule_arguments
+    installed_launch_agent, ledger_path, capsys, replaced_id, schedule_arguments, existing_tasks
 ):
-    support.write_tasks(
-        ledger_path,
-        {
-            support.PARENT_ID: support.task_record(
-                ledger.STATUS_SCHEDULED, task_id=support.PARENT_ID
-            ),
-            replaced_id: finished_task(replaced_id),
-        },
-    )
+    support.write_tasks(ledger_path, {**existing_tasks, replaced_id: finished_task(replaced_id)})
     old_session_id = support.read_task(ledger_path, replaced_id)["session_id"]
 
     assert cli.main(["run", support.CHILD_ID, support.CHILD_PROMPT, *schedule_arguments]) == 0
@@ -221,6 +223,29 @@ def test_run_refuses_taken_id_unless_whole_chain_is_finished(
         cli.main(["run", support.TASK_ID, support.PROMPT, "--now"])
 
     assert support.read_tasks(ledger_path) == tasks
+
+
+def test_run_after_refuses_when_parent_is_replaced_during_usage_lookup(
+    installed_launch_agent, ledger_path, monkeypatch
+):
+    support.write_tasks(ledger_path, {support.PARENT_ID: finished_task(support.PARENT_ID)})
+
+    def replace_parent() -> None:
+        support.write_tasks(
+            ledger_path,
+            {
+                support.PARENT_ID: support.task_record(
+                    ledger.STATUS_SCHEDULED, task_id=support.PARENT_ID
+                )
+            },
+        )
+
+    monkeypatch.setattr(claude, "next_reset_time", replace_parent)
+
+    with pytest.raises(SystemExit, match=f"parent task changed: {support.PARENT_ID}"):
+        cli.main(["run", support.CHILD_ID, support.CHILD_PROMPT, "--after", support.PARENT_ID])
+
+    assert support.CHILD_ID not in support.read_tasks(ledger_path)
 
 
 def fail_usage_lookup() -> Never:
