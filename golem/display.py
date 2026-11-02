@@ -28,7 +28,6 @@ class ListRow(NamedTuple):
     status: str
     directory: str
     detail: str
-    is_detail_time: bool
 
     def cells(self) -> tuple[str, str, str, str, str]:
         return (self.task_id, self.step, self.status, self.directory, self.detail)
@@ -147,7 +146,6 @@ def list_rows(tasks: ledger.Tasks, today: date) -> list[ListRow]:
                 shown_task["status"],
                 shown_task["cwd"],
                 list_detail(shown_task, today),
-                detail_timestamp(shown_task) is not None,
             )
         )
     rows.sort(key=lambda row: (ledger.LIST_STATUS_ORDER.index(row.status), row.task_id))
