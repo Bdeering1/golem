@@ -3,14 +3,19 @@ import curses
 import locale
 import os
 import signal
+import subprocess
 import sys
+import tempfile
 import textwrap
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 from golem import display, ledger
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
 
 MIN_COLUMN_WIDTH = 20
 COLUMN_GAP = 2
@@ -24,6 +29,8 @@ KEY_TIMEOUT_MILLISECONDS = 250
 INTERRUPTED_EXIT_STATUS = 130
 MIN_COLOR_COUNT = 256
 WIDE_REP_FIX_NCURSES_VERSION = (6, 0, 20170729)
+REP_LINE_PREFIX = "\trep="
+TERMINFO_SOURCE_NAME = "terminal.terminfo"
 BOARD_TITLE = "golem board"
 NOT_A_TERMINAL_MESSAGE = "golem: board needs a terminal; use golem list"
 STYLE_PLAIN = "plain"
@@ -617,12 +624,71 @@ def is_terminal() -> bool:
     return is_tty and os.environ.get("TERM", "") not in {"", "dumb"}
 
 
+def terminfo_source_without_rep() -> str | None:
+    try:
+        result = subprocess.run(
+            ["infocmp", "-x", "-1"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            encoding="utf-8",
+            check=False,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    lines = result.stdout.splitlines(keepends=True)
+    if not any(line.startswith(REP_LINE_PREFIX) for line in lines):
+        return None
+    return "".join(line for line in lines if not line.startswith(REP_LINE_PREFIX))
+
+
+def compile_terminfo(source: str, directory: Path) -> bool:
+    source_path = directory / TERMINFO_SOURCE_NAME
+    source_path.write_text(source)
+    try:
+        result = subprocess.run(
+            ["tic", "-x", "-o", str(directory), str(source_path)],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        return False
+    return result.returncode == 0
+
+
+@contextlib.contextmanager
+def terminfo_without_rep() -> Generator[None]:
+    # Old ncurses mangles wide chars through `rep`, so hide it from initscr with a patched copy.
+    source = None
+    if curses.ncurses_version < WIDE_REP_FIX_NCURSES_VERSION:
+        source = terminfo_source_without_rep()
+    if source is None:
+        yield
+        return
+    with tempfile.TemporaryDirectory() as directory:
+        if not compile_terminfo(source, Path(directory)):
+            yield
+            return
+        previous_terminfo = os.environ.get("TERMINFO")
+        os.environ["TERMINFO"] = directory
+        try:
+            yield
+        finally:
+            if previous_terminfo is None:
+                del os.environ["TERMINFO"]
+            else:
+                os.environ["TERMINFO"] = previous_terminfo
+
+
 def run_board() -> int:
     if not is_terminal():
         raise SystemExit(NOT_A_TERMINAL_MESSAGE)
     signal.signal(signal.SIGINT, signal.default_int_handler)
     try:
-        screen = curses.initscr()
+        with terminfo_without_rep():
+            screen = curses.initscr()
     except curses.error:
         raise SystemExit(NOT_A_TERMINAL_MESSAGE) from None
     try:
