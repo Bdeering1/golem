@@ -92,10 +92,11 @@ class BoardLayout(NamedTuple):
 
 type LedgerStat = tuple[int, int, int] | None
 
+REVIEW_STATUSES = (ledger.STATUS_NEEDS_REVIEW, ledger.STATUS_FAILED)
 BOARD_COLUMNS = (
     BoardColumn("Queued", (ledger.STATUS_SCHEDULED, ledger.STATUS_WAITING), 208),
     BoardColumn("Running", (ledger.STATUS_RUNNING,), 39),
-    BoardColumn("Review", (ledger.STATUS_NEEDS_REVIEW, ledger.STATUS_FAILED), 170),
+    BoardColumn("Review", REVIEW_STATUSES, 170),
     BoardColumn("Done", (ledger.STATUS_DONE,), 34),
 )
 COLOR_PAIRS = {
@@ -119,6 +120,7 @@ class BoardState:
     first_column_index: int = 0
     is_showing_all: bool = False
     selected_indices: list[int] = field(default_factory=lambda: [0] * len(BOARD_COLUMNS))
+    selected_task_ids: list[str | None] = field(default_factory=lambda: [None] * len(BOARD_COLUMNS))
     scroll_offsets: list[int] = field(default_factory=lambda: [0] * len(BOARD_COLUMNS))
 
 
@@ -172,12 +174,19 @@ def fit_state_to_layout(
     )
     columns = rows_by_column(rows, is_showing_all=state.is_showing_all)
     for column_index, (_, column_rows) in enumerate(columns):
+        column_task_ids = [row.task_id for row in column_rows]
+        selected_task_id = state.selected_task_ids[column_index]
         selected_index = min(
             max(state.selected_indices[column_index], 0), max(0, len(column_rows) - 1)
         )
+        if selected_task_id in column_task_ids:
+            selected_index = column_task_ids.index(selected_task_id)
         scroll_offset = min(state.scroll_offsets[column_index], selected_index)
         scroll_offset = max(scroll_offset, selected_index - layout.visible_card_count + 1)
         state.selected_indices[column_index] = selected_index
+        state.selected_task_ids[column_index] = (
+            column_task_ids[selected_index] if column_task_ids else None
+        )
         state.scroll_offsets[column_index] = scroll_offset
 
 
@@ -363,7 +372,7 @@ def tab_segments(
 
 def title_segments(width: int, snapshot: BoardSnapshot, glyphs: Glyphs) -> list[Segment]:
     statuses = [row.status for row in snapshot.rows]
-    review_count = statuses.count(ledger.STATUS_NEEDS_REVIEW) + statuses.count(ledger.STATUS_FAILED)
+    review_count = sum(status in REVIEW_STATUSES for status in statuses)
     summary = f"  {statuses.count(ledger.STATUS_RUNNING)} running {glyphs.separator} {review_count} to review"
     updated = f"updated {snapshot.updated_at}"
     segments = [Segment(0, 0, BOARD_TITLE, STYLE_BOLD)]
@@ -510,10 +519,9 @@ def apply_key(state: BoardState, key: int) -> None:
         state.focus_index = max(state.focus_index - 1, 0)
     elif key in RIGHT_KEYS:
         state.focus_index = min(state.focus_index + 1, len(BOARD_COLUMNS) - 1)
-    elif key in DOWN_KEYS:
-        state.selected_indices[state.focus_index] += 1
-    elif key in UP_KEYS:
-        state.selected_indices[state.focus_index] -= 1
+    elif key in DOWN_KEYS | UP_KEYS:
+        state.selected_indices[state.focus_index] += 1 if key in DOWN_KEYS else -1
+        state.selected_task_ids[state.focus_index] = None
     elif key == ord("a"):
         state.is_showing_all = not state.is_showing_all
 
@@ -587,11 +595,11 @@ def board_loop(screen: curses.window, *, is_color: bool, glyphs: Glyphs) -> int:
             is_redraw_needed = True
         if is_redraw_needed:
             draw_board(screen, snapshot, state, is_color=is_color, glyphs=glyphs)
-        key = screen.getch()
-        if key == ord("q"):
+        pressed_key = screen.getch()
+        if pressed_key == ord("q"):
             return 0
-        apply_key(state, key)
-        is_redraw_needed = key != -1
+        apply_key(state, pressed_key)
+        is_redraw_needed = pressed_key != -1
 
 
 def is_terminal() -> bool:

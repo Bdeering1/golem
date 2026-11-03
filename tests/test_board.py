@@ -60,18 +60,21 @@ def statuses_tasks():
 
 
 @pytest.mark.parametrize(
-    ("is_showing_all", "done_ids"),
-    [(False, {ledger.STATUS_DONE}), (True, {ledger.STATUS_DONE, "merged"})],
+    ("pressed_keys", "done_ids"),
+    [("", {ledger.STATUS_DONE}), ("a", {ledger.STATUS_DONE, "merged"})],
 )
-def test_board_columns_group_statuses_and_hide_what_list_hides(is_showing_all, done_ids):
+def test_board_columns_group_statuses_and_a_toggles_what_list_hides(pressed_keys, done_ids):
     tasks = statuses_tasks() | {
         "merged": support.task_record(
             ledger.STATUS_DONE, task_id="merged", pull_requests=[MERGED_PULL_REQUEST]
         )
     }
     rows = display.list_rows(tasks, TODAY)
+    state = board.BoardState()
+    for pressed_key in pressed_keys:
+        board.apply_key(state, ord(pressed_key))
 
-    columns = board.rows_by_column(rows, is_showing_all=is_showing_all)
+    columns = board.rows_by_column(rows, is_showing_all=state.is_showing_all)
 
     expected = [
         ("Queued", {ledger.STATUS_SCHEDULED, ledger.STATUS_WAITING}),
@@ -186,6 +189,18 @@ def test_board_selection_moves_within_a_column_and_scrolls_to_stay_visible():
     assert "task-08  running" in scrolled_up_text
 
 
+def test_board_selection_stays_on_its_task_when_a_task_is_added_above_it():
+    tasks = running_tasks()
+    added_task = tasks.pop("task-00")
+    state = board.BoardState(focus_index=1)
+    board.apply_key(state, ord("j"))
+    frame_text(tasks, state=state)
+
+    text = frame_text(tasks | {"task-00": added_task}, state=state)
+
+    assert "task-02  running" in text
+
+
 def test_board_marks_empty_columns():
     assert "No tasks" in frame_text({})
 
@@ -210,11 +225,16 @@ def test_board_draws_only_ascii_with_ascii_glyphs():
 
 
 @pytest.mark.parametrize(
-    ("is_tty", "term"), [pytest.param(False, "xterm", id="not-tty"), pytest.param(True, "dumb")]
+    ("is_stdout_tty", "is_stdin_tty", "term"),
+    [
+        pytest.param(False, True, "xterm", id="stdout-not-tty"),
+        pytest.param(True, False, "xterm", id="stdin-not-tty"),
+        pytest.param(True, True, "dumb", id="dumb"),
+    ],
 )
-def test_board_refuses_to_start_without_a_terminal(monkeypatch, is_tty, term):
-    monkeypatch.setattr(sys.stdout, "isatty", lambda: is_tty)
-    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+def test_board_refuses_to_start_without_a_terminal(monkeypatch, is_stdout_tty, is_stdin_tty, term):
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: is_stdout_tty)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: is_stdin_tty)
     monkeypatch.setenv("TERM", term)
 
     with pytest.raises(SystemExit, match="golem list"):
