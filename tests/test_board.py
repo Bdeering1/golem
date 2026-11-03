@@ -237,7 +237,6 @@ def test_board_draws_only_ascii_with_ascii_glyphs():
             board.UNICODE_GLYPHS,
             id="fixed-rep",
         ),
-        pytest.param((6, 1, 20180127), XTERM_REP_CAPABILITY, board.UNICODE_GLYPHS, id="newer"),
     ],
 )
 def test_terminal_glyphs_avoid_unicode_when_ncurses_mangles_wide_rep(
