@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 from golem import (
+    board,
     delete,
     display,
     executor,
@@ -278,7 +279,8 @@ def add_hook_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None
     )
 
 
-def list_aliases(command_parsers: dict[str, argparse.ArgumentParser]) -> int:
+def list_aliases() -> int:
+    _, command_parsers = build_parser()
     aliases = load_aliases()
     if not aliases:
         print("golem: no aliases")
@@ -351,15 +353,8 @@ def add_run_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
     set_command_handler(run_command, run_task_from_arguments)
 
 
-def build_parser() -> tuple[argparse.ArgumentParser, dict[str, argparse.ArgumentParser]]:
-    parser = argparse.ArgumentParser(prog="golem")
-    parser.add_argument(
-        "-C", dest="directory", metavar="DIR", help="run as if golem was started in DIR"
-    )
-    commands = parser.add_subparsers(dest="command", required=True)
-
-    add_run_command(commands.add_parser)
-    pickup_command = commands.add_parser("pickup")
+def add_pickup_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
+    pickup_command = add_parser("pickup")
     pickup_command.add_argument("id", nargs="?")
     pickup_command.add_argument(
         "--all", action="store_true", help="open every task that needs review"
@@ -379,24 +374,34 @@ def build_parser() -> tuple[argparse.ArgumentParser, dict[str, argparse.Argument
             )
         ),
     )
-    close_command = commands.add_parser("close")
+
+
+def add_close_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
+    close_command = add_parser("close")
     close_command.add_argument("id")
     set_command_handler(
         close_command, lambda arguments: review.close(task_id_from_arguments(arguments))
     )
-    add_continue_command(commands.add_parser)
-    show_command = commands.add_parser("show")
+
+
+def add_show_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
+    show_command = add_parser("show")
     show_command.add_argument("id")
     set_command_handler(
         show_command, lambda arguments: display.show_task_result(task_id_from_arguments(arguments))
     )
-    add_watch_command(commands.add_parser)
-    cancel_command = commands.add_parser("cancel")
+
+
+def add_cancel_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
+    cancel_command = add_parser("cancel")
     cancel_command.add_argument("id")
     set_command_handler(
         cancel_command, lambda arguments: scheduling.cancel_task(task_id_from_arguments(arguments))
     )
-    retry_command = commands.add_parser(
+
+
+def add_retry_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
+    retry_command = add_parser(
         "retry",
         description=SCHEDULE_DESCRIPTION,
     )
@@ -409,7 +414,10 @@ def build_parser() -> tuple[argparse.ArgumentParser, dict[str, argparse.Argument
             task_id_from_arguments(arguments), is_now=arguments.now, at_text=arguments.at
         ),
     )
-    reschedule_command = commands.add_parser(
+
+
+def add_reschedule_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
+    reschedule_command = add_parser(
         "reschedule",
         description=SCHEDULE_DESCRIPTION,
     )
@@ -422,7 +430,10 @@ def build_parser() -> tuple[argparse.ArgumentParser, dict[str, argparse.Argument
             task_id_from_arguments(arguments), is_now=arguments.now, at_text=arguments.at
         ),
     )
-    delete_command = commands.add_parser("delete")
+
+
+def add_delete_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
+    delete_command = add_parser("delete")
     delete_command.add_argument("ids", nargs="+")
     delete_command.add_argument("--chain", action="store_true")
     delete_command.add_argument("--remove-worktree", action="store_true")
@@ -434,13 +445,20 @@ def build_parser() -> tuple[argparse.ArgumentParser, dict[str, argparse.Argument
             is_removing_worktree=arguments.remove_worktree,
         ),
     )
-    add_prune_command(commands.add_parser)
-    add_list_command(commands.add_parser)
-    alias_command = commands.add_parser("alias")
+
+
+def add_board_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
+    set_command_handler(add_parser("board"), lambda _: board.run_board())
+
+
+def add_alias_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
+    alias_command = add_parser("alias")
     alias_commands = alias_command.add_subparsers(dest="alias_command", required=True)
-    set_command_handler(alias_commands.add_parser("list"), lambda _: list_aliases(commands.choices))
-    add_worktree_commands(commands.add_parser)
-    launch_agent_command = commands.add_parser(
+    set_command_handler(alias_commands.add_parser("list"), lambda _: list_aliases())
+
+
+def add_agent_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
+    launch_agent_command = add_parser(
         "agent",
         description=(
             "Agent logs are written to agent.log in the state directory; when it exceeds "
@@ -457,8 +475,14 @@ def build_parser() -> tuple[argparse.ArgumentParser, dict[str, argparse.Argument
             else launch_agent.uninstall_launch_agent()
         ),
     )
-    set_command_handler(commands.add_parser("_agent"), lambda _: launch_agent.run_launch_agent())
-    execute_command = commands.add_parser("_execute")
+
+
+def add_launch_agent_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
+    set_command_handler(add_parser("_agent"), lambda _: launch_agent.run_launch_agent())
+
+
+def add_execute_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
+    execute_command = add_parser("_execute")
     execute_command.add_argument("id")
     execute_command.add_argument("session_id")
     set_command_handler(
@@ -467,7 +491,39 @@ def build_parser() -> tuple[argparse.ArgumentParser, dict[str, argparse.Argument
             task_id_from_arguments(arguments), arguments.session_id
         ),
     )
-    add_hook_command(commands.add_parser)
+
+
+COMMAND_REGISTRARS = (
+    add_run_command,
+    add_pickup_command,
+    add_close_command,
+    add_continue_command,
+    add_show_command,
+    add_watch_command,
+    add_cancel_command,
+    add_retry_command,
+    add_reschedule_command,
+    add_delete_command,
+    add_prune_command,
+    add_list_command,
+    add_board_command,
+    add_alias_command,
+    add_worktree_commands,
+    add_agent_command,
+    add_launch_agent_command,
+    add_execute_command,
+    add_hook_command,
+)
+
+
+def build_parser() -> tuple[argparse.ArgumentParser, dict[str, argparse.ArgumentParser]]:
+    parser = argparse.ArgumentParser(prog="golem")
+    parser.add_argument(
+        "-C", dest="directory", metavar="DIR", help="run as if golem was started in DIR"
+    )
+    commands = parser.add_subparsers(dest="command", required=True)
+    for add_command in COMMAND_REGISTRARS:
+        add_command(commands.add_parser)
     return parser, commands.choices
 
 
