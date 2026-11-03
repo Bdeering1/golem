@@ -633,7 +633,7 @@ def terminfo_source_without_rep() -> str | None:
             encoding="utf-8",
             check=False,
         )
-    except OSError:
+    except OSError, UnicodeDecodeError:
         return None
     if result.returncode != 0:
         return None
