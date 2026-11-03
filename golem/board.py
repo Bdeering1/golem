@@ -576,11 +576,13 @@ def start_colors() -> bool:
     return True
 
 
-def has_wide_rep_bug() -> bool:
+def is_ncurses_mangling_wide_rep() -> bool:
     # Old ncurses emits runs of a wide char as its low byte plus the terminfo `rep` capability.
-    return (
-        curses.ncurses_version < WIDE_REP_FIX_NCURSES_VERSION and curses.tigetstr("rep") is not None
-    )
+    return curses.ncurses_version < WIDE_REP_FIX_NCURSES_VERSION
+
+
+def has_wide_rep_bug() -> bool:
+    return is_ncurses_mangling_wide_rep() and curses.tigetstr("rep") is not None
 
 
 def terminal_glyphs() -> Glyphs:
@@ -660,9 +662,8 @@ def compile_terminfo(source: bytes, directory: Path) -> bool:
 
 @contextlib.contextmanager
 def terminfo_without_rep() -> Generator[None]:
-    # Old ncurses mangles wide chars through `rep`, so hide it from initscr with a patched copy.
     source = None
-    if curses.ncurses_version < WIDE_REP_FIX_NCURSES_VERSION:
+    if is_ncurses_mangling_wide_rep():
         source = terminfo_source_without_rep()
     if source is None:
         yield
