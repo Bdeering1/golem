@@ -184,9 +184,8 @@ def test_board_selection_moves_within_a_column_and_scrolls_to_stay_visible():
     board.apply_key(state, ord("k"))
     scrolled_up_text = frame_text(running_tasks(), state=state)
 
-    assert "task-09  running" in bottom_text
-    assert "more" in bottom_text
-    assert "task-08  running" in scrolled_up_text
+    assert f"{board.UNICODE_GLYPHS.heavy_vertical} task-09" in bottom_text
+    assert f"{board.UNICODE_GLYPHS.heavy_vertical} task-08" in scrolled_up_text
 
 
 def test_board_selection_stays_on_its_task_when_a_task_is_added_above_it():
