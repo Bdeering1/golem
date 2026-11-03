@@ -22,6 +22,7 @@ PTY_WIDTH = 100
 PTY_TIMEOUT_SECONDS = 5
 SHOW_CURSOR = b"\x1b[?25h"
 EXIT_ALTERNATE_SCREEN = b"\x1b[?1049l"
+XTERM_REP_CAPABILITY = b"%p1%c\x1b[%p2%{1}%-%db"
 REPO_ROOT = Path(__file__).parent.parent
 ARROW_KEYS = ("\x1bOD", "\x1bOC", "\x1bOA", "\x1bOB")
 LETTER_KEYS = ("h", "l", "k", "j")
@@ -228,15 +229,15 @@ def test_board_draws_only_ascii_with_ascii_glyphs():
 @pytest.mark.parametrize(
     ("ncurses_version", "rep_capability", "expected_glyphs"),
     [
-        pytest.param((6, 0, 20150808), b"%p1%c\x1b[%p2%{1}%-%db", board.ASCII_GLYPHS, id="old-rep"),
+        pytest.param((6, 0, 20150808), XTERM_REP_CAPABILITY, board.ASCII_GLYPHS, id="old-rep"),
         pytest.param((6, 0, 20150808), None, board.UNICODE_GLYPHS, id="old-no-rep"),
         pytest.param(
             board.WIDE_REP_FIX_NCURSES_VERSION,
-            b"%p1%c\x1b[%p2%{1}%-%db",
+            XTERM_REP_CAPABILITY,
             board.UNICODE_GLYPHS,
             id="fixed-rep",
         ),
-        pytest.param((6, 1, 20180127), b"%p1%c\x1b[%p2%{1}%-%db", board.UNICODE_GLYPHS, id="newer"),
+        pytest.param((6, 1, 20180127), XTERM_REP_CAPABILITY, board.UNICODE_GLYPHS, id="newer"),
     ],
 )
 def test_terminal_glyphs_avoid_unicode_when_ncurses_mangles_wide_rep(
