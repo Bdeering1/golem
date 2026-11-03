@@ -29,7 +29,8 @@ KEY_TIMEOUT_MILLISECONDS = 250
 INTERRUPTED_EXIT_STATUS = 130
 MIN_COLOR_COUNT = 256
 WIDE_REP_FIX_NCURSES_VERSION = (6, 0, 20170729)
-REP_LINE_PREFIX = "\trep="
+REP_LINE_PREFIX = b"\trep="
+TERMINFO_VARIABLE = "TERMINFO"
 TERMINFO_SOURCE_NAME = "terminal.terminfo"
 BOARD_TITLE = "golem board"
 NOT_A_TERMINAL_MESSAGE = "golem: board needs a terminal; use golem list"
@@ -624,29 +625,28 @@ def is_terminal() -> bool:
     return is_tty and os.environ.get("TERM", "") not in {"", "dumb"}
 
 
-def terminfo_source_without_rep() -> str | None:
+def terminfo_source_without_rep() -> bytes | None:
     try:
         result = subprocess.run(
             ["infocmp", "-x", "-1"],
             stdin=subprocess.DEVNULL,
             capture_output=True,
-            encoding="utf-8",
             check=False,
         )
-    except OSError, UnicodeDecodeError:
+    except OSError:
         return None
     if result.returncode != 0:
         return None
     lines = result.stdout.splitlines(keepends=True)
     if not any(line.startswith(REP_LINE_PREFIX) for line in lines):
         return None
-    return "".join(line for line in lines if not line.startswith(REP_LINE_PREFIX))
+    return b"".join(line for line in lines if not line.startswith(REP_LINE_PREFIX))
 
 
-def compile_terminfo(source: str, directory: Path) -> bool:
+def compile_terminfo(source: bytes, directory: Path) -> bool:
     source_path = directory / TERMINFO_SOURCE_NAME
-    source_path.write_text(source)
     try:
+        source_path.write_bytes(source)
         result = subprocess.run(
             ["tic", "-x", "-o", str(directory), str(source_path)],
             stdin=subprocess.DEVNULL,
@@ -671,15 +671,15 @@ def terminfo_without_rep() -> Generator[None]:
         if not compile_terminfo(source, Path(directory)):
             yield
             return
-        previous_terminfo = os.environ.get("TERMINFO")
-        os.environ["TERMINFO"] = directory
+        previous_terminfo = os.environ.get(TERMINFO_VARIABLE)
+        os.environ[TERMINFO_VARIABLE] = directory
         try:
             yield
         finally:
             if previous_terminfo is None:
-                del os.environ["TERMINFO"]
+                del os.environ[TERMINFO_VARIABLE]
             else:
-                os.environ["TERMINFO"] = previous_terminfo
+                os.environ[TERMINFO_VARIABLE] = previous_terminfo
 
 
 def run_board() -> int:
