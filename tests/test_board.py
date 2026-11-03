@@ -1,3 +1,5 @@
+import curses
+import locale
 import os
 import sys
 import time
@@ -221,6 +223,30 @@ def test_board_draws_only_ascii_with_ascii_glyphs():
     lines = frame_lines(running_tasks(), WIDE_WIDTH, HEIGHT, board.BoardState(), board.ASCII_GLYPHS)
 
     assert all(line.isascii() for line in lines)
+
+
+@pytest.mark.parametrize(
+    ("ncurses_version", "rep_capability", "expected_glyphs"),
+    [
+        pytest.param((6, 0, 20150808), b"%p1%c\x1b[%p2%{1}%-%db", board.ASCII_GLYPHS, id="old-rep"),
+        pytest.param((6, 0, 20150808), None, board.UNICODE_GLYPHS, id="old-no-rep"),
+        pytest.param(
+            board.WIDE_REP_FIX_NCURSES_VERSION,
+            b"%p1%c\x1b[%p2%{1}%-%db",
+            board.UNICODE_GLYPHS,
+            id="fixed-rep",
+        ),
+        pytest.param((6, 1, 20180127), b"%p1%c\x1b[%p2%{1}%-%db", board.UNICODE_GLYPHS, id="newer"),
+    ],
+)
+def test_terminal_glyphs_avoid_unicode_when_ncurses_mangles_wide_rep(
+    monkeypatch, ncurses_version, rep_capability, expected_glyphs
+):
+    monkeypatch.setattr(locale, "nl_langinfo", lambda _item: "UTF-8")
+    monkeypatch.setattr(curses, "ncurses_version", ncurses_version)
+    monkeypatch.setattr(curses, "tigetstr", lambda _name: rep_capability)
+
+    assert board.terminal_glyphs() == expected_glyphs
 
 
 @pytest.mark.parametrize(

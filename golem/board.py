@@ -23,6 +23,7 @@ DETAIL_PANE_LINE_COUNT = 5
 KEY_TIMEOUT_MILLISECONDS = 250
 INTERRUPTED_EXIT_STATUS = 130
 MIN_COLOR_COUNT = 256
+WIDE_REP_FIX_NCURSES_VERSION = (6, 0, 20170729)
 BOARD_TITLE = "golem board"
 NOT_A_TERMINAL_MESSAGE = "golem: board needs a terminal; use golem list"
 STYLE_PLAIN = "plain"
@@ -567,9 +568,18 @@ def start_colors() -> bool:
     return True
 
 
+def has_wide_rep_bug() -> bool:
+    # Old ncurses emits runs of a wide char as its low byte plus the terminfo `rep` capability.
+    return (
+        curses.ncurses_version < WIDE_REP_FIX_NCURSES_VERSION and curses.tigetstr("rep") is not None
+    )
+
+
 def terminal_glyphs() -> Glyphs:
     codeset = locale.nl_langinfo(locale.CODESET).lower().replace("-", "")
-    return UNICODE_GLYPHS if codeset == "utf8" else ASCII_GLYPHS
+    if codeset != "utf8" or has_wide_rep_bug():
+        return ASCII_GLYPHS
+    return UNICODE_GLYPHS
 
 
 def ledger_stat(task_ledger_path: Path) -> LedgerStat:
