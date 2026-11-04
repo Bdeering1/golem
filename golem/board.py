@@ -3,14 +3,19 @@ import curses
 import locale
 import os
 import signal
+import subprocess
 import sys
+import tempfile
 import textwrap
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 from golem import display, ledger
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
 
 MIN_COLUMN_WIDTH = 20
 COLUMN_GAP = 2
@@ -24,6 +29,9 @@ KEY_TIMEOUT_MILLISECONDS = 250
 INTERRUPTED_EXIT_STATUS = 130
 MIN_COLOR_COUNT = 256
 WIDE_REP_FIX_NCURSES_VERSION = (6, 0, 20170729)
+REP_LINE_PREFIX = b"\trep="
+TERMINFO_VARIABLE = "TERMINFO"
+TERMINFO_SOURCE_NAME = "terminal.terminfo"
 BOARD_TITLE = "golem board"
 NOT_A_TERMINAL_MESSAGE = "golem: board needs a terminal; use golem list"
 STYLE_PLAIN = "plain"
@@ -568,11 +576,13 @@ def start_colors() -> bool:
     return True
 
 
-def has_wide_rep_bug() -> bool:
+def is_ncurses_mangling_wide_rep() -> bool:
     # Old ncurses emits runs of a wide char as its low byte plus the terminfo `rep` capability.
-    return (
-        curses.ncurses_version < WIDE_REP_FIX_NCURSES_VERSION and curses.tigetstr("rep") is not None
-    )
+    return curses.ncurses_version < WIDE_REP_FIX_NCURSES_VERSION
+
+
+def has_wide_rep_bug() -> bool:
+    return is_ncurses_mangling_wide_rep() and curses.tigetstr("rep") is not None
 
 
 def terminal_glyphs() -> Glyphs:
@@ -617,12 +627,77 @@ def is_terminal() -> bool:
     return is_tty and os.environ.get("TERM", "") not in {"", "dumb"}
 
 
+def terminfo_source_without_rep() -> bytes | None:
+    try:
+        result = subprocess.run(
+            ["infocmp", "-x", "-1"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    lines = result.stdout.splitlines(keepends=True)
+    if not any(line.startswith(REP_LINE_PREFIX) for line in lines):
+        return None
+    return b"".join(line for line in lines if not line.startswith(REP_LINE_PREFIX))
+
+
+def compile_terminfo(source: bytes, directory: Path) -> bool:
+    source_path = directory / TERMINFO_SOURCE_NAME
+    try:
+        source_path.write_bytes(source)
+        result = subprocess.run(
+            ["tic", "-x", "-o", str(directory), str(source_path)],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        return False
+    return result.returncode == 0
+
+
+@contextlib.contextmanager
+def terminfo_without_rep() -> Generator[None]:
+    source = None
+    if is_ncurses_mangling_wide_rep():
+        source = terminfo_source_without_rep()
+    if source is None:
+        yield
+        return
+    with tempfile.TemporaryDirectory() as directory:
+        if not compile_terminfo(source, Path(directory)):
+            yield
+            return
+        previous_terminfo = os.environ.get(TERMINFO_VARIABLE)
+        os.environ[TERMINFO_VARIABLE] = directory
+        try:
+            yield
+        finally:
+            if previous_terminfo is None:
+                del os.environ[TERMINFO_VARIABLE]
+            else:
+                os.environ[TERMINFO_VARIABLE] = previous_terminfo
+
+
+def start_screen() -> curses.window:
+    try:
+        with terminfo_without_rep():
+            return curses.initscr()
+    except curses.error:
+        # A tic newer than this ncurses can write an entry it can't read; use the terminal's own.
+        return curses.initscr()
+
+
 def run_board() -> int:
     if not is_terminal():
         raise SystemExit(NOT_A_TERMINAL_MESSAGE)
     signal.signal(signal.SIGINT, signal.default_int_handler)
     try:
-        screen = curses.initscr()
+        screen = start_screen()
     except curses.error:
         raise SystemExit(NOT_A_TERMINAL_MESSAGE) from None
     try:

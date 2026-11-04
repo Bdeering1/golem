@@ -1,6 +1,7 @@
 import curses
 import locale
 import os
+import subprocess
 import sys
 import time
 from datetime import date, datetime
@@ -23,6 +24,7 @@ PTY_TIMEOUT_SECONDS = 5
 SHOW_CURSOR = b"\x1b[?25h"
 EXIT_ALTERNATE_SCREEN = b"\x1b[?1049l"
 XTERM_REP_CAPABILITY = b"%p1%c\x1b[%p2%{1}%-%db"
+XTERM_REP_TERMINFO_LINE = "\trep=%p1%c\\E[%p2%{1}%-%db,\n"
 REPO_ROOT = Path(__file__).parent.parent
 ARROW_KEYS = ("\x1bOD", "\x1bOC", "\x1bOA", "\x1bOB")
 LETTER_KEYS = ("h", "l", "k", "j")
@@ -267,8 +269,8 @@ def test_board_refuses_to_start_without_a_terminal(monkeypatch, is_stdout_tty, i
 
 
 class PtyBoard:
-    def __init__(self, *, is_color=True):
-        environment = dict(os.environ, TERM="xterm-256color")
+    def __init__(self, *, is_color=True, environment=None):
+        environment = dict(os.environ, TERM="xterm-256color") | (environment or {})
         environment.pop("NO_COLOR", None)
         if not is_color:
             environment["NO_COLOR"] = "1"
@@ -331,9 +333,9 @@ class PtyBoard:
 def pty_board(ledger_path):
     boards = []
 
-    def start(*, is_color=True, tasks=None) -> PtyBoard:
+    def start(*, is_color=True, tasks=None, environment=None) -> PtyBoard:
         support.write_tasks(ledger_path, tasks or statuses_tasks())
-        pty_board = PtyBoard(is_color=is_color)
+        pty_board = PtyBoard(is_color=is_color, environment=environment)
         boards.append(pty_board)
         pty_board.wait_for_text("q quit")
         return pty_board
@@ -404,3 +406,23 @@ def test_board_keeps_the_terminal_background(pty_board, is_color):
     assert any(character.bold for character in characters)
     has_foreground_color = any(character.fg != "default" for character in characters)
     assert has_foreground_color == is_color
+
+
+def test_board_keeps_unicode_rules_when_the_terminal_declares_rep(pty_board, tmp_path):
+    source = subprocess.run(
+        ["/usr/bin/infocmp", "-x", "-1", "xterm-256color"],
+        capture_output=True,
+        check=True,
+        text=True,
+    ).stdout
+    name_line, *capabilities = source.splitlines(keepends=True)[1:]
+    (tmp_path / "xterm-rep.terminfo").write_text(
+        name_line + XTERM_REP_TERMINFO_LINE + "".join(capabilities)
+    )
+    subprocess.run(
+        ["/usr/bin/tic", "-x", "-o", ".", "xterm-rep.terminfo"], cwd=tmp_path, check=True
+    )
+
+    running_board = pty_board(environment={"TERMINFO": str(tmp_path)})
+
+    assert any(line.startswith("──") for line in running_board.screen.display)
