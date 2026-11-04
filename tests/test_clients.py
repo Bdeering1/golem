@@ -89,7 +89,7 @@ def test_pickup_refuses_client_that_cannot_open_task_backend(
         pytest.param(["pickup", support.TASK_ID, "--app"], "use --client", id="removed-app-flag"),
     ],
 )
-def test_pickup_rejects_terminal_client_for_all_and_removed_app_flag(
+def test_pickup_rejects_invalid_client_options(
     fake_commands, ledger_path, capsys, command, message
 ):
     support.write_task(ledger_path, ledger.STATUS_NEEDS_REVIEW)

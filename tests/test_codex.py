@@ -404,8 +404,12 @@ def test_codex_retry_and_reschedule_use_codex_reset_time(
     assert datetime.fromisoformat(support.read_task(ledger_path)["due_at"]) == reset_time
 
 
+@pytest.mark.parametrize(
+    "client_args",
+    [pytest.param([], id="default"), pytest.param(["--client", "codex-cli"], id="codex-cli")],
+)
 def test_codex_pickup_resumes_thread_in_task_worktree(
-    installed_launch_agent, fake_commands, ledger_path, tmp_path
+    installed_launch_agent, fake_commands, ledger_path, tmp_path, client_args
 ):
     worktree = tmp_path / "worktree"
     worktree.mkdir()
@@ -417,7 +421,7 @@ def test_codex_pickup_resumes_thread_in_task_worktree(
         worktree=str(worktree),
     )
 
-    assert cli.main(["pickup", support.TASK_ID, "--client", "codex-cli", "--", "-m", "x"]) == 0
+    assert cli.main(["pickup", support.TASK_ID, *client_args, "--", "-m", "x"]) == 0
     assert logged_codex_args(fake_commands) == [
         "resume",
         "codex-thread",
