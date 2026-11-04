@@ -1,4 +1,3 @@
-import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -16,22 +15,17 @@ def keep_environment(environment: dict[str, str]) -> dict[str, str]:
 
 
 def accept_arguments(_agent_args: list[str]) -> None:
-    return None
+    pass
 
 
 @dataclass(frozen=True)
 class Client:
     name: str
-    backend: str
+    backend_id: str
     is_terminal: bool
     command: Callable[[str, list[str]], list[str]]
     environment: Callable[[dict[str, str]], dict[str, str]] = keep_environment
     validate_arguments: Callable[[list[str]], None] = accept_arguments
-
-
-def validate_codex_cli_arguments(agent_args: list[str]) -> None:
-    codex.reject_unsupported_codex_arguments(agent_args, is_run=False)
-    codex.require_codex_subscription(os.environ.copy())
 
 
 CLIENTS: dict[str, Client] = {
@@ -39,7 +33,7 @@ CLIENTS: dict[str, Client] = {
     for client in (
         Client(
             name="claude-code",
-            backend=ledger.BACKEND_CLAUDE,
+            backend_id=ledger.BACKEND_CLAUDE,
             is_terminal=True,
             command=lambda conversation_id, agent_args: [
                 "claude",
@@ -50,7 +44,7 @@ CLIENTS: dict[str, Client] = {
         ),
         Client(
             name="codex-cli",
-            backend=ledger.BACKEND_CODEX,
+            backend_id=ledger.BACKEND_CODEX,
             is_terminal=True,
             command=lambda conversation_id, agent_args: [
                 "codex",
@@ -60,11 +54,11 @@ CLIENTS: dict[str, Client] = {
                 *codex.CODEX_PROVIDER_ARGUMENTS,
             ],
             environment=codex.codex_environment,
-            validate_arguments=validate_codex_cli_arguments,
+            validate_arguments=codex.validate_resume_arguments,
         ),
         Client(
-            name="claude-desktop",
-            backend=ledger.BACKEND_CLAUDE,
+            name=AUTO_PICKUP_CLIENT,
+            backend_id=ledger.BACKEND_CLAUDE,
             is_terminal=False,
             command=lambda conversation_id, _agent_args: [
                 "open",
@@ -80,12 +74,13 @@ def task_client(task_id: str, task: ledger.Task, client_name: str | None) -> Cli
     task_backend_id = ledger.task_backend(task)
     if client_name is not None:
         client = CLIENTS[client_name]
-        if client.backend != task_backend_id:
+        if client.backend_id != task_backend_id:
             raise SystemExit(
                 f"golem: {client.name} does not support {backend.NAME} tasks: {task_id}"
             )
         return client
-    for client in CLIENTS.values():
-        if client.is_terminal and client.backend == task_backend_id:
-            return client
-    raise SystemExit(f"golem: no terminal client opens {backend.NAME} tasks: {task_id}")
+    return next(
+        client
+        for client in CLIENTS.values()
+        if client.is_terminal and client.backend_id == task_backend_id
+    )

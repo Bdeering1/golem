@@ -560,7 +560,7 @@ def apply_leading_directory_options(golem_args: list[str]) -> list[str]:
 
 def validate_pickup_arguments(parser: argparse.ArgumentParser, arguments: ledger.Arguments) -> None:
     if arguments.app:
-        parser.error("pickup --app was removed; use --client claude-desktop")
+        parser.error(f"pickup --app was removed; use --client {clients.AUTO_PICKUP_CLIENT}")
     client = clients.CLIENTS[arguments.client] if arguments.client else None
     if arguments.agent_args and client is not None and not client.is_terminal:
         parser.error(f"pickup --client {client.name} does not accept agent arguments")
