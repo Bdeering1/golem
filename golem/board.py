@@ -683,13 +683,21 @@ def terminfo_without_rep() -> Generator[None]:
                 os.environ[TERMINFO_VARIABLE] = previous_terminfo
 
 
+def start_screen() -> curses.window:
+    try:
+        with terminfo_without_rep():
+            return curses.initscr()
+    except curses.error:
+        # A tic newer than this ncurses can write an entry it can't read; use the terminal's own.
+        return curses.initscr()
+
+
 def run_board() -> int:
     if not is_terminal():
         raise SystemExit(NOT_A_TERMINAL_MESSAGE)
     signal.signal(signal.SIGINT, signal.default_int_handler)
     try:
-        with terminfo_without_rep():
-            screen = curses.initscr()
+        screen = start_screen()
     except curses.error:
         raise SystemExit(NOT_A_TERMINAL_MESSAGE) from None
     try:
