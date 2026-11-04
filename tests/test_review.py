@@ -84,7 +84,6 @@ def test_pickup_app_rejects_agent_arguments(fake_commands, ledger_path):
 @pytest.mark.parametrize(
     "command",
     [
-        pytest.param(["pickup", "--all"], id="all-needs-app"),
         pytest.param(
             ["pickup", support.TASK_ID, "--all", "--client", "claude-desktop"], id="all-rejects-id"
         ),

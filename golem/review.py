@@ -108,7 +108,7 @@ def auto_pickup_task(task_id: str) -> None:
         print(error, file=sys.stderr)
         return
     if returncode != 0:
-        print(f"golem: could not open {task_id} in the desktop app", file=sys.stderr)
+        print(f"golem: could not open {task_id} in {clients.AUTO_PICKUP_CLIENT}", file=sys.stderr)
 
 
 def close(task_id: str) -> int:

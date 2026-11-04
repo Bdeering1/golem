@@ -77,6 +77,7 @@ def test_pickup_refuses_client_that_cannot_open_task_backend(
     assert support.read_task(ledger_path)["status"] == ledger.STATUS_NEEDS_REVIEW
     assert fake_commands["open-args"].read_text(encoding="utf-8") == ""
     assert support.logged_claude_calls(fake_commands) == []
+    assert fake_commands["codex-args"].read_text(encoding="utf-8") == ""
 
 
 @pytest.mark.parametrize(
