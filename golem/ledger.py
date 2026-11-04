@@ -107,6 +107,7 @@ class Arguments(argparse.Namespace):
     at: str | None
     all: bool
     app: bool
+    client: str | None
     yes: bool
     off: bool
     action: str

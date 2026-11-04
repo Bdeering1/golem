@@ -404,7 +404,7 @@ def test_codex_retry_and_reschedule_use_codex_reset_time(
     assert datetime.fromisoformat(support.read_task(ledger_path)["due_at"]) == reset_time
 
 
-def test_codex_pickup_resumes_thread_in_task_worktree_and_rejects_app(
+def test_codex_pickup_resumes_thread_in_task_worktree(
     installed_launch_agent, fake_commands, ledger_path, tmp_path
 ):
     worktree = tmp_path / "worktree"
@@ -417,7 +417,7 @@ def test_codex_pickup_resumes_thread_in_task_worktree_and_rejects_app(
         worktree=str(worktree),
     )
 
-    assert cli.main(["pickup", support.TASK_ID, "--", "-m", "x"]) == 0
+    assert cli.main(["pickup", support.TASK_ID, "--client", "codex-cli", "--", "-m", "x"]) == 0
     assert logged_codex_args(fake_commands) == [
         "resume",
         "codex-thread",
@@ -429,9 +429,6 @@ def test_codex_pickup_resumes_thread_in_task_worktree_and_rejects_app(
     assert fake_commands["codex-cwd"].read_text(encoding="utf-8").splitlines()[-1] == str(worktree)
     support.write_task(ledger_path, ledger.STATUS_NEEDS_REVIEW, backend=ledger.BACKEND_CODEX)
 
-    with pytest.raises(SystemExit, match="does not support Codex"):
-        cli.main(["pickup", support.TASK_ID, "--app"])
-    assert support.read_task(ledger_path)["status"] == ledger.STATUS_NEEDS_REVIEW
     with pytest.raises(SystemExit, match="--oss"):
         cli.main(["pickup", support.TASK_ID, "--", "--oss"])
 

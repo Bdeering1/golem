@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 
 from golem import (
     board,
+    clients,
     delete,
     display,
     executor,
@@ -360,17 +361,20 @@ def add_pickup_command(add_parser: Callable[..., argparse.ArgumentParser]) -> No
         "--all", action="store_true", help="open every task that needs review"
     )
     pickup_command.add_argument(
-        "--app",
-        action="store_true",
-        help="open the session in the Claude desktop app, in the app's default permission mode",
+        "--client",
+        choices=tuple(clients.CLIENTS),
+        help="open the task in this client; app clients use the app's default permission mode",
     )
+    pickup_command.add_argument("--app", action="store_true", help=argparse.SUPPRESS)
     set_command_handler(
         pickup_command,
         lambda arguments: (
-            review.pickup_all()
+            review.pickup_all(cast("str", arguments.client))
             if arguments.all
             else review.pickup(
-                task_id_from_arguments(arguments), *arguments.agent_args, is_app=arguments.app
+                task_id_from_arguments(arguments),
+                *arguments.agent_args,
+                client_name=arguments.client,
             )
         ),
     )
@@ -554,6 +558,20 @@ def apply_leading_directory_options(golem_args: list[str]) -> list[str]:
     return golem_args
 
 
+def validate_pickup_arguments(parser: argparse.ArgumentParser, arguments: ledger.Arguments) -> None:
+    if arguments.app:
+        parser.error("pickup --app was removed; use --client claude-desktop")
+    client = clients.CLIENTS.get(arguments.client or "")
+    if arguments.agent_args and client is not None and not client.is_terminal:
+        parser.error(f"pickup --client {client.name} does not accept agent arguments")
+    if arguments.all and (client is None or client.is_terminal):
+        parser.error("pickup --all requires an app client")
+    if arguments.all and arguments.id is not None:
+        parser.error("pickup --all does not accept an ID")
+    if arguments.id is None and not arguments.all:
+        parser.error("pickup requires an ID or --all")
+
+
 def main(argv: list[str] | None = None) -> int:
     cast("io.TextIOWrapper", sys.stdout).reconfigure(encoding="utf-8")
     golem_args = sys.argv[1:] if argv is None else argv
@@ -582,13 +600,6 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("retry does not accept agent arguments")
     if agent_args and arguments.command == "reschedule":
         parser.error("reschedule does not accept agent arguments")
-    if agent_args and arguments.command == "pickup" and arguments.app:
-        parser.error("pickup --app does not accept agent arguments")
     if arguments.command == "pickup":
-        if arguments.all and not arguments.app:
-            parser.error("pickup --all requires --app")
-        if arguments.all and arguments.id is not None:
-            parser.error("pickup --all does not accept an ID")
-        if arguments.id is None and not arguments.all:
-            parser.error("pickup requires an ID or --all")
+        validate_pickup_arguments(parser, arguments)
     return arguments.handler(arguments)
