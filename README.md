@@ -2,15 +2,14 @@
 
 golem is an orchestrator for coding agents.
 
-Queue tasks, chain them together and schedule them around your usage limits. golem runs the agents in the background, each in its own git worktree, and notifies you when something needs review. Setup scripts, gates and aliases let you build your own workflows on top.
+Queue agent sessions, chain them together and schedule them around your usage limits. golem runs them in the background, each in its own git worktree, and notifies you when one needs review. Setup scripts, gates and aliases let you build your own workflows on top.
 
 ## Install
 
-Requires macOS and:
+golem runs on macOS and needs:
 
 - [uv](https://docs.astral.sh/uv/getting-started/installation/)
-- git
-- [Claude Code](https://code.claude.com/docs/en/setup) or [Codex](https://developers.openai.com/codex), logged in
+- [Claude Code](https://code.claude.com/docs/en/setup) or [Codex](https://developers.openai.com/codex)
 - [gh](https://cli.github.com/), optional, for PR status
 
 ```bash
@@ -20,7 +19,7 @@ golem agent install
 
 ## Quick start
 
-Tasks run unattended, so golem turns off permission prompts unless you [set your own](#more-examples).
+golem calls each queued session a task. Tasks run unattended, so golem turns off permission prompts unless you [set your own](#more-examples).
 
 ```bash
 # Queue a task. --now skips the wait for your next usage reset
@@ -36,22 +35,17 @@ golem pickup fix-login
 ## More examples
 
 ```bash
-# Start at your next usage reset
-golem run add-tests "Add tests for the login redirect"
+# Run in Codex at 9pm
+golem run fix-signup "Fix the signup redirect" --backend codex --at 9pm
 
-# Start at 9pm in Codex
-golem run fix-signup "Fix the signup redirect" --at 9pm --backend codex
-
-# Review the work only if the tests pass
+# The script prints {"directory": "<path>"} for the task to run in
+# The review runs if the tests pass. Arguments after -- go to the agent
 golem run add-auth "Add password reset" \
+  --no-worktree \
+  --setup ./create-worktree.sh \
   --gate "make test" \
-  --then review-auth "Review the password reset changes and fix what you find"
-
-# Pass arguments to the agent after --
-golem run fix-logout "Fix the logout redirect" -- --model opus
-
-# Replace the default permissions. In Claude Code, this denies any tool not on the list
-golem run fix-typos "Fix the typos in the docs" -- --permission-mode dontAsk --allowedTools "Read Glob Grep Edit"
+  --then review-auth "Review the password reset changes and fix what you find" \
+  -- --permission-mode auto
 ```
 
 ## Commands
