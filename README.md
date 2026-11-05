@@ -37,7 +37,9 @@ Run `golem agent install` once before your first task. It sets up the background
 
 ## Quick start
 
-Run these commands inside a git repository. To run a task in the current directory with no worktree, or outside a repository, add `--no-worktree` to `golem run`.
+Run these commands inside a git repository. Tasks run without permission prompts. [Permissions](#permissions) shows how to change that.
+
+Outside a repository, or in one with no commits, a task runs in the current directory. Add `--no-worktree` to `golem run` to do the same inside a repository.
 
 ### 1. Queue a task
 
@@ -83,10 +85,10 @@ tonight = "run {1} {2} --at 9pm -- --model opus"
 NODE_ENV = "development"
 ```
 
-`[aliases]` maps a name to a golem command line. golem replaces `{1}`, `{2}` and so on with the alias's arguments. With the alias above, this queues `fix-login` for 9pm:
+`[aliases]` maps a name to a golem command line. golem replaces `{1}`, `{2}` and so on with the alias's arguments. With the alias above, this queues `fix-signup` for 9pm:
 
 ```bash
-golem tonight fix-login "Fix the login redirect"
+golem tonight fix-signup "Fix the signup redirect"
 ```
 
 An alias can't call another alias. If an alias has the same name as a built-in command, golem runs the built-in command. `golem alias list` prints your aliases.
