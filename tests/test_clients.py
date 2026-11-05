@@ -146,6 +146,30 @@ def test_follow_up_after_auto_pickup_parent_uses_its_backends_default(
     assert support.read_task(ledger_path, support.CHILD_ID)["auto_pickup_client"] == STUB_APP_CLIENT
 
 
+def test_then_follow_up_of_auto_pickup_run_uses_saved_default(
+    installed_launch_agent, ledger_path, stub_clients
+):
+    support.write_config_table("default_clients", {ledger.BACKEND_CLAUDE: STUB_APP_CLIENT})
+
+    assert (
+        cli.main(
+            [
+                "run",
+                support.PARENT_ID,
+                support.PARENT_PROMPT,
+                "--now",
+                "--auto-pickup",
+                "--then",
+                support.CHILD_ID,
+                support.CHILD_PROMPT,
+            ]
+        )
+        == 0
+    )
+
+    assert support.read_task(ledger_path, support.CHILD_ID)["auto_pickup_client"] == STUB_APP_CLIENT
+
+
 def test_legacy_auto_pickup_task_opens_in_claude_desktop(fake_commands, ledger_path):
     support.write_task(ledger_path, ledger.STATUS_NEEDS_REVIEW, auto_pickup=True)
 
