@@ -10,7 +10,7 @@ golem runs on macOS and needs:
 
 - [uv](https://docs.astral.sh/uv/getting-started/installation/)
 - [Claude Code](https://code.claude.com/docs/en/setup) or [Codex](https://developers.openai.com/codex)
-- [gh](https://cli.github.com/) (optional - for PR status)
+- [gh](https://cli.github.com/) (optional, for PR status)
 
 ```bash
 uv tool install git+https://github.com/Bdeering1/golem
