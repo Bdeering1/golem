@@ -10,7 +10,7 @@ golem runs on macOS and needs:
 
 - [uv](https://docs.astral.sh/uv/getting-started/installation/)
 - [Claude Code](https://code.claude.com/docs/en/setup) or [Codex](https://developers.openai.com/codex)
-- [gh](https://cli.github.com/), optional, for PR status
+- [gh](https://cli.github.com/) (optional - for PR status)
 
 ```bash
 uv tool install git+https://github.com/Bdeering1/golem
@@ -19,13 +19,13 @@ golem agent install
 
 ## Quick start
 
-golem calls each queued session a task. Tasks run unattended, so golem turns off permission prompts unless you [set your own](#more-examples).
+golem calls each queued session a task. Tasks run unattended, so golem turns off permission prompts unless you pass your own permission flag.
 
 ```bash
 # Queue a task. --now skips the wait for your next usage reset
 golem run fix-login "Fix the login redirect" --now
 
-# Follow it on a live board. Press q to quit
+# Follow tasks on a live TUI board. Press q to quit
 golem board
 
 # Open its session to review the result
@@ -68,7 +68,7 @@ golem reads `~/.config/golem/config.toml`, or the same path under `$XDG_CONFIG_H
 
 ```toml
 [aliases]
-# golem review 86
+# eg. golem review 86
 review = 'run review-{1} "Review PR {1} and fix what you find" --now'
 
 [env]
