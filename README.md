@@ -1,8 +1,8 @@
 # golem
 
-golem is a command line orchestrator for coding agents.
+golem is an orchestrator for coding agents.
 
-Queue work, chain tasks into pipelines and schedule them around your usage limits. golem runs the agents in the background, each in its own git worktree, and notifies you when something needs review.
+Queue tasks, chain them together and schedule them around your usage limits. golem runs the agents in the background, each in its own git worktree, and notifies you when something needs review. Setup scripts, gates and aliases let you build your own workflows on top.
 
 ## Install
 
