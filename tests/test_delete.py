@@ -496,7 +496,7 @@ def test_delete_retains_worktree_in_use(
     monkeypatch.setenv("GOLEM_CLAUDE_HOLD", str(hold_path))
     monkeypatch.setenv("GOLEM_CLAUDE_STARTED", str(started_path))
     pickup_process = multiprocessing.get_context("fork").Process(
-        target=review.pickup, args=(pickup_id,), kwargs={"is_app": False}
+        target=review.pickup, args=(pickup_id,)
     )
     pickup_process.start()
     try:

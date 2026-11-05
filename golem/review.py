@@ -1,16 +1,13 @@
 import os
 import subprocess
 import sys
-from typing import cast
 
-from golem import chains, ledger, locks, task_directories
-from golem.backends import codex
+from golem import chains, clients, ledger, locks, task_directories
+from golem.backends import registry
 
 
-def open_app_session_and_mark_done(task_id: str, session_id: str) -> int:
-    returncode = subprocess.run(
-        ["open", f"claude://resume?session={session_id}"], check=False
-    ).returncode
+def open_app_and_mark_done(task_id: str, command: list[str]) -> int:
+    returncode = subprocess.run(command, check=False).returncode
     if returncode != 0:
         return returncode
     with ledger.locked_tasks() as tasks:
@@ -20,16 +17,14 @@ def open_app_session_and_mark_done(task_id: str, session_id: str) -> int:
     return 0
 
 
-def pickup(task_id: str, *agent_args: str, is_app: bool, is_review_required: bool = False) -> int:
+def pickup(
+    task_id: str, *agent_args: str, client_name: str | None = None, is_review_required: bool = False
+) -> int:
     preflight_task = ledger.load_tasks().get(task_id)
-    is_codex = (
-        preflight_task is not None and ledger.task_backend(preflight_task) == ledger.BACKEND_CODEX
-    )
-    if is_codex and is_app:
-        raise SystemExit(f"golem: pickup --app does not support Codex tasks: {task_id}")
-    if is_codex:
-        codex.reject_unsupported_codex_arguments(list(agent_args), is_run=False)
-        codex.require_codex_subscription(os.environ.copy())
+    if preflight_task is None:
+        raise SystemExit(f"golem: task not found: {task_id}")
+    client = clients.task_client(task_id, preflight_task, client_name)
+    client.validate_arguments(list(agent_args))
     with ledger.locked_ledger() as (tasks, worktrees):
         if task_id not in tasks:
             raise SystemExit(f"golem: task not found: {task_id}")
@@ -47,36 +42,23 @@ def pickup(task_id: str, *agent_args: str, is_app: bool, is_review_required: boo
             )
         if directory_lock_file is None:
             raise SystemExit(f"golem: directory is busy: {directory}")
-        thread_id = task.get("thread_id")
-        if is_codex and not isinstance(thread_id, str):
+        backend = registry.task_backend(task)
+        conversation_id = backend.conversation_id(task)
+        if conversation_id is None:
             locks.release_lock(directory_lock_file)
-            raise SystemExit(f"golem: task has no Codex conversation: {task_id}")
+            raise SystemExit(f"golem: task has no {backend.NAME} conversation: {task_id}")
         task_directories.clear_worktree_release(tasks, worktrees, task)
-        if not is_app:
+        if client.is_terminal:
             chains.mark_task_done(tasks, task)
         cwd = ledger.task_directory(task)
-        session_id = task["session_id"]
-    if is_app:
+    if not client.is_terminal:
         locks.release_lock(directory_lock_file)
-        return open_app_session_and_mark_done(task_id, session_id)
+        return open_app_and_mark_done(task_id, client.command(conversation_id, []))
     try:
-        if is_codex:
-            return subprocess.run(
-                [
-                    "codex",
-                    "resume",
-                    cast("str", thread_id),
-                    *agent_args,
-                    *codex.CODEX_PROVIDER_ARGUMENTS,
-                ],
-                cwd=cwd,
-                env=codex.codex_environment(os.environ.copy()),
-                pass_fds=(directory_lock_file.fileno(),),
-                check=False,
-            ).returncode
         return subprocess.run(
-            ["claude", "--resume", session_id, *agent_args],
+            client.command(conversation_id, list(agent_args)),
             cwd=cwd,
+            env=client.environment(os.environ.copy()),
             pass_fds=(directory_lock_file.fileno(),),
             check=False,
         ).returncode
@@ -91,7 +73,7 @@ def is_ready_for_review(tasks: ledger.Tasks, task_id: str) -> bool:
     )
 
 
-def pickup_all() -> int:
+def pickup_all(client_name: str) -> int:
     tasks = ledger.load_tasks()
     task_ids = [task_id for task_id in tasks if is_ready_for_review(tasks, task_id)]
     if not task_ids:
@@ -101,7 +83,7 @@ def pickup_all() -> int:
     has_failure = False
     for task_id in task_ids:
         try:
-            has_failure |= pickup(task_id, is_app=True, is_review_required=True) != 0
+            has_failure |= pickup(task_id, client_name=client_name, is_review_required=True) != 0
         except SystemExit as error:
             print(error, file=sys.stderr)
             has_failure = True
@@ -119,12 +101,14 @@ def auto_pickup_task(task_id: str) -> None:
     if not task.get("auto_pickup") or not is_ready_for_review(tasks, task_id):
         return
     try:
-        returncode = pickup(task_id, is_app=True, is_review_required=True)
+        returncode = pickup(
+            task_id, client_name=clients.AUTO_PICKUP_CLIENT, is_review_required=True
+        )
     except SystemExit as error:
         print(error, file=sys.stderr)
         return
     if returncode != 0:
-        print(f"golem: could not open {task_id} in the desktop app", file=sys.stderr)
+        print(f"golem: could not open {task_id} in {clients.AUTO_PICKUP_CLIENT}", file=sys.stderr)
 
 
 def close(task_id: str) -> int:

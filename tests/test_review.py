@@ -9,7 +9,8 @@ from tests import support
     "command",
     [
         pytest.param(["pickup"], id="pickup"),
-        pytest.param(["pickup", "--app"], id="pickup-app"),
+        pytest.param(["pickup", "--client", "claude-code"], id="pickup-claude-code"),
+        pytest.param(["pickup", "--client", "claude-desktop"], id="pickup-app"),
         pytest.param(["close"], id="close"),
     ],
 )
@@ -26,7 +27,8 @@ def test_review_commands_complete_review_task(installed_launch_agent, ledger_pat
     "status", [ledger.STATUS_SCHEDULED, ledger.STATUS_WAITING, ledger.STATUS_CANCELLED]
 )
 @pytest.mark.parametrize(
-    "pickup_args", [pytest.param([], id="terminal"), pytest.param(["--app"], id="app")]
+    "pickup_args",
+    [pytest.param([], id="terminal"), pytest.param(["--client", "claude-desktop"], id="app")],
 )
 def test_pickup_refuses_tasks_that_never_started(ledger_path, status, pickup_args):
     support.write_task(ledger_path, status)
@@ -38,7 +40,7 @@ def test_pickup_refuses_tasks_that_never_started(ledger_path, status, pickup_arg
 def test_pickup_app_opens_task_session_in_desktop_app(fake_commands, ledger_path):
     support.write_task(ledger_path, ledger.STATUS_NEEDS_REVIEW)
 
-    assert cli.main(["pickup", support.TASK_ID, "--app"]) == 0
+    assert cli.main(["pickup", support.TASK_ID, "--client", "claude-desktop"]) == 0
     assert (
         fake_commands["open-args"].read_text(encoding="utf-8")
         == f"claude://resume?session={support.read_task(ledger_path)['session_id']}\n"
@@ -49,8 +51,8 @@ def test_pickup_app_opens_task_session_in_desktop_app(fake_commands, ledger_path
 @pytest.mark.parametrize(
     "command",
     [
-        pytest.param(["pickup", support.TASK_ID, "--app"], id="one"),
-        pytest.param(["pickup", "--all", "--app"], id="all"),
+        pytest.param(["pickup", support.TASK_ID, "--client", "claude-desktop"], id="one"),
+        pytest.param(["pickup", "--all", "--client", "claude-desktop"], id="all"),
     ],
 )
 def test_failed_app_pickup_leaves_task_needing_review(
@@ -70,7 +72,9 @@ def test_pickup_app_rejects_agent_arguments(fake_commands, ledger_path):
     support.write_task(ledger_path, ledger.STATUS_NEEDS_REVIEW)
 
     with pytest.raises(SystemExit) as exit_info:
-        cli.main(["pickup", support.TASK_ID, "--app", "--", *support.AGENT_ARGS])
+        cli.main(
+            ["pickup", support.TASK_ID, "--client", "claude-desktop", "--", *support.AGENT_ARGS]
+        )
 
     assert exit_info.value.code == 2
     assert support.read_task(ledger_path)["status"] == ledger.STATUS_NEEDS_REVIEW
@@ -80,9 +84,10 @@ def test_pickup_app_rejects_agent_arguments(fake_commands, ledger_path):
 @pytest.mark.parametrize(
     "command",
     [
-        pytest.param(["pickup", "--all"], id="all-needs-app"),
-        pytest.param(["pickup", support.TASK_ID, "--all", "--app"], id="all-rejects-id"),
-        pytest.param(["pickup", "--app"], id="needs-id-or-all"),
+        pytest.param(
+            ["pickup", support.TASK_ID, "--all", "--client", "claude-desktop"], id="all-rejects-id"
+        ),
+        pytest.param(["pickup", "--client", "claude-desktop"], id="needs-id-or-all"),
         pytest.param(
             ["reschedule", support.TASK_ID, "--now", "--", *support.AGENT_ARGS],
             id="reschedule-agent-args",
@@ -112,7 +117,7 @@ def test_pickup_marks_ancestors_that_need_review_done(fake_commands, ledger_path
         },
     )
 
-    assert cli.main(["pickup", support.GRANDCHILD_ID, "--app"]) == 0
+    assert cli.main(["pickup", support.GRANDCHILD_ID, "--client", "claude-desktop"]) == 0
     assert {task["status"] for task in support.read_tasks(ledger_path).values()} == {
         ledger.STATUS_DONE
     }
@@ -151,7 +156,7 @@ def test_pickup_all_opens_only_latest_reviewable_task_in_chain(
     }
     support.write_tasks(ledger_path, tasks)
 
-    assert cli.main(["pickup", "--all", "--app"]) == 0
+    assert cli.main(["pickup", "--all", "--client", "claude-desktop"]) == 0
     assert fake_commands["open-args"].read_text(encoding="utf-8").splitlines() == [
         f"claude://resume?session={tasks[task_id]['session_id']}" for task_id in opened_ids
     ]
@@ -175,7 +180,7 @@ def test_pickup_all_continues_after_busy_directory(fake_commands, ledger_path, c
     assert directory_lock_file is not None
 
     try:
-        assert cli.main(["pickup", "--all", "--app"]) == 1
+        assert cli.main(["pickup", "--all", "--client", "claude-desktop"]) == 1
     finally:
         locks.release_lock(directory_lock_file)
 

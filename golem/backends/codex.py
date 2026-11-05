@@ -321,6 +321,11 @@ def validate_run_arguments(agent_args: list[str]) -> None:
     require_codex_subscription(os.environ.copy())
 
 
+def validate_resume_arguments(agent_args: list[str]) -> None:
+    reject_unsupported_codex_arguments(agent_args, is_run=False)
+    require_codex_subscription(os.environ.copy())
+
+
 def conversation_id(task: ledger.Task) -> str | None:
     thread_id = task.get("thread_id")
     return thread_id if isinstance(thread_id, str) else None
