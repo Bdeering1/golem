@@ -12,7 +12,7 @@ Each task runs in the background in its own git worktree, so you can queue sever
 | `golem watch <id>` | Streams a task's progress until it stops |
 | `golem show <id>` | Prints a task's final result |
 | `golem pickup <id>` | Opens the task's session and marks the task done |
-| `golem prune` | Deletes cancelled tasks without asking. Asks before it deletes done tasks that have only merged or closed PRs, a missing directory, or a session idle for 7 days |
+| `golem prune` | Deletes cancelled tasks without asking. Asks before it deletes a done task if all its PRs are merged or closed, its directory is missing, or its session has been idle for 7 days |
 
 `golem --help` lists the other commands. `golem <command> --help` lists a command's flags.
 
@@ -47,12 +47,6 @@ golem run fix-login "Fix the login redirect" --now
 
 `--now` starts the task right away. Without it, the task starts at the next usage reset, or right away if no usage window is active. `--at 9pm` or `--at "8:30am tomorrow"` picks a time. `--backend codex` runs the task in Codex.
 
-Tasks run without permission prompts. golem passes `--dangerously-skip-permissions` to Claude and `--dangerously-bypass-approvals-and-sandbox` to Codex. Arguments after `--` go to Claude or Codex. A permission flag there replaces golem's default.
-
-```bash
-golem run add-tests "Add tests for the login redirect" -- --permission-mode acceptEdits --model opus
-```
-
 ### 2. Follow it
 
 ```bash
@@ -67,7 +61,15 @@ If this prints `task has not started`, wait a few seconds and run it again. `gol
 golem pickup fix-login
 ```
 
-This opens the session in the worktree and marks the task done. `--client claude-desktop` opens a Claude task in the Claude desktop app. Pass `--auto-pickup` to `golem run` to do that as soon as the task succeeds.
+This opens the session in the worktree and marks the task done. `--client claude-desktop` opens a Claude task in the Claude desktop app. Pass `--auto-pickup` to `golem run` to open it in the Claude desktop app as soon as the task succeeds.
+
+## Permissions
+
+Tasks run without permission prompts. golem passes `--dangerously-skip-permissions` to Claude and `--dangerously-bypass-approvals-and-sandbox` to Codex. Arguments after `--` go to Claude or Codex. A permission flag there replaces golem's default.
+
+```bash
+golem run add-tests "Add tests for the login redirect" -- --permission-mode acceptEdits --model opus
+```
 
 ## Config
 
