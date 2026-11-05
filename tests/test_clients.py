@@ -202,12 +202,18 @@ def test_pickup_all_client_skips_default_clients(fake_commands, ledger_path, stu
 
 
 def test_pickup_all_fails_task_whose_backend_has_no_default(fake_commands, ledger_path, capsys):
-    support.write_task(ledger_path, ledger.STATUS_NEEDS_REVIEW, backend=ledger.BACKEND_CODEX)
+    status = ledger.STATUS_NEEDS_REVIEW
+    codex_task = support.task_record(status, backend=ledger.BACKEND_CODEX)
+    claude_task = support.task_record(status, task_id=support.CHILD_ID)
+    support.write_tasks(ledger_path, {support.TASK_ID: codex_task, support.CHILD_ID: claude_task})
 
     assert cli.main(["pickup", "--all"]) == 1
 
     assert f"no default app client for Codex tasks: {support.TASK_ID}" in capsys.readouterr().err
     assert support.read_task(ledger_path)["status"] == ledger.STATUS_NEEDS_REVIEW
+    assert fake_commands["open-args"].read_text(encoding="utf-8") == (
+        f"claude://resume?session={claude_task['session_id']}\n"
+    )
 
 
 def test_pickup_by_id_ignores_default_clients(fake_commands, ledger_path, stub_clients):
