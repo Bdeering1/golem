@@ -19,7 +19,6 @@ class RunPlacement:
     gate: str | None = None
     setup: str | None = None
     environment: dict[str, str] = field(default_factory=dict)
-    default_clients: dict[str, str] = field(default_factory=dict)
 
 
 def new_task_record(
@@ -249,6 +248,8 @@ def schedule_run_task(
     task_args: tuple[str, ...],
     follow_up_records: ledger.Tasks,
     placement: RunPlacement,
+    *,
+    default_clients: dict[str, str],
 ) -> int:
     after = arguments.after if isinstance(arguments.after, str) else None
     if after is not None:
@@ -256,7 +257,7 @@ def schedule_run_task(
             placement, prompt_text, task_args, None, arguments.backend, after=after
         )
         if reserve_dependent_task(
-            {task_id: dependent_record, **follow_up_records}, after, placement.default_clients
+            {task_id: dependent_record, **follow_up_records}, after, default_clients
         ):
             claude_hooks.sync_hooks(
                 ledger.task_directory(ledger.existing_task(ledger.load_tasks(), after))

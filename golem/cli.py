@@ -181,7 +181,6 @@ def run_task_from_arguments(arguments: ledger.Arguments) -> int:
         str(Path.cwd()),
         environment=task_environment(arguments.env),
         auto_pickup_client=auto_pickup_client,
-        default_clients=default_clients,
         is_no_worktree=arguments.no_worktree,
         gate=arguments.gate,
         setup=arguments.setup,
@@ -207,7 +206,13 @@ def run_task_from_arguments(arguments: ledger.Arguments) -> int:
     )
     backend.validate_run_arguments(list(task_args))
     exit_code = scheduling.schedule_run_task(
-        arguments, task_id, prompt_text, task_args, follow_up_records, placement
+        arguments,
+        task_id,
+        prompt_text,
+        task_args,
+        follow_up_records,
+        placement,
+        default_clients=default_clients,
     )
     for task_id, record in follow_up_records.items():
         print(f"golem: {task_id} will run after {record.get('after')}")
