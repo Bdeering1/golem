@@ -133,17 +133,16 @@ def test_auto_pickup_opens_in_client_saved_when_queued(
 def test_follow_up_after_auto_pickup_parent_uses_its_backends_default(
     installed_launch_agent, ledger_path, stub_clients
 ):
+    assert (
+        cli.main(["run", support.PARENT_ID, support.PARENT_PROMPT, "--now", "--auto-pickup"]) == 0
+    )
     support.write_config_table("default_clients", {ledger.BACKEND_CLAUDE: STUB_APP_CLIENT})
-    cli.main(["run", support.PARENT_ID, support.PARENT_PROMPT, "--now", "--auto-pickup"])
-    support.write_config_table("default_clients", {ledger.BACKEND_CLAUDE: "claude-desktop"})
 
     assert (
         cli.main(["run", support.CHILD_ID, support.CHILD_PROMPT, "--after", support.PARENT_ID]) == 0
     )
 
-    assert (
-        support.read_task(ledger_path, support.CHILD_ID)["auto_pickup_client"] == "claude-desktop"
-    )
+    assert support.read_task(ledger_path, support.CHILD_ID)["auto_pickup_client"] == STUB_APP_CLIENT
 
 
 def test_then_follow_up_of_auto_pickup_run_uses_saved_default(
@@ -180,7 +179,7 @@ def test_legacy_auto_pickup_task_opens_in_claude_desktop(fake_commands, ledger_p
     )
 
 
-def test_pickup_all_client_skips_default_clients(fake_commands, ledger_path, stub_clients):
+def test_pickup_all_client_skips_default_clients(fake_commands, ledger_path):
     support.write_config_table("default_clients", {ledger.BACKEND_CLAUDE: "no-such-client"})
     support.write_task(ledger_path, ledger.STATUS_NEEDS_REVIEW)
 
