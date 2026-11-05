@@ -38,7 +38,7 @@ golem pickup fix-login
 # Run in Codex at 9pm
 golem run fix-signup "Fix the signup redirect" --backend codex --at 9pm
 
-# The script prints {"directory": "<path>"} for the task to run in
+# The script must print {"directory": "<path>"} for the task to run in
 # The review runs if the tests pass. Arguments after -- go to the agent
 golem run add-auth "Add password reset" \
   --no-worktree \
