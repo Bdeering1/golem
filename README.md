@@ -1,104 +1,90 @@
 # golem
 
-golem queues Claude Code and Codex tasks to run at your next usage reset, then notifies you when each one is ready to review.
+golem is a command line orchestrator for coding agents.
 
-Each task runs in the background in its own git worktree, so you can queue several for one repository and keep working in your checkout. A task that hits the usage limit resumes after the reset. When a task finishes, `golem pickup` opens its session in Claude Code or Codex, in that worktree.
-
-| Command | What it does |
-| --- | --- |
-| `golem run <id> "<prompt>"` | Queues a task. `--file prompt.md` takes the prompt from a file in place of `"<prompt>"` |
-| `golem board` | Shows your tasks on a live full-screen board. Press `q` to quit |
-| `golem list` | Prints your tasks. `--all` adds done tasks whose PRs are merged or closed |
-| `golem watch <id>` | Streams a task's progress until it stops |
-| `golem show <id>` | Prints a task's final result |
-| `golem pickup <id>` | Opens the task's session and marks the task done |
-| `golem prune` | Deletes cancelled tasks without asking. Asks before it deletes a done task if all its PRs are merged or closed, its directory is missing, or its session has been idle for 7 days |
-
-`golem --help` lists the other commands. `golem <command> --help` lists a command's flags.
+Queue work, chain tasks into pipelines and schedule them around your usage limits. golem runs the agents in the background, each in its own git worktree, and notifies you when something needs review.
 
 ## Install
 
-golem's background agent runs under launchd, so golem needs macOS.
+Requires macOS and:
 
-Dependencies:
-
-- [uv](https://docs.astral.sh/uv/getting-started/installation/), to install golem. uv fetches the Python version golem needs.
-- git.
-- [Claude Code](https://code.claude.com/docs/en/setup), logged in.
-- Or [Codex](https://developers.openai.com/codex), logged in to a ChatGPT account. golem rejects API key accounts.
-- [gh](https://cli.github.com/), optional. It adds PR state to `golem list` and `golem prune`.
+- [uv](https://docs.astral.sh/uv/getting-started/installation/)
+- git
+- [Claude Code](https://code.claude.com/docs/en/setup) or [Codex](https://developers.openai.com/codex), logged in
+- [gh](https://cli.github.com/), optional, for PR status
 
 ```bash
 uv tool install git+https://github.com/Bdeering1/golem
 golem agent install
 ```
 
-Run `golem agent install` once before your first task. It sets up the background agent, which then starts at every login. `golem run` refuses to queue a task until you do this, and asks you to run it again when the agent is out of date.
-
 ## Quick start
 
-Run these commands inside a git repository. Tasks run without permission prompts. [Permissions](#permissions) shows how to change that.
-
-Outside a repository, or in one with no commits, a task runs in the current directory. Add `--no-worktree` to `golem run` to do the same inside a repository.
-
-### 1. Queue a task
+Tasks run unattended, so golem turns off permission prompts unless you [set your own](#more-examples).
 
 ```bash
+# Queue a task. --now skips the wait for your next usage reset
 golem run fix-login "Fix the login redirect" --now
-```
 
-`--now` starts the task right away. Without it, the task starts at the next usage reset, or right away if no usage window is active. `--at 9pm` or `--at "8:30am tomorrow"` picks a time. `--backend codex` runs the task in Codex.
+# Follow it on a live board. Press q to quit
+golem board
 
-### 2. Follow it
-
-```bash
-golem watch fix-login
-```
-
-If this prints `task has not started`, wait a few seconds and run it again. `golem board` shows all your tasks at once. A macOS notification tells you when a task needs review or fails.
-
-### 3. Pick it up for review
-
-```bash
+# Open its session to review the result
 golem pickup fix-login
 ```
 
-This opens the session in the worktree and marks the task done. `--client claude-desktop` opens a Claude task in the Claude desktop app. Pass `--auto-pickup` to `golem run` to open it in the Claude desktop app as soon as the task succeeds.
-
-## Permissions
-
-Tasks run without permission prompts. golem passes `--dangerously-skip-permissions` to Claude and `--dangerously-bypass-approvals-and-sandbox` to Codex. Arguments after `--` go to Claude or Codex. A permission flag there replaces golem's default.
+## More examples
 
 ```bash
-golem run add-tests "Add tests for the login redirect" -- --permission-mode acceptEdits --model opus
+# Start at your next usage reset
+golem run add-tests "Add tests for the login redirect"
+
+# Start at 9pm in Codex
+golem run fix-signup "Fix the signup redirect" --at 9pm --backend codex
+
+# Review the work only if the tests pass
+golem run add-auth "Add password reset" \
+  --gate "make test" \
+  --then review-auth "Review the password reset changes and fix what you find"
+
+# Pass arguments to the agent after --
+golem run fix-logout "Fix the logout redirect" -- --model opus
+
+# Replace the default permissions. In Claude Code, this denies any tool not on the list
+golem run fix-typos "Fix the typos in the docs" -- --permission-mode dontAsk --allowedTools "Read Glob Grep Edit"
 ```
+
+## Commands
+
+| Command | What it does |
+| --- | --- |
+| `golem run` | Queues a task |
+| `golem board` | Shows all tasks on a live board |
+| `golem list` | Prints all tasks |
+| `golem watch` | Streams a running task's progress |
+| `golem show` | Prints a task's final result |
+| `golem pickup` | Opens a task's session and marks the task done |
+| `golem prune` | Cleans up cancelled and finished tasks |
+
+`golem --help` lists the rest.
 
 ## Config
 
-golem reads `~/.config/golem/config.toml`, or `$XDG_CONFIG_HOME/golem/config.toml` when set. golem doesn't create the file, so create it when you need it.
+golem reads `~/.config/golem/config.toml`, or the same path under `$XDG_CONFIG_HOME`.
 
 ```toml
 [aliases]
-tonight = "run {1} {2} --at 9pm -- --model opus"
+# golem review 86
+review = 'run review-{1} "Review PR {1} and fix what you find" --now'
 
 [env]
+# Set for every task. --env overrides it for one run
 NODE_ENV = "development"
 ```
 
-`[aliases]` maps a name to a golem command line. golem replaces `{1}`, `{2}` and so on with the alias's arguments. With the alias above, this queues `fix-signup` for 9pm:
+Worktrees stay on disk after you delete their task. To clean them up:
 
 ```bash
-golem tonight fix-signup "Fix the signup redirect"
-```
-
-An alias can't call another alias. If an alias has the same name as a built-in command, golem runs the built-in command. `golem alias list` prints your aliases.
-
-`[env]` sets environment variables for every task. `--env NAME=VALUE` overrides them for one run.
-
-Worktrees stay on disk after you delete their task. To remove them 14 days after the deletion, run the command below. golem keeps any worktree with local changes.
-
-```bash
+# Remove them after 14 days, unless they have local changes
 golem worktree auto-remove --after 14
 ```
-
-`golem worktree auto-remove --off` stops this.
