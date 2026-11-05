@@ -89,16 +89,19 @@ def task_client(task_id: str, task: ledger.Task, client_name: str | None) -> Cli
 
 def default_clients(configured: dict[str, str], invalid_config_prefix: str) -> dict[str, str]:
     for backend_id, client_name in configured.items():
-        entry = f"{invalid_config_prefix}: default_clients.{backend_id}"
+        entry_message_prefix = f"{invalid_config_prefix}: default_clients.{backend_id}"
         if backend_id not in registry.BACKENDS:
-            raise SystemExit(f"{entry} is not a backend")
+            raise SystemExit(f"{entry_message_prefix} is not a backend")
         client = CLIENTS.get(client_name)
         if client is None:
-            raise SystemExit(f"{entry} names unknown client {client_name}")
+            raise SystemExit(f"{entry_message_prefix} names unknown client {client_name}")
         if client.is_terminal:
-            raise SystemExit(f"{entry} must be an app client, not {client_name}")
+            raise SystemExit(f"{entry_message_prefix} must be an app client, not {client_name}")
         if client.backend_id != backend_id:
-            raise SystemExit(f"{entry}: {client_name} cannot open {backend_id} tasks")
+            backend_name = registry.BACKENDS[backend_id].NAME
+            raise SystemExit(
+                f"{entry_message_prefix} names {client_name}, which cannot open {backend_name} tasks"
+            )
     return {**BUILT_IN_DEFAULT_CLIENTS, **configured}
 
 

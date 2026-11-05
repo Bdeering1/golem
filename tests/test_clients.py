@@ -95,6 +95,11 @@ def test_pickup_refuses_client_that_cannot_open_task_backend(
         pytest.param(
             ["pickup", support.TASK_ID, "--app"], "unrecognized arguments: --app", id="removed-app"
         ),
+        pytest.param(
+            ["pickup", "--all", "--", "--model", "x"],
+            "pickup --all does not accept agent arguments",
+            id="all-agent-arguments",
+        ),
     ],
 )
 def test_pickup_rejects_invalid_client_options(
@@ -108,13 +113,6 @@ def test_pickup_rejects_invalid_client_options(
     assert exit_info.value.code == 2
     assert message in capsys.readouterr().err
     assert support.read_task(ledger_path)["status"] == ledger.STATUS_NEEDS_REVIEW
-
-
-def test_short_client_option_selects_client(fake_commands, ledger_path, stub_clients):
-    support.write_task(ledger_path, ledger.STATUS_NEEDS_REVIEW)
-
-    assert cli.main(["pickup", support.TASK_ID, "-c", STUB_TERMINAL_CLIENT]) == 0
-    assert support.read_task(ledger_path)["status"] == ledger.STATUS_DONE
 
 
 def test_auto_pickup_opens_in_client_saved_when_queued(
@@ -138,12 +136,15 @@ def test_follow_up_after_auto_pickup_parent_uses_its_backends_default(
 ):
     support.write_config_table("default_clients", {ledger.BACKEND_CLAUDE: STUB_APP_CLIENT})
     cli.main(["run", support.PARENT_ID, support.PARENT_PROMPT, "--now", "--auto-pickup"])
+    support.write_config_table("default_clients", {ledger.BACKEND_CLAUDE: "claude-desktop"})
 
     assert (
         cli.main(["run", support.CHILD_ID, support.CHILD_PROMPT, "--after", support.PARENT_ID]) == 0
     )
 
-    assert support.read_task(ledger_path, support.CHILD_ID)["auto_pickup_client"] == STUB_APP_CLIENT
+    assert (
+        support.read_task(ledger_path, support.CHILD_ID)["auto_pickup_client"] == "claude-desktop"
+    )
 
 
 def test_then_follow_up_of_auto_pickup_run_uses_saved_default(
@@ -180,31 +181,24 @@ def test_legacy_auto_pickup_task_opens_in_claude_desktop(fake_commands, ledger_p
     )
 
 
-def test_pickup_all_uses_backend_default_and_client_overrides_it(
-    fake_commands, ledger_path, stub_clients
-):
+def test_pickup_all_uses_backend_default(fake_commands, ledger_path, stub_clients):
     support.write_config_table("default_clients", {ledger.BACKEND_CLAUDE: STUB_APP_CLIENT})
     support.write_task(ledger_path, ledger.STATUS_NEEDS_REVIEW)
-    session_id = support.read_task(ledger_path)["session_id"]
 
     assert cli.main(["pickup", "--all"]) == 0
-    assert fake_commands["open-args"].read_text(encoding="utf-8") == f"stub:{session_id}\n"
-
-    support.write_task(ledger_path, ledger.STATUS_NEEDS_REVIEW)
-    assert cli.main(["pickup", "--all", "-c", "claude-desktop"]) == 0
-    assert fake_commands["open-args"].read_text(encoding="utf-8").splitlines()[-1] == (
-        f"claude://resume?session={session_id}"
+    assert fake_commands["open-args"].read_text(encoding="utf-8") == (
+        f"stub:{support.read_task(ledger_path)['session_id']}\n"
     )
 
 
-def test_pickup_all_rejects_agent_arguments(fake_commands, ledger_path, capsys):
+def test_pickup_all_client_skips_default_clients(fake_commands, ledger_path, stub_clients):
+    support.write_config_table("default_clients", {ledger.BACKEND_CLAUDE: "no-such-client"})
     support.write_task(ledger_path, ledger.STATUS_NEEDS_REVIEW)
 
-    with pytest.raises(SystemExit):
-        cli.main(["pickup", "--all", "--", "--model", "x"])
-
-    assert "pickup --all does not accept agent arguments" in capsys.readouterr().err
-    assert support.read_task(ledger_path)["status"] == ledger.STATUS_NEEDS_REVIEW
+    assert cli.main(["pickup", "--all", "-c", "claude-desktop"]) == 0
+    assert fake_commands["open-args"].read_text(encoding="utf-8") == (
+        f"claude://resume?session={support.read_task(ledger_path)['session_id']}\n"
+    )
 
 
 def test_pickup_all_fails_task_whose_backend_has_no_default(fake_commands, ledger_path, capsys):
@@ -230,7 +224,7 @@ def test_pickup_by_id_ignores_default_clients(fake_commands, ledger_path, stub_c
     [
         pytest.param("claude", "no-such-client", "names unknown client", id="unknown-client"),
         pytest.param("claude", STUB_TERMINAL_CLIENT, "must be an app client", id="terminal"),
-        pytest.param("codex", STUB_APP_CLIENT, "cannot open codex tasks", id="wrong-backend"),
+        pytest.param("codex", STUB_APP_CLIENT, "cannot open Codex tasks", id="wrong-backend"),
         pytest.param("no-such-backend", STUB_APP_CLIENT, "is not a backend", id="unknown-backend"),
     ],
 )
