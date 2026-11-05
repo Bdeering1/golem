@@ -40,12 +40,18 @@ def test_retry_refuses_unretryable_task_before_usage_lookup(ledger_path, monkeyp
         cli.main(["retry", support.TASK_ID])
 
 
-@pytest.mark.parametrize("option_arguments", [["--auto-pickup"], ["--gate", "true"]])
-def test_claude_only_option_rejects_codex_without_changing_ledger(ledger_path, option_arguments):
+@pytest.mark.parametrize(
+    ("option_arguments", "message"),
+    [
+        (["--auto-pickup"], "--auto-pickup requires a default app client for Codex"),
+        (["--gate", "true"], "--gate does not support Codex"),
+    ],
+)
+def test_run_option_rejects_codex_without_changing_ledger(ledger_path, option_arguments, message):
     support.write_task(ledger_path, ledger.STATUS_SCHEDULED)
     tasks = support.read_tasks(ledger_path)
 
-    with pytest.raises(SystemExit, match=f"{option_arguments[0]} does not support Codex"):
+    with pytest.raises(SystemExit, match=message):
         cli.main(
             [
                 "run",
@@ -61,7 +67,15 @@ def test_claude_only_option_rejects_codex_without_changing_ledger(ledger_path, o
     assert support.read_tasks(ledger_path) == tasks
 
 
-@pytest.mark.parametrize("fields", [{"auto_pickup": True}, {"no_worktree": True}, {"gate": "true"}])
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"auto_pickup": True},
+        {"auto_pickup_client": "claude-desktop"},
+        {"no_worktree": True},
+        {"gate": "true"},
+    ],
+)
 def test_retry_keeps_run_options(installed_launch_agent, ledger_path, fields):
     support.write_task(ledger_path, ledger.STATUS_FAILED, **fields)
 

@@ -193,8 +193,8 @@ def test_after_pending_auto_pickup_parent_passes_to_claude_only(
     )
 
     tasks = support.read_tasks(ledger_path)
-    assert tasks[support.CHILD_ID]["auto_pickup"] is True
-    assert "auto_pickup" not in tasks[support.GRANDCHILD_ID]
+    assert tasks[support.CHILD_ID]["auto_pickup_client"] == "claude-desktop"
+    assert "auto_pickup_client" not in tasks[support.GRANDCHILD_ID]
 
 
 def test_after_succeeded_auto_pickup_parent_does_not_pass_to_child(
@@ -211,7 +211,7 @@ def test_after_succeeded_auto_pickup_parent_does_not_pass_to_child(
     assert (
         cli.main(["run", support.CHILD_ID, support.CHILD_PROMPT, "--after", support.PARENT_ID]) == 0
     )
-    assert "auto_pickup" not in support.read_task(ledger_path, support.CHILD_ID)
+    assert "auto_pickup_client" not in support.read_task(ledger_path, support.CHILD_ID)
 
 
 def test_retrying_failed_parent_runs_waiting_dependent(

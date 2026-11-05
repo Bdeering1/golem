@@ -73,7 +73,15 @@ def is_ready_for_review(tasks: ledger.Tasks, task_id: str) -> bool:
     )
 
 
-def pickup_all(client_name: str) -> int:
+def default_client_name(task_id: str, task: ledger.Task, default_clients: dict[str, str]) -> str:
+    client_name = default_clients.get(ledger.task_backend(task))
+    if client_name is None:
+        backend = registry.task_backend(task)
+        raise SystemExit(f"golem: no default app client for {backend.NAME} tasks: {task_id}")
+    return client_name
+
+
+def pickup_all(client_name: str | None, default_clients: dict[str, str]) -> int:
     tasks = ledger.load_tasks()
     task_ids = [task_id for task_id in tasks if is_ready_for_review(tasks, task_id)]
     if not task_ids:
@@ -83,7 +91,12 @@ def pickup_all(client_name: str) -> int:
     has_failure = False
     for task_id in task_ids:
         try:
-            has_failure |= pickup(task_id, client_name=client_name, is_review_required=True) != 0
+            task_client_name = client_name or default_client_name(
+                task_id, tasks[task_id], default_clients
+            )
+            has_failure |= (
+                pickup(task_id, client_name=task_client_name, is_review_required=True) != 0
+            )
         except SystemExit as error:
             print(error, file=sys.stderr)
             has_failure = True
@@ -98,17 +111,16 @@ def auto_pickup_task(task_id: str) -> None:
     if task.get("status") == ledger.STATUS_FAILED:
         auto_pickup_task(task.get("after", ""))
         return
-    if not task.get("auto_pickup") or not is_ready_for_review(tasks, task_id):
+    client_name = clients.task_auto_pickup_client(task)
+    if client_name is None or not is_ready_for_review(tasks, task_id):
         return
     try:
-        returncode = pickup(
-            task_id, client_name=clients.AUTO_PICKUP_CLIENT, is_review_required=True
-        )
+        returncode = pickup(task_id, client_name=client_name, is_review_required=True)
     except SystemExit as error:
         print(error, file=sys.stderr)
         return
     if returncode != 0:
-        print(f"golem: could not open {task_id} in {clients.AUTO_PICKUP_CLIENT}", file=sys.stderr)
+        print(f"golem: could not open {task_id} in {client_name}", file=sys.stderr)
 
 
 def close(task_id: str) -> int:

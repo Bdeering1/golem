@@ -7,7 +7,8 @@ if TYPE_CHECKING:
 from golem import ledger
 from golem.backends import codex, registry
 
-AUTO_PICKUP_CLIENT = "claude-desktop"
+CLAUDE_DESKTOP_CLIENT = "claude-desktop"
+BUILT_IN_DEFAULT_CLIENTS = {ledger.BACKEND_CLAUDE: CLAUDE_DESKTOP_CLIENT}
 
 
 def keep_environment(environment: dict[str, str]) -> dict[str, str]:
@@ -57,7 +58,7 @@ CLIENTS: dict[str, Client] = {
             validate_arguments=codex.validate_resume_arguments,
         ),
         Client(
-            name=AUTO_PICKUP_CLIENT,
+            name=CLAUDE_DESKTOP_CLIENT,
             backend_id=ledger.BACKEND_CLAUDE,
             is_terminal=False,
             command=lambda conversation_id, _agent_args: [
@@ -84,3 +85,24 @@ def task_client(task_id: str, task: ledger.Task, client_name: str | None) -> Cli
         for client in CLIENTS.values()
         if client.is_terminal and client.backend_id == task_backend_id
     )
+
+
+def default_clients(configured: dict[str, str], invalid_config_prefix: str) -> dict[str, str]:
+    for backend_id, client_name in configured.items():
+        entry = f"{invalid_config_prefix}: default_clients.{backend_id}"
+        if backend_id not in registry.BACKENDS:
+            raise SystemExit(f"{entry} is not a backend")
+        client = CLIENTS.get(client_name)
+        if client is None:
+            raise SystemExit(f"{entry} names unknown client {client_name}")
+        if client.is_terminal:
+            raise SystemExit(f"{entry} must be an app client, not {client_name}")
+        if client.backend_id != backend_id:
+            raise SystemExit(f"{entry}: {client_name} cannot open {backend_id} tasks")
+    return {**BUILT_IN_DEFAULT_CLIENTS, **configured}
+
+
+def task_auto_pickup_client(task: ledger.Task) -> str | None:
+    if "auto_pickup_client" in task:
+        return task["auto_pickup_client"]
+    return CLAUDE_DESKTOP_CLIENT if task.get("auto_pickup") else None
