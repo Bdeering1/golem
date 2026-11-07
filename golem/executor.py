@@ -163,7 +163,8 @@ def claim_task(
     progress_log.progress_path(session_id).parent.mkdir(parents=True, exist_ok=True)
     progress_log.progress_path(session_id).touch()
     task["status"] = ledger.STATUS_RUNNING
-    task["started_at"] = datetime.now(UTC).isoformat()
+    if not common.is_usage_limit_resume(task):
+        task["started_at"] = datetime.now(UTC).isoformat()
     return task.copy(), run_lock_file, directory_lock_file
 
 

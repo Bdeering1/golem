@@ -61,6 +61,30 @@ def test_passing_gate_continues_chain_and_receives_task_as_json(
     assert len(support.logged_claude_calls(fake_commands)) == 3
 
 
+def test_gate_of_task_resumed_after_usage_limit_sees_first_run_start(
+    installed_launch_agent, fake_commands, monkeypatch, ledger_path, tmp_path
+):
+    monkeypatch.setattr(claude, "next_reset_time", lambda: support.RESET_TIME)
+    support.write_claude_output(
+        fake_commands,
+        support.USAGE_LIMIT_RESULT,
+        api_error_status=claude.USAGE_LIMIT_HTTP_STATUS,
+    )
+    parent = support.schedule_gated_chain(ledger_path, support.gate_command(tmp_path))
+    monkeypatch.setenv("GOLEM_CLAUDE_EXIT", "1")
+    assert cli.main(["_execute", support.PARENT_ID, parent["session_id"]]) == 0
+    first_started_at = support.read_task(ledger_path, support.PARENT_ID)["started_at"]
+    support.write_claude_output(fake_commands, support.CLAUDE_RESULT)
+    monkeypatch.delenv("GOLEM_CLAUDE_EXIT")
+    support.set_task_due_now(ledger_path, support.PARENT_ID)
+
+    assert cli.main(["_execute", support.PARENT_ID, parent["session_id"]]) == 0
+
+    [parent_input] = gate_inputs(tmp_path)
+    assert parent_input["started_at"] == first_started_at
+    assert support.read_task(ledger_path, support.CHILD_ID)["status"] == ledger.STATUS_NEEDS_REVIEW
+
+
 def test_failing_gate_stops_chain_with_its_stderr_as_reason(
     installed_launch_agent, fake_commands, ledger_path, tmp_path
 ):

@@ -16,6 +16,7 @@ from golem.backends import common
 
 PROGRESS_TOOL_INPUT_KEYS = ("command", "file_path", "pattern", "url", "description")
 USAGE_LIMIT_HTTP_STATUS = 429
+USAGE_LIMIT_ASSISTANT_ERROR = "rate_limit"
 BACKGROUND_WAIT_CEILING_VARIABLE = "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS"
 NAME_ARGUMENTS = {"-n", "--name"}
 PERMISSION_ARGUMENTS = {
@@ -273,17 +274,46 @@ def parsed_claude_output(output: str) -> object:
     return events
 
 
+def usage_limit_message(event: dict[str, object]) -> str | None:
+    if event.get("type") == "result":
+        result = event.get("result")
+        is_limit = event.get("api_error_status") == USAGE_LIMIT_HTTP_STATUS
+        return result if is_limit and isinstance(result, str) else None
+    if (
+        event.get("type") != "assistant"
+        or event.get("error") != USAGE_LIMIT_ASSISTANT_ERROR
+        or event.get("parent_tool_use_id") is not None
+    ):
+        return None
+    message = event.get("message")
+    if not isinstance(message, dict):
+        return None
+    content = cast("dict[str, object]", message).get("content")
+    if not isinstance(content, list):
+        return None
+    for block in cast("list[object]", content):
+        if not isinstance(block, dict):
+            continue
+        text = cast("dict[str, object]", block).get("text")
+        if isinstance(text, str):
+            return text
+    return None
+
+
 def claude_result_and_usage_limit(output: str) -> tuple[str, bool]:
     parsed_response = parsed_claude_output(output)
     if isinstance(parsed_response, list):
+        events = [
+            cast("dict[str, object]", event)
+            for event in cast("list[object]", parsed_response)
+            if isinstance(event, dict)
+        ]
+        for event in events:
+            message = usage_limit_message(event)
+            if message is not None:
+                return message, True
         parsed_response = next(
-            (
-                cast("dict[str, object]", message)
-                for message in reversed(cast("list[object]", parsed_response))
-                if isinstance(message, dict)
-                and cast("dict[str, object]", message).get("type") == "result"
-            ),
-            None,
+            (event for event in reversed(events) if event.get("type") == "result"), None
         )
     if not isinstance(parsed_response, dict):
         return output, False
