@@ -285,10 +285,10 @@ def usage_limit_message(event: dict[str, object]) -> str | None:
         or event.get("parent_tool_use_id") is not None
     ):
         return None
-    message = event.get("message")
-    if not isinstance(message, dict):
+    api_message = event.get("message")
+    if not isinstance(api_message, dict):
         return None
-    content = cast("dict[str, object]", message).get("content")
+    content = cast("dict[str, object]", api_message).get("content")
     if not isinstance(content, list):
         return None
     for block in cast("list[object]", content):
@@ -321,7 +321,7 @@ def claude_result_and_usage_limit(output: str) -> tuple[str, bool]:
     result = response.get("result")
     if not isinstance(result, str):
         return output, False
-    return result, response.get("api_error_status") == USAGE_LIMIT_HTTP_STATUS
+    return result, usage_limit_message(response) is not None
 
 
 def claude_working_directory(output: str) -> str | None:

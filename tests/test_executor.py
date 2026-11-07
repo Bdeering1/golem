@@ -223,13 +223,30 @@ def test_usage_limited_task_resumes_at_reset_in_same_session(
     ]
 
 
-def usage_limit_assistant_event():
+def usage_limit_assistant_event(parent_tool_use_id):
     return {
         "type": "assistant",
         "error": claude.USAGE_LIMIT_ASSISTANT_ERROR,
-        "parent_tool_use_id": None,
+        "parent_tool_use_id": parent_tool_use_id,
         "message": {"content": [{"type": "text", "text": support.USAGE_LIMIT_RESULT}]},
     }
+
+
+def test_subagent_usage_limit_event_does_not_pause_task(fake_commands, ledger_path):
+    support.write_claude_events(
+        fake_commands,
+        [
+            usage_limit_assistant_event("toolu_subagent"),
+            {"type": "result", "api_error_status": None, "result": support.CLAUDE_RESULT},
+        ],
+    )
+    support.write_task(ledger_path, ledger.STATUS_RUNNING)
+
+    executor.execute_task(support.TASK_ID, support.read_task(ledger_path), ())
+
+    task = support.read_task(ledger_path)
+    assert task["status"] == ledger.STATUS_NEEDS_REVIEW
+    assert task["result"] == support.CLAUDE_RESULT
 
 
 @pytest.mark.parametrize(
@@ -241,7 +258,7 @@ def usage_limit_assistant_event():
             "api_error_status": claude.USAGE_LIMIT_HTTP_STATUS,
             "result": support.USAGE_LIMIT_RESULT,
         },
-        usage_limit_assistant_event(),
+        usage_limit_assistant_event(None),
     ],
     ids=["result-event", "assistant-event"],
 )
