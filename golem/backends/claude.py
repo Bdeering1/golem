@@ -16,6 +16,7 @@ from golem.backends import common
 
 PROGRESS_TOOL_INPUT_KEYS = ("command", "file_path", "pattern", "url", "description")
 USAGE_LIMIT_HTTP_STATUS = 429
+USAGE_LIMIT_ASSISTANT_ERROR = "rate_limit"
 BACKGROUND_WAIT_CEILING_VARIABLE = "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS"
 NAME_ARGUMENTS = {"-n", "--name"}
 PERMISSION_ARGUMENTS = {
@@ -50,6 +51,20 @@ class ClaudeControlFrame(TypedDict):
     response: ClaudeControlResponse
 
 
+def assistant_content_items(event_fields: dict[str, object]) -> list[dict[str, object]]:
+    message = event_fields.get("message")
+    content = (
+        cast("dict[str, object]", message).get("content") if isinstance(message, dict) else None
+    )
+    if not isinstance(content, list):
+        return []
+    return [
+        cast("dict[str, object]", item)
+        for item in cast("list[object]", content)
+        if isinstance(item, dict)
+    ]
+
+
 def claude_event_progress(event: object) -> list[str]:
     if not isinstance(event, dict):
         return []
@@ -59,17 +74,8 @@ def claude_event_progress(event: object) -> list[str]:
         or event_fields.get("parent_tool_use_id") is not None
     ):
         return []
-    message = event_fields.get("message")
-    content = (
-        cast("dict[str, object]", message).get("content") if isinstance(message, dict) else None
-    )
-    if not isinstance(content, list):
-        return []
     progress: list[str] = []
-    for item in cast("list[object]", content):
-        if not isinstance(item, dict):
-            continue
-        item_fields = cast("dict[str, object]", item)
+    for item_fields in assistant_content_items(event_fields):
         text = item_fields.get("text")
         name = item_fields.get("name")
         if item_fields.get("type") == "text" and isinstance(text, str):
@@ -273,17 +279,38 @@ def parsed_claude_output(output: str) -> object:
     return events
 
 
+def usage_limit_message(event: dict[str, object]) -> str | None:
+    if event.get("type") == "result":
+        result = event.get("result")
+        is_limit = event.get("api_error_status") == USAGE_LIMIT_HTTP_STATUS
+        return result if is_limit and isinstance(result, str) else None
+    if (
+        event.get("type") != "assistant"
+        or event.get("error") != USAGE_LIMIT_ASSISTANT_ERROR
+        or event.get("parent_tool_use_id") is not None
+    ):
+        return None
+    for item_fields in assistant_content_items(event):
+        text = item_fields.get("text")
+        if isinstance(text, str):
+            return text
+    return None
+
+
 def claude_result_and_usage_limit(output: str) -> tuple[str, bool]:
     parsed_response = parsed_claude_output(output)
     if isinstance(parsed_response, list):
+        events = [
+            cast("dict[str, object]", event)
+            for event in cast("list[object]", parsed_response)
+            if isinstance(event, dict)
+        ]
+        for event in events:
+            message = usage_limit_message(event)
+            if message is not None:
+                return message, True
         parsed_response = next(
-            (
-                cast("dict[str, object]", message)
-                for message in reversed(cast("list[object]", parsed_response))
-                if isinstance(message, dict)
-                and cast("dict[str, object]", message).get("type") == "result"
-            ),
-            None,
+            (event for event in reversed(events) if event.get("type") == "result"), None
         )
     if not isinstance(parsed_response, dict):
         return output, False
@@ -291,7 +318,7 @@ def claude_result_and_usage_limit(output: str) -> tuple[str, bool]:
     result = response.get("result")
     if not isinstance(result, str):
         return output, False
-    return result, response.get("api_error_status") == USAGE_LIMIT_HTTP_STATUS
+    return result, usage_limit_message(response) is not None
 
 
 def claude_working_directory(output: str) -> str | None:

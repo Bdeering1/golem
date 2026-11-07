@@ -223,6 +223,69 @@ def test_usage_limited_task_resumes_at_reset_in_same_session(
     ]
 
 
+def usage_limit_assistant_event(parent_tool_use_id):
+    return {
+        "type": "assistant",
+        "error": claude.USAGE_LIMIT_ASSISTANT_ERROR,
+        "parent_tool_use_id": parent_tool_use_id,
+        "message": {"content": [{"type": "text", "text": support.USAGE_LIMIT_RESULT}]},
+    }
+
+
+def test_subagent_usage_limit_event_does_not_pause_task(fake_commands, ledger_path):
+    support.write_claude_events(
+        fake_commands,
+        [
+            usage_limit_assistant_event("toolu_subagent"),
+            {"type": "result", "api_error_status": None, "result": support.CLAUDE_RESULT},
+        ],
+    )
+    support.write_task(ledger_path, ledger.STATUS_RUNNING)
+
+    executor.execute_task(support.TASK_ID, support.read_task(ledger_path), ())
+
+    task = support.read_task(ledger_path)
+    assert task["status"] == ledger.STATUS_NEEDS_REVIEW
+    assert task["result"] == support.CLAUDE_RESULT
+
+
+@pytest.mark.parametrize(
+    "limit_event",
+    [
+        {
+            "type": "result",
+            "is_error": True,
+            "api_error_status": claude.USAGE_LIMIT_HTTP_STATUS,
+            "result": support.USAGE_LIMIT_RESULT,
+        },
+        usage_limit_assistant_event(None),
+    ],
+    ids=["result-event", "assistant-event"],
+)
+def test_usage_limit_pauses_task_when_background_agent_turns_follow(
+    installed_launch_agent, fake_commands, monkeypatch, ledger_path, limit_event
+):
+    monkeypatch.setattr(claude, "next_reset_time", lambda: support.RESET_TIME)
+    support.write_claude_output(fake_commands, support.CLAUDE_RESULT)
+    cli.main(["run", support.TASK_ID, support.PROMPT, "--now", "--", *support.AGENT_ARGS])
+    session_id = support.read_task(ledger_path)["session_id"]
+    background_turn = {
+        "type": "assistant",
+        "message": {"content": [{"type": "text", "text": "background agent finished"}]},
+    }
+    empty_result = {"type": "result", "is_error": False, "api_error_status": None, "result": ""}
+    support.write_claude_events(fake_commands, [limit_event, background_turn, empty_result])
+    monkeypatch.setenv("GOLEM_CLAUDE_EXIT", "1")
+
+    assert cli.main(["_execute", support.TASK_ID, session_id]) == 0
+
+    task = support.read_task(ledger_path)
+    assert task["status"] == ledger.STATUS_SCHEDULED
+    assert task["result"] == support.USAGE_LIMIT_RESULT
+    assert datetime.fromisoformat(task["due_at"]) == support.RESET_TIME
+    assert task["session_id"] == session_id
+
+
 def test_usage_limited_task_fails_once_resumes_run_out(
     installed_launch_agent, fake_commands, monkeypatch, ledger_path
 ):
