@@ -51,6 +51,20 @@ class ClaudeControlFrame(TypedDict):
     response: ClaudeControlResponse
 
 
+def assistant_content_items(event_fields: dict[str, object]) -> list[dict[str, object]]:
+    message = event_fields.get("message")
+    content = (
+        cast("dict[str, object]", message).get("content") if isinstance(message, dict) else None
+    )
+    if not isinstance(content, list):
+        return []
+    return [
+        cast("dict[str, object]", item)
+        for item in cast("list[object]", content)
+        if isinstance(item, dict)
+    ]
+
+
 def claude_event_progress(event: object) -> list[str]:
     if not isinstance(event, dict):
         return []
@@ -60,17 +74,8 @@ def claude_event_progress(event: object) -> list[str]:
         or event_fields.get("parent_tool_use_id") is not None
     ):
         return []
-    message = event_fields.get("message")
-    content = (
-        cast("dict[str, object]", message).get("content") if isinstance(message, dict) else None
-    )
-    if not isinstance(content, list):
-        return []
     progress: list[str] = []
-    for item in cast("list[object]", content):
-        if not isinstance(item, dict):
-            continue
-        item_fields = cast("dict[str, object]", item)
+    for item_fields in assistant_content_items(event_fields):
         text = item_fields.get("text")
         name = item_fields.get("name")
         if item_fields.get("type") == "text" and isinstance(text, str):
@@ -285,16 +290,8 @@ def usage_limit_message(event: dict[str, object]) -> str | None:
         or event.get("parent_tool_use_id") is not None
     ):
         return None
-    api_message = event.get("message")
-    if not isinstance(api_message, dict):
-        return None
-    content = cast("dict[str, object]", api_message).get("content")
-    if not isinstance(content, list):
-        return None
-    for block in cast("list[object]", content):
-        if not isinstance(block, dict):
-            continue
-        text = cast("dict[str, object]", block).get("text")
+    for item_fields in assistant_content_items(event):
+        text = item_fields.get("text")
         if isinstance(text, str):
             return text
     return None
