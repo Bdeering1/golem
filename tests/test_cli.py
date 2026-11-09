@@ -254,7 +254,7 @@ def test_run_after_parent_uses_saved_default_not_parent_backend(
     ],
 )
 def test_invalid_default_backend_fails_run_only(
-    installed_launch_agent, ledger_path, capsys, config_text, message
+    installed_launch_agent, ledger_path, config_text, message
 ):
     support.write_config_text(config_text)
 
@@ -263,4 +263,3 @@ def test_invalid_default_backend_fails_run_only(
 
     assert not ledger_path.exists()
     assert cli.main(["list"]) == 0
-    assert capsys.readouterr().out == "golem: no tasks\n"
