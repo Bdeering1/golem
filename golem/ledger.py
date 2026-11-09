@@ -237,10 +237,6 @@ def remove_interrupted_ledger_writes() -> None:
         temporary_path.unlink(missing_ok=True)
 
 
-def task_backend(task: Task) -> str:
-    return task["backend"]
-
-
 def task_directory(task: Task) -> str:
     worktree = task.get("worktree")
     if worktree is not None and Path(worktree).is_dir():

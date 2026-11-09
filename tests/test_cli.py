@@ -262,4 +262,4 @@ def test_invalid_default_backend_fails_run_only(
         cli.main(["run", support.TASK_ID, support.PROMPT, "--now"])
 
     assert not ledger_path.exists()
-    assert cli.main(["list"]) == 0
+    assert cli.main(["alias", "list"]) == 0

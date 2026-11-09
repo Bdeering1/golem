@@ -162,7 +162,7 @@ def retry_task(task_id: str, *, is_now: bool, at_text: str | None) -> int:
             task["prompt"],
             tuple(task["agent_args"]),
             when,
-            ledger.task_backend(task),
+            task["backend"],
             after=task.get("after"),
         )
         if "environment" in task:
