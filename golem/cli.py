@@ -83,6 +83,18 @@ def load_environment() -> dict[str, str]:
     return environment
 
 
+def load_default_backend() -> str:
+    default_backend = load_config().get("default_backend", ledger.BACKEND_CLAUDE)
+    if not isinstance(default_backend, str):
+        raise SystemExit(f"{invalid_config_message_prefix()}: default_backend must be a string")
+    if default_backend not in registry.BACKENDS:
+        raise SystemExit(
+            f"{invalid_config_message_prefix()}: default_backend names an unknown backend: "
+            f"{default_backend}"
+        )
+    return default_backend
+
+
 def task_environment(assignments: list[str]) -> dict[str, str]:
     environment = load_environment()
     for assignment in assignments:
@@ -154,6 +166,7 @@ def task_id_from_arguments(arguments: ledger.Arguments) -> str:
 
 
 def run_task_from_arguments(arguments: ledger.Arguments) -> int:
+    arguments.backend = arguments.backend or load_default_backend()
     backend = registry.BACKENDS[arguments.backend]
     if arguments.auto_pickup and not backend.IS_AUTO_PICKUP_SUPPORTED:
         raise SystemExit(f"golem: --auto-pickup does not support {backend.NAME} tasks")
@@ -302,7 +315,6 @@ def add_run_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
     run_command.add_argument(
         "--backend",
         choices=tuple(registry.BACKENDS),
-        default=ledger.BACKEND_CLAUDE,
     )
     prompt_group = run_command.add_mutually_exclusive_group(required=True)
     prompt_group.add_argument("prompt", nargs="?")
