@@ -27,7 +27,6 @@ PERMISSION_ARGUMENTS = {
 VERBOSE_ARGUMENT = "--verbose"
 NAME: str = "Claude"
 IS_GATE_SUPPORTED: bool = True
-IS_AUTO_PICKUP_SUPPORTED: bool = True
 
 
 class ClaudeRateLimit(TypedDict):

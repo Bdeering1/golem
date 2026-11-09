@@ -14,7 +14,7 @@ def new_session_id() -> str:
 @dataclass(frozen=True)
 class RunPlacement:
     cwd: str
-    is_auto_pickup: bool = False
+    auto_pickup_client: str | None = None
     is_no_worktree: bool = False
     gate: str | None = None
     setup: str | None = None
@@ -41,8 +41,8 @@ def new_task_record(
     }
     if after is not None:
         record["after"] = after
-    if placement.is_auto_pickup:
-        record["auto_pickup"] = True
+    if placement.auto_pickup_client is not None:
+        record["auto_pickup_client"] = placement.auto_pickup_client
     if placement.is_no_worktree:
         record["no_worktree"] = True
     if placement.gate is not None:
@@ -173,6 +173,8 @@ def retry_task(task_id: str, *, is_now: bool, at_text: str | None) -> int:
             record["worktree_pending"] = task["worktree_pending"]
         if "auto_pickup" in task:
             record["auto_pickup"] = task["auto_pickup"]
+        if "auto_pickup_client" in task:
+            record["auto_pickup_client"] = task["auto_pickup_client"]
         if "no_worktree" in task:
             record["no_worktree"] = task["no_worktree"]
         if "gate" in task:
@@ -227,12 +229,14 @@ def planned_execution_time(
     return when.replace(second=0, microsecond=0).astimezone()
 
 
-def reserve_dependent_task(records: ledger.Tasks, parent_id: str) -> bool:
+def reserve_dependent_task(
+    records: ledger.Tasks, parent_id: str, default_clients: dict[str, str]
+) -> bool:
     with ledger.locked_ledger() as (tasks, worktrees):
         if not chains.is_dependent_reservable(tasks, parent_id):
             return False
         replaced = delete.remove_replaceable_tasks(tasks, worktrees, list(records), parent_id)
-        chains.add_dependent_records(tasks, records, parent_id)
+        chains.add_dependent_records(tasks, records, parent_id, default_clients)
     delete.finish_task_replacement(replaced)
     return True
 
@@ -244,13 +248,17 @@ def schedule_run_task(
     task_args: tuple[str, ...],
     follow_up_records: ledger.Tasks,
     placement: RunPlacement,
+    *,
+    default_clients: dict[str, str],
 ) -> int:
     after = arguments.after if isinstance(arguments.after, str) else None
     if after is not None:
         dependent_record = new_task_record(
             placement, prompt_text, task_args, None, arguments.backend, after=after
         )
-        if reserve_dependent_task({task_id: dependent_record, **follow_up_records}, after):
+        if reserve_dependent_task(
+            {task_id: dependent_record, **follow_up_records}, after, default_clients
+        ):
             claude_hooks.sync_hooks(
                 ledger.task_directory(ledger.existing_task(ledger.load_tasks(), after))
             )

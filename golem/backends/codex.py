@@ -42,7 +42,6 @@ CODEX_PROVIDER_OVERRIDE = 'model_provider="openai"'
 CODEX_PROVIDER_ARGUMENTS = ("-c", CODEX_PROVIDER_OVERRIDE)
 NAME: str = "Codex"
 IS_GATE_SUPPORTED: bool = False
-IS_AUTO_PICKUP_SUPPORTED: bool = False
 type AppServerRequests = list[ledger.JsonObject]
 type AppServerResponses = dict[int, ledger.JsonObject]
 

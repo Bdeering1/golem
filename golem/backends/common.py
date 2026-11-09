@@ -54,7 +54,6 @@ class RunOutcome:
 class Backend(Protocol):
     NAME: str
     IS_GATE_SUPPORTED: bool
-    IS_AUTO_PICKUP_SUPPORTED: bool
 
     def run(
         self, task_id: str, task: ledger.Task, lock_file_descriptors: tuple[int, ...]

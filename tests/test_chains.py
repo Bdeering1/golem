@@ -169,34 +169,6 @@ def test_after_parent_with_pending_gate_waits_for_the_gate(
     assert support.read_task(ledger_path, support.SIBLING_ID)["status"] == ledger.STATUS_WAITING
 
 
-def test_after_pending_auto_pickup_parent_passes_to_claude_only(
-    installed_launch_agent, ledger_path
-):
-    cli.main(["run", support.PARENT_ID, support.PARENT_PROMPT, "--now", "--auto-pickup"])
-
-    assert (
-        cli.main(["run", support.CHILD_ID, support.CHILD_PROMPT, "--after", support.PARENT_ID]) == 0
-    )
-    assert (
-        cli.main(
-            [
-                "run",
-                support.GRANDCHILD_ID,
-                support.GRANDCHILD_PROMPT,
-                "--backend",
-                "codex",
-                "--after",
-                support.PARENT_ID,
-            ]
-        )
-        == 0
-    )
-
-    tasks = support.read_tasks(ledger_path)
-    assert tasks[support.CHILD_ID]["auto_pickup"] is True
-    assert "auto_pickup" not in tasks[support.GRANDCHILD_ID]
-
-
 def test_after_succeeded_auto_pickup_parent_does_not_pass_to_child(
     installed_launch_agent, ledger_path, monkeypatch
 ):
@@ -211,7 +183,7 @@ def test_after_succeeded_auto_pickup_parent_does_not_pass_to_child(
     assert (
         cli.main(["run", support.CHILD_ID, support.CHILD_PROMPT, "--after", support.PARENT_ID]) == 0
     )
-    assert "auto_pickup" not in support.read_task(ledger_path, support.CHILD_ID)
+    assert "auto_pickup_client" not in support.read_task(ledger_path, support.CHILD_ID)
 
 
 def test_retrying_failed_parent_runs_waiting_dependent(
