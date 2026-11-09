@@ -138,11 +138,16 @@ def test_follow_up_after_auto_pickup_parent_uses_its_backends_default(
     )
     support.write_config_table("default_clients", {ledger.BACKEND_CLAUDE: STUB_APP_CLIENT})
 
-    assert (
-        cli.main(["run", support.CHILD_ID, support.CHILD_PROMPT, "--after", support.PARENT_ID]) == 0
-    )
+    for task_id, backend_id in [
+        (support.CHILD_ID, ledger.BACKEND_CLAUDE),
+        (support.GRANDCHILD_ID, ledger.BACKEND_CODEX),
+    ]:
+        command = ["run", task_id, support.PROMPT, "--backend", backend_id]
+        assert cli.main([*command, "--after", support.PARENT_ID]) == 0
 
-    assert support.read_task(ledger_path, support.CHILD_ID)["auto_pickup_client"] == STUB_APP_CLIENT
+    tasks = support.read_tasks(ledger_path)
+    assert tasks[support.CHILD_ID]["auto_pickup_client"] == STUB_APP_CLIENT
+    assert "auto_pickup_client" not in tasks[support.GRANDCHILD_ID]
 
 
 def test_then_follow_up_of_auto_pickup_run_uses_saved_default(
