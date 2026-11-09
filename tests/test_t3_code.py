@@ -16,6 +16,7 @@ CACHED_CLAUDE_MODEL = "claude-cached"
 SUCCESS_EXIT = {"_tag": "Success", "value": {"sequence": 3}}
 FINISHED_PULL_REQUESTS = [{"url": "merged", "state": ledger.PULL_REQUEST_STATE_MERGED}]
 CLAUDE_THREAD_ID = f"golem:claude:{support.TASK_ID}-session"
+CODEX_THREAD_ID = f"golem:codex:{CODEX_THREAD}"
 FAKE_T3 = """#!/bin/sh
 printf '%s\\n' "$*" >> "$T3CODE_HOME/t3-args"
 case "$1 $2" in
@@ -183,7 +184,7 @@ def test_pickup_all_attaches_codex_thread_with_default_model(server, ledger_path
     assert cli.main(["pickup", "--all", "--client", "t3-code"]) == 0
 
     thread = created_thread(server)
-    assert thread["threadId"] == f"golem:codex:{CODEX_THREAD}"
+    assert thread["threadId"] == CODEX_THREAD_ID
     assert thread["modelSelection"] == {
         "instanceId": "codex",
         "model": t3_code.DEFAULT_MODELS["codex"],
@@ -191,8 +192,29 @@ def test_pickup_all_attaches_codex_thread_with_default_model(server, ledger_path
     assert thread["importedNativeThread"]["ref"]["driver"] == "codex"
     assert thread["importedNativeThread"]["ref"]["nativeId"] == CODEX_THREAD
     assert fake_commands["open-args"].read_text(encoding="utf-8") == (
-        f"{thread_link(f'golem:codex:{CODEX_THREAD}')}\n"
+        f"{thread_link(CODEX_THREAD_ID)}\n"
     )
+    assert support.read_task(ledger_path)["status"] == ledger.STATUS_DONE
+
+
+@pytest.mark.parametrize(
+    ("backend_id", "fields", "thread_id"),
+    [
+        pytest.param(ledger.BACKEND_CLAUDE, {}, CLAUDE_THREAD_ID, id="claude"),
+        pytest.param(
+            ledger.BACKEND_CODEX, {"thread_id": CODEX_THREAD}, CODEX_THREAD_ID, id="codex"
+        ),
+    ],
+)
+def test_pickup_all_opens_task_in_t3_code_default_client(
+    server, ledger_path, fake_commands, backend_id, fields, thread_id
+):
+    support.write_config_table("default_clients", {backend_id: "t3-code"})
+    support.write_task(ledger_path, ledger.STATUS_NEEDS_REVIEW, backend=backend_id, **fields)
+
+    assert cli.main(["pickup", "--all"]) == 0
+
+    assert fake_commands["open-args"].read_text(encoding="utf-8") == f"{thread_link(thread_id)}\n"
     assert support.read_task(ledger_path)["status"] == ledger.STATUS_DONE
 
 
@@ -308,9 +330,9 @@ def test_deleting_task_deletes_its_thread_only_while_t3_code_runs(
     assert fake_commands["open-args"].read_text(encoding="utf-8") == ""
 
 
-def test_rejected_thread_delete_warns_without_failing(server, ledger_path, capsys):
+def test_rejected_thread_delete_warns_without_failing(server, ledger_path, capsys, monkeypatch):
     support.write_task(ledger_path, ledger.STATUS_DONE, t3_code_thread_id=CLAUDE_THREAD_ID)
-    reject_commands(server, None)
+    reject_commands(server, monkeypatch)
 
     assert cli.main(["delete", support.TASK_ID]) == 0
 

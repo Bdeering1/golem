@@ -29,7 +29,16 @@ class T3CodeError(Exception):
     pass
 
 
-T3_CODE_ERRORS = (T3CodeError, OSError, WebSocketException, ValueError, KeyError, TypeError)
+T3_CODE_ERRORS = (
+    T3CodeError,
+    OSError,
+    http.client.HTTPException,
+    WebSocketException,
+    ValueError,
+    KeyError,
+    TypeError,
+    AttributeError,
+)
 
 
 def t3_home() -> Path:
@@ -45,13 +54,13 @@ def server_runtime_path() -> Path:
     return t3_home() / "userdata" / "server-runtime.json"
 
 
-def thread_id(task: ledger.Task, conversation_id: str) -> str:
+def task_thread_id(task: ledger.Task, conversation_id: str) -> str:
     return f"golem:{ledger.task_backend(task)}:{conversation_id}"
 
 
 def thread_link(task: ledger.Task, conversation_id: str) -> str:
     environment_id = (t3_home() / "userdata" / "environment-id").read_text(encoding="utf-8")
-    encoded_thread_id = parse.quote(thread_id(task, conversation_id), safe="")
+    encoded_thread_id = parse.quote(task_thread_id(task, conversation_id), safe="")
     return f"t3code://threads/{environment_id.strip()}/{encoded_thread_id}"
 
 
@@ -159,8 +168,8 @@ def start_app() -> None:
     wait_for_server()
 
 
-def is_thread_present(thread: str) -> bool:
-    return run_t3("thread", "show", thread, "--json").returncode == 0
+def is_thread_present(thread_id: str) -> bool:
+    return run_t3("thread", "show", thread_id, "--json").returncode == 0
 
 
 def project_root(task: ledger.Task) -> str:
@@ -206,10 +215,10 @@ def worktree_and_branch(task: ledger.Task, root: str) -> tuple[str | None, str |
     return directory, branch or None
 
 
-def ensure_thread(task: ledger.Task, conversation_id: str, thread: str) -> None:
+def ensure_thread(task: ledger.Task, conversation_id: str, thread_id: str) -> None:
     if not server_runtime_path().exists():
         start_app()
-    if is_thread_present(thread):
+    if is_thread_present(thread_id):
         return
     origin = server_origin()
     token = issue_token()
@@ -224,9 +233,9 @@ def ensure_thread(task: ledger.Task, conversation_id: str, thread: str) -> None:
             "createdBy": "user",
             "creationSource": "web",
             "commandId": str(uuid.uuid4()),
-            "threadId": thread,
+            "threadId": thread_id,
             "projectId": project_id(origin, token, root),
-            "title": (task["prompt"].strip().splitlines() or [thread])[0],
+            "title": (task["prompt"].strip().splitlines() or [thread_id])[0],
             "modelSelection": {"instanceId": instance_id, "model": default_model(instance_id)},
             "runtimeMode": "full-access",
             "interactionMode": "default",
@@ -237,7 +246,7 @@ def ensure_thread(task: ledger.Task, conversation_id: str, thread: str) -> None:
             },
         },
     )
-    if not is_thread_present(thread):
+    if not is_thread_present(thread_id):
         raise T3CodeError("thread is missing after thread.create")
 
 
@@ -245,18 +254,18 @@ def prepare_thread(task: ledger.Task, conversation_id: str) -> None:
     cli_path = t3_cli_path()
     if not cli_path.exists():
         raise SystemExit(f"golem: T3 Code is not installed: {cli_path} not found")
-    thread = thread_id(task, conversation_id)
+    thread_id = task_thread_id(task, conversation_id)
     try:
-        ensure_thread(task, conversation_id, thread)
+        ensure_thread(task, conversation_id, thread_id)
     except T3_CODE_ERRORS as error:
         version = run_t3("--version").stdout.strip()
         raise SystemExit(
-            f"golem: T3 Code {version} could not open thread {thread}: {error}"
+            f"golem: T3 Code {version} could not open thread {thread_id}: {error}"
         ) from error
 
 
-def print_delete_failure(thread: str, error: Exception) -> None:
-    print(f"golem: could not delete T3 Code thread {thread}: {error}", file=sys.stderr)
+def print_delete_failure(thread_id: str, error: Exception) -> None:
+    print(f"golem: could not delete T3 Code thread {thread_id}: {error}", file=sys.stderr)
 
 
 def delete_threads(thread_ids: list[str]) -> None:
@@ -266,15 +275,15 @@ def delete_threads(thread_ids: list[str]) -> None:
         origin = server_origin()
         token = issue_token()
     except T3_CODE_ERRORS as error:
-        for thread in thread_ids:
-            print_delete_failure(thread, error)
+        for thread_id in thread_ids:
+            print_delete_failure(thread_id, error)
         return
-    for thread in thread_ids:
+    for thread_id in thread_ids:
         try:
             dispatch_command(
                 origin,
                 token,
-                {"type": "thread.delete", "commandId": str(uuid.uuid4()), "threadId": thread},
+                {"type": "thread.delete", "commandId": str(uuid.uuid4()), "threadId": thread_id},
             )
         except T3_CODE_ERRORS as error:
-            print_delete_failure(thread, error)
+            print_delete_failure(thread_id, error)

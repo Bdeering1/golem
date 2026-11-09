@@ -61,7 +61,7 @@ def pickup(
         return open_app_and_mark_done(
             task_id,
             client.command(task, conversation_id, []),
-            t3_code.thread_id(task, conversation_id) if client.has_t3_code_thread else None,
+            t3_code.task_thread_id(task, conversation_id) if client.has_t3_code_thread else None,
         )
     try:
         return subprocess.run(
