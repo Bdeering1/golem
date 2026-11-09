@@ -63,6 +63,7 @@ class Task(TypedDict):
     worktree: NotRequired[str]
     worktree_pending: NotRequired[bool]
     thread_id: NotRequired[str]
+    t3_code_thread_id: NotRequired[str]
     result: NotRequired[str]
     returncode: NotRequired[int]
     usage_limit_resume_count: NotRequired[int]

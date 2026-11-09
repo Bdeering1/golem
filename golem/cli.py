@@ -396,7 +396,10 @@ def add_pickup_command(add_parser: Callable[..., argparse.ArgumentParser]) -> No
         "-c",
         "--client",
         choices=tuple(clients.CLIENTS),
-        help="open the task in this client; app clients use the app's default permission mode",
+        help=(
+            "open the task in this client; claude-desktop uses the app's default permission "
+            "mode and t3-code uses full access"
+        ),
     )
     set_command_handler(
         pickup_command,

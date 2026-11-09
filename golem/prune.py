@@ -3,7 +3,7 @@ import time
 from datetime import timedelta
 from pathlib import Path
 
-from golem import chains, delete, display, ledger, locks
+from golem import chains, delete, display, ledger, locks, t3_code
 from golem.backends import registry
 
 PRUNE_IDLE_DAYS = 7
@@ -130,6 +130,7 @@ def prune_selection(
 
 
 def delete_pruned_tasks(selected_tasks: ledger.Tasks) -> None:
+    deleted_tasks: list[ledger.Task] = []
     with ledger.locked_ledger() as (tasks, worktrees):
         for task_id, evaluated_task in selected_tasks.items():
             if (
@@ -143,7 +144,9 @@ def delete_pruned_tasks(selected_tasks: ledger.Tasks) -> None:
                 print(f"golem: kept {task_id}: no longer eligible", file=sys.stderr)
                 continue
             delete.delete_task_and_release_worktrees(tasks, worktrees, [task_id])
+            deleted_tasks.append(evaluated_task)
             print(f"golem: deleted task: {task_id}")
+    t3_code.delete_threads(t3_code.recorded_thread_ids(deleted_tasks))
 
 
 def prune_tasks(*, is_confirmed: bool) -> int:

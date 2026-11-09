@@ -2,17 +2,21 @@ import os
 import subprocess
 import sys
 
-from golem import chains, clients, ledger, locks, task_directories
+from golem import chains, clients, ledger, locks, t3_code, task_directories
 from golem.backends import registry
 
 
-def open_app_and_mark_done(task_id: str, command: list[str]) -> int:
+def open_app_and_mark_done(
+    task_id: str, command: list[str], t3_code_thread_id: str | None = None
+) -> int:
     returncode = subprocess.run(command, check=False).returncode
     if returncode != 0:
         return returncode
     with ledger.locked_tasks() as tasks:
         current_task = tasks.get(task_id)
         if current_task is not None:
+            if t3_code_thread_id is not None:
+                current_task["t3_code_thread_id"] = t3_code_thread_id
             chains.mark_task_done(tasks, current_task)
     return 0
 
@@ -53,10 +57,15 @@ def pickup(
         cwd = ledger.task_directory(task)
     if not client.is_terminal:
         locks.release_lock(directory_lock_file)
-        return open_app_and_mark_done(task_id, client.command(conversation_id, []))
+        client.prepare(task, conversation_id)
+        return open_app_and_mark_done(
+            task_id,
+            client.command(task, conversation_id, []),
+            t3_code.task_thread_id(task, conversation_id) if client.has_t3_code_thread else None,
+        )
     try:
         return subprocess.run(
-            client.command(conversation_id, list(agent_args)),
+            client.command(task, conversation_id, list(agent_args)),
             cwd=cwd,
             env=client.environment(os.environ.copy()),
             pass_fds=(directory_lock_file.fileno(),),
