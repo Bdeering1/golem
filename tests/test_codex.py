@@ -385,6 +385,13 @@ def test_codex_usage_limit_stores_result_and_stops_after_resume_limit(
 
 
 @pytest.mark.parametrize(
+    ("backend_id", "agent_args"),
+    [
+        pytest.param(ledger.BACKEND_CODEX, [], id="codex"),
+        pytest.param(ledger.BACKEND_T3, ["--provider", "codex"], id="t3-codex"),
+    ],
+)
+@pytest.mark.parametrize(
     ("status", "command"),
     [
         pytest.param(ledger.STATUS_FAILED, "retry", id="retry"),
@@ -392,10 +399,10 @@ def test_codex_usage_limit_stores_result_and_stops_after_resume_limit(
     ],
 )
 def test_codex_retry_and_reschedule_use_codex_reset_time(
-    installed_launch_agent, ledger_path, monkeypatch, status, command
+    installed_launch_agent, ledger_path, monkeypatch, status, command, backend_id, agent_args
 ):
     reset_time = datetime.now(UTC).replace(second=0, microsecond=0) + timedelta(hours=1)
-    support.write_task(ledger_path, status, backend=ledger.BACKEND_CODEX)
+    support.write_task(ledger_path, status, backend=backend_id, agent_args=agent_args)
     monkeypatch.setattr(claude, "next_reset_time", lambda: pytest.fail("Claude lookup ran"))
     monkeypatch.setattr(codex, "next_codex_reset_time", lambda: reset_time)
 

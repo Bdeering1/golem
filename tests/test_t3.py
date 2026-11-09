@@ -53,10 +53,6 @@ def write_send_result(server, exit_code, *, reply=None, error=None):
     (server.home / "send-exit").write_text(str(exit_code), encoding="utf-8")
 
 
-def thread_id(task):
-    return f"golem:t3:{task['session_id']}"
-
-
 def execute(ledger_path, task_id=support.TASK_ID):
     task = support.read_task(ledger_path, task_id)
     cli.main(["_execute", task_id, task["session_id"]])
@@ -100,7 +96,7 @@ def test_run_creates_thread_in_worktree_and_records_reply(
         "type": "thread.create",
         "createdBy": "user",
         "creationSource": "web",
-        "threadId": thread_id(task),
+        "threadId": t3.conversation_id(task),
         "projectId": t3_support.PROJECT_ID,
         "title": support.PROMPT,
         "modelSelection": {"instanceId": instance_id, "model": model},
@@ -109,13 +105,13 @@ def test_run_creates_thread_in_worktree_and_records_reply(
         "branch": f"worktree-{Path(worktree).name}",
         "worktreePath": worktree,
     }
-    assert f"thread send {thread_id(task)} - --wait --json" in t3_server.t3_calls()
+    assert f"thread send {t3.conversation_id(task)} - --wait --json" in t3_server.t3_calls()
     assert (t3_server.home / "sent-message").read_text(encoding="utf-8") == support.PROMPT
     send_cwd = (t3_server.home / "send-cwd").read_text(encoding="utf-8").strip()
     assert Path(send_cwd).resolve() == Path(worktree).resolve()
     assert task["status"] == ledger.STATUS_NEEDS_REVIEW
     assert task["result"] == T3_REPLY
-    assert task["t3_code_thread_id"] == thread_id(task)
+    assert task["t3_code_thread_id"] == t3.conversation_id(task)
     assert task["native_session_id"] == NATIVE_SESSION_ID
     progress = progress_log.progress_path(task["session_id"]).read_text(encoding="utf-8")
     assert common.tool_call_progress("command", "make test") in progress
@@ -212,28 +208,32 @@ def test_gate_stops_chain_and_hooks_only_claude_tasks(
     assert (Path.cwd() / ".claude" / "settings.local.json").exists() == is_claude
 
 
-@pytest.mark.parametrize(
-    ("is_thread_present", "expected_error"),
-    [(True, None), (False, "no longer exists")],
-)
-def test_pickup_opens_t3_task_in_t3_code_without_client(
-    server, ledger_path, fake_commands, is_thread_present, expected_error
-):
+def test_pickup_opens_t3_task_in_t3_code_without_client(server, ledger_path, fake_commands):
     support.write_task(ledger_path, ledger.STATUS_NEEDS_REVIEW, backend=ledger.BACKEND_T3)
-    task = support.read_task(ledger_path)
-    if is_thread_present:
-        (server.home / "thread-present").touch()
+    (server.home / "thread-present").touch()
 
-    if expected_error is not None:
-        with pytest.raises(SystemExit, match=expected_error):
-            cli.main(["pickup", support.TASK_ID])
-        return
     assert cli.main(["pickup", support.TASK_ID]) == 0
 
+    task = support.read_task(ledger_path)
     assert fake_commands["open-args"].read_text(encoding="utf-8") == (
-        f"{t3_support.thread_link(thread_id(task))}\n"
+        f"{t3_support.thread_link(t3.conversation_id(task))}\n"
     )
-    assert support.read_task(ledger_path)["status"] == ledger.STATUS_DONE
+    assert task["status"] == ledger.STATUS_DONE
+
+
+def test_pickup_refuses_t3_task_without_thread(server, ledger_path, fake_commands):
+    support.write_task(ledger_path, ledger.STATUS_NEEDS_REVIEW, backend=ledger.BACKEND_T3)
+
+    with pytest.raises(SystemExit, match="thread does not exist in T3 Code"):
+        cli.main(["pickup", support.TASK_ID])
+
+
+def test_run_does_not_store_configured_environment(installed_launch_agent, ledger_path):
+    support.write_config_table("env", {"NAME": "value"})
+
+    assert cli.main(["run", support.TASK_ID, support.PROMPT, "--backend", "t3", "--now"]) == 0
+
+    assert "NAME" not in support.read_task(ledger_path)["environment"]
 
 
 @pytest.mark.parametrize(

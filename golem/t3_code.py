@@ -259,7 +259,7 @@ def ensure_thread(task: ledger.Task, conversation_id: str, thread_id: str) -> No
     if is_thread_present(thread_id):
         return
     if task["backend"] == ledger.BACKEND_T3:
-        raise T3CodeError("thread no longer exists in T3 Code")
+        raise T3CodeError("thread does not exist in T3 Code")
     origin = server_origin()
     token = issue_token()
     instance_id = INSTANCE_IDS[task["backend"]]

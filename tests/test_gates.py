@@ -14,6 +14,8 @@ from golem import cli, gates, launch_agent, ledger, locks, spawn
 from golem.backends import claude, claude_hooks
 from tests import support
 
+NATIVE_SESSION_ID = "native-session"
+
 
 def gate_inputs(tmp_path):
     log_path = tmp_path / "gate-stdin"
@@ -329,21 +331,25 @@ def run_hook(monkeypatch, capsys, event, session_id):
 
 
 @pytest.mark.parametrize(
-    "parent_status",
-    [ledger.STATUS_NEEDS_REVIEW, ledger.STATUS_DONE],
-    ids=["needs-review", "opened-in-app"],
+    ("parent_status", "hook_session_id"),
+    [
+        pytest.param(ledger.STATUS_NEEDS_REVIEW, support.PARENT_SESSION, id="needs-review"),
+        pytest.param(ledger.STATUS_DONE, support.PARENT_SESSION, id="opened-in-app"),
+        pytest.param(ledger.STATUS_NEEDS_REVIEW, NATIVE_SESSION_ID, id="native-session"),
+    ],
 )
 def test_stop_hook_continues_stopped_chain_when_gate_passes(
-    ledger_path, tmp_path, started_executors, monkeypatch, capsys, parent_status
+    ledger_path, tmp_path, started_executors, monkeypatch, capsys, parent_status, hook_session_id
 ):
     support.write_parent_with_waiting_child(
         ledger_path,
         parent_status,
         gate=support.gate_command(tmp_path),
         gate_stop_reason=support.GATE_STOP_REASON,
+        native_session_id=NATIVE_SESSION_ID,
     )
 
-    output = run_hook(monkeypatch, capsys, claude_hooks.HOOK_ARGUMENT_STOP, support.PARENT_SESSION)
+    output = run_hook(monkeypatch, capsys, claude_hooks.HOOK_ARGUMENT_STOP, hook_session_id)
 
     assert json.loads(output)["systemMessage"].endswith(support.CHILD_ID)
     assert support.read_task(ledger_path, support.PARENT_ID)["status"] == ledger.STATUS_DONE
