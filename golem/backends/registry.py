@@ -22,3 +22,7 @@ def agent_backend_id(backend_id: str, agent_args: list[str]) -> str:
 
 def usage_backend(backend_id: str, agent_args: list[str]) -> common.UsageBackend:
     return USAGE_BACKENDS[agent_backend_id(backend_id, agent_args)]
+
+
+def task_usage_backend(task: ledger.Task) -> common.UsageBackend:
+    return usage_backend(task["backend"], task["agent_args"])

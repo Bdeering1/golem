@@ -160,7 +160,7 @@ def retry_task(task_id: str, *, is_now: bool, at_text: str | None) -> int:
     launch_agent.require_launch_agent()
     when = (
         planned_execution_time(
-            registry.usage_backend(retryable["backend"], retryable["agent_args"]),
+            registry.task_usage_backend(retryable),
             is_now=is_now,
             at_text=at_text,
         )
@@ -221,7 +221,7 @@ def reschedule_task(task_id: str, *, is_now: bool, at_text: str | None) -> int:
     launch_agent.require_launch_agent()
     when = (
         planned_execution_time(
-            registry.usage_backend(task["backend"], task["agent_args"]),
+            registry.task_usage_backend(task),
             is_now=is_now,
             at_text=at_text,
         )

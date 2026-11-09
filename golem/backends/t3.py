@@ -5,7 +5,7 @@ import time
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 if TYPE_CHECKING:
     import io
@@ -66,18 +66,16 @@ def transcript_paths(task: ledger.Task) -> list[Path]:
     return codex.session_transcript_paths(task, native_session_id)
 
 
-def record_thread_id(task_id: str, session_id: str, thread_id: str) -> None:
+def record_thread_field(
+    task_id: str,
+    session_id: str,
+    name: Literal["t3_code_thread_id", "native_session_id"],
+    value: str,
+) -> None:
     with ledger.locked_tasks() as tasks:
         task = tasks.get(task_id)
         if task is not None and task.get("session_id") == session_id:
-            task["t3_code_thread_id"] = thread_id
-
-
-def record_native_session_id(task_id: str, session_id: str, native_session_id: str) -> None:
-    with ledger.locked_tasks() as tasks:
-        task = tasks.get(task_id)
-        if task is not None and task.get("session_id") == session_id:
-            task["native_session_id"] = native_session_id
+            task[name] = value
 
 
 def create_thread(task_id: str, task: ledger.Task, thread_id: str) -> None:
@@ -92,7 +90,7 @@ def create_thread(task_id: str, task: ledger.Task, thread_id: str) -> None:
             origin, token, task, thread_id, instance_id, model or t3_code.default_model(instance_id)
         ),
     )
-    record_thread_id(task_id, task["session_id"], thread_id)
+    record_thread_field(task_id, task["session_id"], "t3_code_thread_id", thread_id)
 
 
 def json_objects(value: object) -> list[ledger.JsonObject]:
@@ -194,7 +192,9 @@ class ThreadWatcher:
                     self.record_progress(progress)
             native_session_id = projection_native_session_id(projection)
             if native_session_id is not None and native_session_id != self.native_session_id:
-                record_native_session_id(self.task_id, self.session_id, native_session_id)
+                record_thread_field(
+                    self.task_id, self.session_id, "native_session_id", native_session_id
+                )
                 self.native_session_id = native_session_id
 
     def last_failure(self) -> ledger.JsonObject:

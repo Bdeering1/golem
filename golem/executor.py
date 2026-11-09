@@ -52,7 +52,7 @@ def mark_task_waiting_for_reset(task_id: str, result: str, reset_time: datetime 
             scheduling.rounded_execution_time(reset_time)
             if reset_time is not None
             else scheduling.planned_execution_time(
-                registry.usage_backend(task["backend"], task["agent_args"]),
+                registry.task_usage_backend(task),
                 is_now=False,
                 at_text=None,
             )
