@@ -1,5 +1,4 @@
-from golem import ledger
-from golem.backends import registry
+from golem import clients, ledger
 
 
 def can_start_dependents(task: ledger.Task) -> bool:
@@ -72,11 +71,14 @@ def is_dependent_reservable(tasks: ledger.Tasks, parent_id: str) -> bool:
     return not can_start_dependents(tasks[parent_id]) or is_gate_pending(tasks, parent_id)
 
 
-def add_dependent_records(tasks: ledger.Tasks, records: ledger.Tasks, parent_id: str) -> None:
-    if tasks[parent_id].get("auto_pickup"):
+def add_dependent_records(
+    tasks: ledger.Tasks, records: ledger.Tasks, parent_id: str, default_clients: dict[str, str]
+) -> None:
+    if clients.task_auto_pickup_client(tasks[parent_id]) is not None:
         for record in records.values():
-            if registry.task_backend(record).IS_AUTO_PICKUP_SUPPORTED:
-                record["auto_pickup"] = True
+            client_name = default_clients.get(ledger.task_backend(record))
+            if client_name is not None:
+                record["auto_pickup_client"] = client_name
     tasks.update(records)
 
 

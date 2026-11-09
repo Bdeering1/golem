@@ -83,6 +83,12 @@ def load_environment() -> dict[str, str]:
     return environment
 
 
+def load_default_clients() -> dict[str, str]:
+    return clients.default_clients(
+        load_string_table("default_clients", "default client"), invalid_config_message_prefix()
+    )
+
+
 def task_environment(assignments: list[str]) -> dict[str, str]:
     environment = load_environment()
     for assignment in assignments:
@@ -155,8 +161,12 @@ def task_id_from_arguments(arguments: ledger.Arguments) -> str:
 
 def run_task_from_arguments(arguments: ledger.Arguments) -> int:
     backend = registry.BACKENDS[arguments.backend]
-    if arguments.auto_pickup and not backend.IS_AUTO_PICKUP_SUPPORTED:
-        raise SystemExit(f"golem: --auto-pickup does not support {backend.NAME} tasks")
+    default_clients = load_default_clients()
+    auto_pickup_client = default_clients.get(arguments.backend) if arguments.auto_pickup else None
+    if arguments.auto_pickup and auto_pickup_client is None:
+        raise SystemExit(
+            f"golem: --auto-pickup requires a default app client for {backend.NAME} tasks"
+        )
     if arguments.gate is not None and not backend.IS_GATE_SUPPORTED:
         raise SystemExit(f"golem: --gate does not support {backend.NAME} tasks")
     launch_agent.require_launch_agent()
@@ -170,7 +180,7 @@ def run_task_from_arguments(arguments: ledger.Arguments) -> int:
     placement = scheduling.RunPlacement(
         str(Path.cwd()),
         environment=task_environment(arguments.env),
-        is_auto_pickup=arguments.auto_pickup,
+        auto_pickup_client=auto_pickup_client,
         is_no_worktree=arguments.no_worktree,
         gate=arguments.gate,
         setup=arguments.setup,
@@ -196,7 +206,13 @@ def run_task_from_arguments(arguments: ledger.Arguments) -> int:
     )
     backend.validate_run_arguments(list(task_args))
     exit_code = scheduling.schedule_run_task(
-        arguments, task_id, prompt_text, task_args, follow_up_records, placement
+        arguments,
+        task_id,
+        prompt_text,
+        task_args,
+        follow_up_records,
+        placement,
+        default_clients=default_clients,
     )
     for task_id, record in follow_up_records.items():
         print(f"golem: {task_id} will run after {record.get('after')}")
@@ -325,7 +341,10 @@ def add_run_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
     run_command.add_argument(
         "--auto-pickup",
         action="store_true",
-        help="open the session in the Claude desktop app when the task succeeds; follow-ups get it too",
+        help=(
+            "open the session in the backend's default app client when the task succeeds; "
+            "follow-ups get it too"
+        ),
     )
     run_command.add_argument(
         "--no-worktree",
@@ -361,15 +380,15 @@ def add_pickup_command(add_parser: Callable[..., argparse.ArgumentParser]) -> No
         "--all", action="store_true", help="open every task that needs review"
     )
     pickup_command.add_argument(
+        "-c",
         "--client",
         choices=tuple(clients.CLIENTS),
         help="open the task in this client; app clients use the app's default permission mode",
     )
-    pickup_command.add_argument("--app", action="store_true", help=argparse.SUPPRESS)
     set_command_handler(
         pickup_command,
         lambda arguments: (
-            review.pickup_all(cast("str", arguments.client))
+            review.pickup_all(arguments.client, {} if arguments.client else load_default_clients())
             if arguments.all
             else review.pickup(
                 task_id_from_arguments(arguments),
@@ -559,12 +578,12 @@ def apply_leading_directory_options(golem_args: list[str]) -> list[str]:
 
 
 def validate_pickup_arguments(parser: argparse.ArgumentParser, arguments: ledger.Arguments) -> None:
-    if arguments.app:
-        parser.error(f"pickup --app was removed; use --client {clients.AUTO_PICKUP_CLIENT}")
     client = clients.CLIENTS[arguments.client] if arguments.client else None
     if arguments.agent_args and client is not None and not client.is_terminal:
         parser.error(f"pickup --client {client.name} does not accept agent arguments")
-    if arguments.all and (client is None or client.is_terminal):
+    if arguments.all and arguments.agent_args:
+        parser.error("pickup --all does not accept agent arguments")
+    if arguments.all and client is not None and client.is_terminal:
         parser.error("pickup --all requires an app client")
     if arguments.all and arguments.id is not None:
         parser.error("pickup --all does not accept an ID")
