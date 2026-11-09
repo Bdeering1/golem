@@ -5,4 +5,4 @@ BACKENDS: dict[str, common.Backend] = {ledger.BACKEND_CLAUDE: claude, ledger.BAC
 
 
 def task_backend(task: ledger.Task) -> common.Backend:
-    return BACKENDS[ledger.task_backend(task)]
+    return BACKENDS[task["backend"]]

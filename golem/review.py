@@ -74,7 +74,7 @@ def is_ready_for_review(tasks: ledger.Tasks, task_id: str) -> bool:
 
 
 def default_client_name(task_id: str, task: ledger.Task, default_clients: dict[str, str]) -> str:
-    client_name = default_clients.get(ledger.task_backend(task))
+    client_name = default_clients.get(task["backend"])
     if client_name is None:
         backend = registry.task_backend(task)
         raise SystemExit(f"golem: no default app client for {backend.NAME} tasks: {task_id}")

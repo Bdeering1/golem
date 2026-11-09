@@ -189,3 +189,79 @@ def test_run_rejects_invalid_environment_without_changing_the_ledger(
         cli.main(["run", support.TASK_ID, support.PROMPT, "--now", *arguments])
 
     assert not ledger_path.exists()
+
+
+@pytest.mark.parametrize(
+    ("config_text", "arguments", "expected_backend"),
+    [
+        pytest.param(None, [], ledger.BACKEND_CLAUDE, id="no-default"),
+        pytest.param('default_backend = "codex"\n', [], ledger.BACKEND_CODEX, id="saved-default"),
+        pytest.param(
+            'default_backend = "codex"\n',
+            ["--backend", ledger.BACKEND_CLAUDE],
+            ledger.BACKEND_CLAUDE,
+            id="flag-overrides-default",
+        ),
+    ],
+)
+def test_run_backend_comes_from_flag_then_saved_default(
+    installed_launch_agent, ledger_path, config_text, arguments, expected_backend
+):
+    if config_text is not None:
+        support.write_config_text(config_text)
+
+    assert (
+        cli.main(
+            [
+                *["run", support.TASK_ID, support.PROMPT, "--now", *arguments],
+                *["--then", support.CHILD_ID, support.CHILD_PROMPT],
+            ]
+        )
+        == 0
+    )
+
+    for task_id in (support.TASK_ID, support.CHILD_ID):
+        assert support.read_task(ledger_path, task_id)["backend"] == expected_backend
+
+
+def test_run_after_parent_uses_saved_default_not_parent_backend(
+    installed_launch_agent, ledger_path
+):
+    support.write_task(
+        ledger_path,
+        ledger.STATUS_SCHEDULED,
+        task_id=support.PARENT_ID,
+        backend=ledger.BACKEND_CLAUDE,
+    )
+    support.write_config_text('default_backend = "codex"\n')
+
+    assert (
+        cli.main(["run", support.CHILD_ID, support.CHILD_PROMPT, "--after", support.PARENT_ID]) == 0
+    )
+
+    assert support.read_task(ledger_path, support.CHILD_ID)["backend"] == ledger.BACKEND_CODEX
+
+
+@pytest.mark.parametrize(
+    ("config_text", "message"),
+    [
+        pytest.param("default_backend = 1\n", "default_backend must be a string", id="non-string"),
+        pytest.param(
+            'default_backend = "gemini"\n',
+            "default_backend names unknown backend gemini",
+            id="unknown",
+        ),
+    ],
+)
+def test_invalid_default_backend_fails_run_only(
+    installed_launch_agent, ledger_path, config_text, message
+):
+    support.write_config_text(config_text)
+
+    with pytest.raises(SystemExit, match=message):
+        cli.main(
+            ["run", support.TASK_ID, support.PROMPT, "--now", "--backend", ledger.BACKEND_CLAUDE]
+        )
+
+    assert not ledger_path.exists()
+    assert cli.main(["alias", "list"]) == 0

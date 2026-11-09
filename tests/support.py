@@ -45,6 +45,7 @@ def task_record(status: str, *, task_id=TASK_ID, **fields: object) -> ledger.Tas
         "agent_args": [],
         "cwd": str(Path.cwd()),
         "due_at": datetime.now(UTC).isoformat(),
+        "backend": ledger.BACKEND_CLAUDE,
         "environment": {"PATH": os.environ["PATH"]},
         "prompt": PROMPT,
         "session_id": f"{task_id}-session",
