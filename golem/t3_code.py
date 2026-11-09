@@ -225,7 +225,7 @@ def ensure_thread(task: ledger.Task, conversation_id: str, thread: str) -> None:
             "commandId": str(uuid.uuid4()),
             "threadId": thread,
             "projectId": project_id(origin, token, project_root(task)),
-            "title": task["prompt"].strip().splitlines()[0],
+            "title": (task["prompt"].strip().splitlines() or [thread])[0],
             "modelSelection": {"instanceId": instance_id, "model": default_model(instance_id)},
             "runtimeMode": "full-access",
             "interactionMode": "default",
@@ -254,6 +254,10 @@ def prepare_thread(task: ledger.Task, conversation_id: str) -> None:
         ) from error
 
 
+def print_delete_failure(thread: str, error: Exception) -> None:
+    print(f"golem: could not delete T3 Code thread {thread}: {error}", file=sys.stderr)
+
+
 def delete_threads(thread_ids: list[str]) -> None:
     if not thread_ids or not server_runtime_path().exists():
         return
@@ -262,7 +266,7 @@ def delete_threads(thread_ids: list[str]) -> None:
         token = issue_token()
     except T3_CODE_ERRORS as error:
         for thread in thread_ids:
-            print(f"golem: could not delete T3 Code thread {thread}: {error}", file=sys.stderr)
+            print_delete_failure(thread, error)
         return
     for thread in thread_ids:
         try:
@@ -272,4 +276,4 @@ def delete_threads(thread_ids: list[str]) -> None:
                 {"type": "thread.delete", "commandId": str(uuid.uuid4()), "threadId": thread},
             )
         except T3_CODE_ERRORS as error:
-            print(f"golem: could not delete T3 Code thread {thread}: {error}", file=sys.stderr)
+            print_delete_failure(thread, error)

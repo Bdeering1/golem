@@ -363,7 +363,10 @@ def add_pickup_command(add_parser: Callable[..., argparse.ArgumentParser]) -> No
     pickup_command.add_argument(
         "--client",
         choices=tuple(clients.CLIENTS),
-        help="open the task in this client; app clients use the app's default permission mode",
+        help=(
+            "open the task in this client; claude-desktop uses the app's default permission "
+            "mode and t3-code uses full access"
+        ),
     )
     pickup_command.add_argument("--app", action="store_true", help=argparse.SUPPRESS)
     set_command_handler(
