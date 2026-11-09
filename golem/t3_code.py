@@ -55,7 +55,7 @@ def server_runtime_path() -> Path:
 
 
 def task_thread_id(task: ledger.Task, conversation_id: str) -> str:
-    return f"golem:{ledger.task_backend(task)}:{conversation_id}"
+    return f"golem:{task['backend']}:{conversation_id}"
 
 
 def thread_link(task: ledger.Task, conversation_id: str) -> str:
@@ -222,7 +222,7 @@ def ensure_thread(task: ledger.Task, conversation_id: str, thread_id: str) -> No
         return
     origin = server_origin()
     token = issue_token()
-    instance_id = INSTANCE_IDS[ledger.task_backend(task)]
+    instance_id = INSTANCE_IDS[task["backend"]]
     root = project_root(task)
     worktree, branch = worktree_and_branch(task, root)
     dispatch_command(
