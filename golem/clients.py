@@ -89,7 +89,7 @@ CLIENTS: dict[str, Client] = {
 
 def task_client(task_id: str, task: ledger.Task, client_name: str | None) -> Client:
     backend = registry.task_backend(task)
-    task_backend_id = ledger.task_backend(task)
+    task_backend_id = task["backend"]
     if client_name is not None:
         client = CLIENTS[client_name]
         if task_backend_id not in client.backend_ids:

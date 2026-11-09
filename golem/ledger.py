@@ -56,8 +56,8 @@ class Task(TypedDict):
     agent_args: list[str]
     status: str
     session_id: str
+    backend: str
     environment: NotRequired[dict[str, str]]
-    backend: NotRequired[str]
     after: NotRequired[str]
     due_at: NotRequired[str]
     worktree: NotRequired[str]
@@ -236,10 +236,6 @@ def remove_interrupted_ledger_writes() -> None:
         f"{ledger_temporary_prefix(task_ledger_path)}*"
     ):
         temporary_path.unlink(missing_ok=True)
-
-
-def task_backend(task: Task) -> str:
-    return task.get("backend", BACKEND_CLAUDE)
 
 
 def task_directory(task: Task) -> str:

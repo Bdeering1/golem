@@ -83,6 +83,18 @@ def load_environment() -> dict[str, str]:
     return environment
 
 
+def load_default_backend() -> str:
+    default_backend = load_config().get("default_backend", ledger.BACKEND_CLAUDE)
+    if not isinstance(default_backend, str):
+        raise SystemExit(f"{invalid_config_message_prefix()}: default_backend must be a string")
+    if default_backend not in registry.BACKENDS:
+        raise SystemExit(
+            f"{invalid_config_message_prefix()}: default_backend names unknown backend "
+            f"{default_backend}"
+        )
+    return default_backend
+
+
 def load_default_clients() -> dict[str, str]:
     return clients.default_clients(
         load_string_table("default_clients", "default client"), invalid_config_message_prefix()
@@ -160,6 +172,8 @@ def task_id_from_arguments(arguments: ledger.Arguments) -> str:
 
 
 def run_task_from_arguments(arguments: ledger.Arguments) -> int:
+    default_backend = load_default_backend()
+    arguments.backend = arguments.backend or default_backend
     backend = registry.BACKENDS[arguments.backend]
     default_clients = load_default_clients()
     auto_pickup_client = default_clients.get(arguments.backend) if arguments.auto_pickup else None
@@ -318,7 +332,6 @@ def add_run_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
     run_command.add_argument(
         "--backend",
         choices=tuple(registry.BACKENDS),
-        default=ledger.BACKEND_CLAUDE,
     )
     prompt_group = run_command.add_mutually_exclusive_group(required=True)
     prompt_group.add_argument("prompt", nargs="?")

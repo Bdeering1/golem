@@ -76,7 +76,7 @@ def add_dependent_records(
 ) -> None:
     if clients.task_auto_pickup_client(tasks[parent_id]) is not None:
         for record in records.values():
-            client_name = default_clients.get(ledger.task_backend(record))
+            client_name = default_clients.get(record["backend"])
             if client_name is not None:
                 record["auto_pickup_client"] = client_name
     tasks.update(records)
