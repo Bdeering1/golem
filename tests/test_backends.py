@@ -14,7 +14,6 @@ STUB_RESULT = "stub finished"
 class StubBackend:
     NAME: str = "Stub"
     IS_GATE_SUPPORTED: bool = False
-    IS_AUTO_PICKUP_SUPPORTED: bool = False
 
     def __init__(self) -> None:
         self.outcomes: list[common.RunOutcome] = []
@@ -94,7 +93,13 @@ def test_registered_backend_runs_through_task_lifecycle(
     assert f"golem: session: stub-{child['session_id']}" in capsys.readouterr().out
 
 
-@pytest.mark.parametrize("flag", [["--auto-pickup"], ["--gate", "true"]])
-def test_registered_backend_refuses_unsupported_run_options(stub_backend, flag):
-    with pytest.raises(SystemExit, match="does not support Stub tasks"):
+@pytest.mark.parametrize(
+    ("flag", "message"),
+    [
+        (["--auto-pickup"], "--auto-pickup requires a default app client for Stub tasks"),
+        (["--gate", "true"], "--gate does not support Stub tasks"),
+    ],
+)
+def test_registered_backend_refuses_unsupported_run_options(stub_backend, flag, message):
+    with pytest.raises(SystemExit, match=message):
         cli.main(["run", support.TASK_ID, support.PROMPT, "--backend", STUB_BACKEND_ID, *flag])

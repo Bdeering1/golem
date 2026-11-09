@@ -69,6 +69,7 @@ class Task(TypedDict):
     usage_limit_resume_count: NotRequired[int]
     started_at: NotRequired[str]
     auto_pickup: NotRequired[bool]
+    auto_pickup_client: NotRequired[str]
     no_worktree: NotRequired[bool]
     gate: NotRequired[str]
     gate_stop_reason: NotRequired[str]
@@ -107,7 +108,6 @@ class Arguments(argparse.Namespace):
     now: bool
     at: str | None
     all: bool
-    app: bool
     client: str | None
     yes: bool
     off: bool
