@@ -67,7 +67,7 @@ golem run add-auth "Add password reset" \
 golem reads `~/.config/golem/config.toml`, or the same path under `$XDG_CONFIG_HOME`.
 
 ```toml
-# Backend for golem run when --backend is missing. Defaults to claude
+# golem run uses this backend unless you pass --backend. Defaults to claude
 default_backend = "codex"
 
 [aliases]
