@@ -198,12 +198,12 @@ def default_model(instance_id: str) -> str:
     return slug if isinstance(slug, str) else DEFAULT_MODELS[instance_id]
 
 
-def worktree_and_branch(task: ledger.Task) -> tuple[str | None, str | None]:
-    worktree = task.get("worktree")
-    if worktree is None or not Path(worktree).is_dir():
+def worktree_and_branch(task: ledger.Task, root: str) -> tuple[str | None, str | None]:
+    directory = ledger.task_directory(task)
+    if git.resolved_path(directory) == git.resolved_path(root):
         return None, None
-    branch = git.run_git(worktree, "branch", "--show-current").stdout.strip()
-    return worktree, branch or None
+    branch = git.run_git(directory, "branch", "--show-current").stdout.strip()
+    return directory, branch or None
 
 
 def ensure_thread(task: ledger.Task, conversation_id: str, thread: str) -> None:
@@ -214,7 +214,8 @@ def ensure_thread(task: ledger.Task, conversation_id: str, thread: str) -> None:
     origin = server_origin()
     token = issue_token()
     instance_id = INSTANCE_IDS[ledger.task_backend(task)]
-    worktree, branch = worktree_and_branch(task)
+    root = project_root(task)
+    worktree, branch = worktree_and_branch(task, root)
     dispatch_command(
         origin,
         token,
@@ -224,7 +225,7 @@ def ensure_thread(task: ledger.Task, conversation_id: str, thread: str) -> None:
             "creationSource": "web",
             "commandId": str(uuid.uuid4()),
             "threadId": thread,
-            "projectId": project_id(origin, token, project_root(task)),
+            "projectId": project_id(origin, token, root),
             "title": (task["prompt"].strip().splitlines() or [thread])[0],
             "modelSelection": {"instanceId": instance_id, "model": default_model(instance_id)},
             "runtimeMode": "full-access",

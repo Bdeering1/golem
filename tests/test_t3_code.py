@@ -118,18 +118,26 @@ def created_thread(server):
     return sent_commands(server)[-1]
 
 
-@pytest.mark.parametrize("is_worktree_task", [True, False], ids=["worktree", "repository"])
+@pytest.mark.parametrize("task_location", ["worktree", "repository", "subdirectory"])
 def test_pickup_attaches_claude_session_to_thread_and_opens_it(
-    server, ledger_path, git_repository, fake_commands, is_worktree_task
+    server, ledger_path, git_repository, fake_commands, task_location
 ):
     server.project_root = str(git_repository)
     write_claude_model_cache(server.home)
     worktree = support.git_worktree(git_repository)
-    fields = {"worktree": str(worktree)} if is_worktree_task else {}
+    subdirectory = git_repository / "pkg"
+    subdirectory.mkdir()
+    fields = {"worktree": str(worktree)} if task_location == "worktree" else {}
+    cwd = subdirectory if task_location == "subdirectory" else git_repository
+    expected_directory = {"worktree": worktree, "subdirectory": subdirectory}.get(task_location)
+    expected_branch = {
+        "worktree": support.WORKTREE_BRANCH,
+        "subdirectory": support.git_output(git_repository, "branch", "--show-current").strip(),
+    }.get(task_location)
     support.write_task(
         ledger_path,
         ledger.STATUS_NEEDS_REVIEW,
-        cwd=str(git_repository),
+        cwd=str(cwd),
         prompt=f"{support.PROMPT}\nmore detail",
         **fields,
     )
@@ -146,8 +154,8 @@ def test_pickup_attaches_claude_session_to_thread_and_opens_it(
         "modelSelection": {"instanceId": "claudeAgent", "model": CACHED_CLAUDE_MODEL},
         "runtimeMode": "full-access",
         "interactionMode": "default",
-        "branch": support.WORKTREE_BRANCH if is_worktree_task else None,
-        "worktreePath": str(worktree) if is_worktree_task else None,
+        "branch": expected_branch,
+        "worktreePath": str(expected_directory) if expected_directory else None,
         "importedNativeThread": {
             "ref": {
                 "driver": "claudeAgent",
@@ -176,7 +184,10 @@ def test_pickup_all_attaches_codex_thread_with_default_model(server, ledger_path
 
     thread = created_thread(server)
     assert thread["threadId"] == f"golem:codex:{CODEX_THREAD}"
-    assert thread["modelSelection"] == {"instanceId": "codex", "model": "gpt-6-astra"}
+    assert thread["modelSelection"] == {
+        "instanceId": "codex",
+        "model": t3_code.DEFAULT_MODELS["codex"],
+    }
     assert thread["importedNativeThread"]["ref"]["driver"] == "codex"
     assert thread["importedNativeThread"]["ref"]["nativeId"] == CODEX_THREAD
     assert fake_commands["open-args"].read_text(encoding="utf-8") == (
@@ -252,7 +263,9 @@ def return_malformed_projects(_server, monkeypatch):
         pytest.param(stop_server, f"{T3_VERSION} .*did not start", id="start-timeout"),
         pytest.param(reject_commands, f"{T3_VERSION} .*project is archived", id="rejected"),
         pytest.param(skip_thread_creation, f"{T3_VERSION} .*missing", id="thread-missing"),
-        pytest.param(return_malformed_projects, f"{T3_VERSION} .*workspaceRoot", id="malformed"),
+        pytest.param(
+            return_malformed_projects, f"{T3_VERSION} could not open thread", id="malformed"
+        ),
     ],
 )
 def test_failed_pickup_leaves_task_needing_review(
