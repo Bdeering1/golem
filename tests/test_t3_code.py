@@ -107,8 +107,15 @@ def write_claude_model_cache(home):
     )
 
 
+def sent_commands(server):
+    return [
+        {name: value for name, value in command.items() if name != "commandId"}
+        for command in server.commands
+    ]
+
+
 def created_thread(server):
-    return {name: value for name, value in server.commands[-1].items() if name != "commandId"}
+    return sent_commands(server)[-1]
 
 
 @pytest.mark.parametrize("is_worktree_task", [True, False], ids=["worktree", "repository"])
@@ -284,8 +291,14 @@ def test_deleting_task_deletes_its_thread_only_while_t3_code_runs(
     assert cli.main(command) == 0
 
     expected_commands = [{"type": "thread.delete", "threadId": CLAUDE_THREAD_ID}]
-    assert [
-        {name: value for name, value in sent.items() if name != "commandId"}
-        for sent in server.commands
-    ] == (expected_commands if is_running else [])
+    assert sent_commands(server) == (expected_commands if is_running else [])
     assert fake_commands["open-args"].read_text(encoding="utf-8") == ""
+
+
+def test_rejected_thread_delete_warns_without_failing(server, ledger_path, capsys):
+    support.write_task(ledger_path, ledger.STATUS_DONE, t3_code_thread_id=CLAUDE_THREAD_ID)
+    reject_commands(server, None)
+
+    assert cli.main(["delete", support.TASK_ID]) == 0
+
+    assert f"could not delete T3 Code thread {CLAUDE_THREAD_ID}" in capsys.readouterr().err
