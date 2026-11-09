@@ -21,6 +21,7 @@ STATUS_CANCELLED = "cancelled"
 NOT_STARTED_STATUSES = {STATUS_SCHEDULED, STATUS_WAITING, STATUS_CANCELLED}
 BACKEND_CLAUDE = "claude"
 BACKEND_CODEX = "codex"
+BACKEND_T3 = "t3"
 LIST_STATUS_ORDER = (
     STATUS_NEEDS_REVIEW,
     STATUS_FAILED,
@@ -64,6 +65,7 @@ class Task(TypedDict):
     worktree_pending: NotRequired[bool]
     thread_id: NotRequired[str]
     t3_code_thread_id: NotRequired[str]
+    native_session_id: NotRequired[str]
     result: NotRequired[str]
     returncode: NotRequired[int]
     usage_limit_resume_count: NotRequired[int]

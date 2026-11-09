@@ -1,88 +1,9 @@
-import json
-from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
 
 from golem import cli, ledger, t3_code
-from tests import support
-
-T3_VERSION = "t3 v0.1.7"
-ENVIRONMENT_ID = "environment"
-PROJECT_ID = "project"
-ADDED_PROJECT_ID = "added-project"
-CODEX_THREAD = "codex-thread"
-CACHED_CLAUDE_MODEL = "claude-cached"
-SUCCESS_EXIT = {"_tag": "Success", "value": {"sequence": 3}}
-FINISHED_PULL_REQUESTS = [{"url": "merged", "state": ledger.PULL_REQUEST_STATE_MERGED}]
-CLAUDE_THREAD_ID = f"golem:claude:{support.TASK_ID}-session"
-CODEX_THREAD_ID = f"golem:codex:{CODEX_THREAD}"
-FAKE_T3 = """#!/bin/sh
-printf '%s\\n' "$*" >> "$T3CODE_HOME/t3-args"
-case "$1 $2" in
-    "--version "*) echo 't3 v0.1.7' ;;
-    "thread show") [ -e "$T3CODE_HOME/thread-present" ] ;;
-    "auth session") echo token ;;
-    "project add") printf '%s' "$3" > "$T3CODE_HOME/added-project" ;;
-esac
-"""
-
-
-@dataclass
-class FakeServer:
-    home: Path
-    project_root: str | None = None
-    command_exit: dict = field(default_factory=lambda: SUCCESS_EXIT)
-    is_creating_threads: bool = True
-    commands: list = field(default_factory=list)
-
-    def fetch_projects(self, _origin, _token):
-        added_path = self.home / "added-project"
-        projects = []
-        if self.project_root is not None:
-            projects.append({"id": PROJECT_ID, "workspaceRoot": self.project_root})
-        if added_path.exists():
-            projects.append(
-                {"id": ADDED_PROJECT_ID, "workspaceRoot": added_path.read_text(encoding="utf-8")}
-            )
-        return projects
-
-    def dispatch_command_exit(self, _origin, _token, command):
-        self.commands.append(command)
-        if self.is_creating_threads and self.command_exit == SUCCESS_EXIT:
-            (self.home / "thread-present").touch()
-        return self.command_exit
-
-    def mark_running(self):
-        self.runtime_path.write_text(
-            json.dumps({"origin": "http://127.0.0.1:3773"}), encoding="utf-8"
-        )
-
-    @property
-    def runtime_path(self):
-        return self.home / "userdata" / "server-runtime.json"
-
-    def t3_calls(self):
-        log_path = self.home / "t3-args"
-        return log_path.read_text(encoding="utf-8").splitlines() if log_path.exists() else []
-
-
-@pytest.fixture
-def server(monkeypatch, tmp_path):
-    home = tmp_path / "t3"
-    (home / "bin").mkdir(parents=True)
-    (home / "userdata").mkdir()
-    (home / "caches").mkdir()
-    cli_path = home / "bin" / "t3"
-    cli_path.write_text(FAKE_T3, encoding="utf-8")
-    cli_path.chmod(0o755)
-    (home / "userdata" / "environment-id").write_text(f"{ENVIRONMENT_ID}\n", encoding="utf-8")
-    monkeypatch.setenv("T3CODE_HOME", str(home))
-    fake_server = FakeServer(home, project_root=str(Path.cwd()))
-    fake_server.mark_running()
-    monkeypatch.setattr(t3_code, "fetch_projects", fake_server.fetch_projects)
-    monkeypatch.setattr(t3_code, "dispatch_command_exit", fake_server.dispatch_command_exit)
-    return fake_server
+from tests import support, t3_support
 
 
 @pytest.fixture
@@ -90,41 +11,12 @@ def claude_task(ledger_path):
     support.write_task(ledger_path, ledger.STATUS_NEEDS_REVIEW)
 
 
-def thread_link(thread_id):
-    return f"t3code://threads/{ENVIRONMENT_ID}/{thread_id.replace(':', '%3A')}"
-
-
-def write_claude_model_cache(home):
-    (home / "caches" / "claudeAgent.json").write_text(
-        json.dumps(
-            {
-                "models": [
-                    {"slug": "claude-other", "isDefault": False},
-                    {"slug": CACHED_CLAUDE_MODEL, "isDefault": True},
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
-
-
-def sent_commands(server):
-    return [
-        {name: value for name, value in command.items() if name != "commandId"}
-        for command in server.commands
-    ]
-
-
-def created_thread(server):
-    return sent_commands(server)[-1]
-
-
 @pytest.mark.parametrize("task_location", ["worktree", "repository", "subdirectory"])
 def test_pickup_attaches_claude_session_to_thread_and_opens_it(
     server, ledger_path, git_repository, fake_commands, task_location
 ):
     server.project_root = str(git_repository)
-    write_claude_model_cache(server.home)
+    t3_support.write_claude_model_cache(server.home)
     worktree = support.git_worktree(git_repository)
     subdirectory = git_repository / "pkg"
     subdirectory.mkdir()
@@ -145,14 +37,14 @@ def test_pickup_attaches_claude_session_to_thread_and_opens_it(
 
     assert cli.main(["pickup", support.TASK_ID, "--client", "t3-code"]) == 0
 
-    assert created_thread(server) == {
+    assert t3_support.created_thread(server) == {
         "type": "thread.create",
         "createdBy": "user",
         "creationSource": "web",
-        "threadId": CLAUDE_THREAD_ID,
-        "projectId": PROJECT_ID,
+        "threadId": t3_support.CLAUDE_THREAD_ID,
+        "projectId": t3_support.PROJECT_ID,
         "title": support.PROMPT,
-        "modelSelection": {"instanceId": "claudeAgent", "model": CACHED_CLAUDE_MODEL},
+        "modelSelection": {"instanceId": "claudeAgent", "model": t3_support.CACHED_CLAUDE_MODEL},
         "runtimeMode": "full-access",
         "interactionMode": "default",
         "branch": expected_branch,
@@ -166,11 +58,11 @@ def test_pickup_attaches_claude_session_to_thread_and_opens_it(
         },
     }
     assert fake_commands["open-args"].read_text(encoding="utf-8") == (
-        f"{thread_link(CLAUDE_THREAD_ID)}\n"
+        f"{t3_support.thread_link(t3_support.CLAUDE_THREAD_ID)}\n"
     )
     task = support.read_task(ledger_path)
     assert task["status"] == ledger.STATUS_DONE
-    assert task["t3_code_thread_id"] == CLAUDE_THREAD_ID
+    assert task["t3_code_thread_id"] == t3_support.CLAUDE_THREAD_ID
 
 
 def test_pickup_all_attaches_codex_thread_with_default_model(server, ledger_path, fake_commands):
@@ -178,21 +70,21 @@ def test_pickup_all_attaches_codex_thread_with_default_model(server, ledger_path
         ledger_path,
         ledger.STATUS_NEEDS_REVIEW,
         backend=ledger.BACKEND_CODEX,
-        thread_id=CODEX_THREAD,
+        thread_id=t3_support.CODEX_THREAD,
     )
 
     assert cli.main(["pickup", "--all", "--client", "t3-code"]) == 0
 
-    thread = created_thread(server)
-    assert thread["threadId"] == CODEX_THREAD_ID
+    thread = t3_support.created_thread(server)
+    assert thread["threadId"] == t3_support.CODEX_THREAD_ID
     assert thread["modelSelection"] == {
         "instanceId": "codex",
         "model": t3_code.DEFAULT_MODELS["codex"],
     }
     assert thread["importedNativeThread"]["ref"]["driver"] == "codex"
-    assert thread["importedNativeThread"]["ref"]["nativeId"] == CODEX_THREAD
+    assert thread["importedNativeThread"]["ref"]["nativeId"] == t3_support.CODEX_THREAD
     assert fake_commands["open-args"].read_text(encoding="utf-8") == (
-        f"{thread_link(CODEX_THREAD_ID)}\n"
+        f"{t3_support.thread_link(t3_support.CODEX_THREAD_ID)}\n"
     )
     assert support.read_task(ledger_path)["status"] == ledger.STATUS_DONE
 
@@ -200,9 +92,12 @@ def test_pickup_all_attaches_codex_thread_with_default_model(server, ledger_path
 @pytest.mark.parametrize(
     ("backend_id", "fields", "thread_id"),
     [
-        pytest.param(ledger.BACKEND_CLAUDE, {}, CLAUDE_THREAD_ID, id="claude"),
+        pytest.param(ledger.BACKEND_CLAUDE, {}, t3_support.CLAUDE_THREAD_ID, id="claude"),
         pytest.param(
-            ledger.BACKEND_CODEX, {"thread_id": CODEX_THREAD}, CODEX_THREAD_ID, id="codex"
+            ledger.BACKEND_CODEX,
+            {"thread_id": t3_support.CODEX_THREAD},
+            t3_support.CODEX_THREAD_ID,
+            id="codex",
         ),
     ],
 )
@@ -214,7 +109,10 @@ def test_pickup_all_opens_task_in_t3_code_default_client(
 
     assert cli.main(["pickup", "--all"]) == 0
 
-    assert fake_commands["open-args"].read_text(encoding="utf-8") == f"{thread_link(thread_id)}\n"
+    assert (
+        fake_commands["open-args"].read_text(encoding="utf-8")
+        == f"{t3_support.thread_link(thread_id)}\n"
+    )
     assert support.read_task(ledger_path)["status"] == ledger.STATUS_DONE
 
 
@@ -225,7 +123,7 @@ def test_repeat_pickup_opens_existing_thread(server, claude_task, ledger_path, f
 
     assert server.commands == []
     assert fake_commands["open-args"].read_text(encoding="utf-8") == (
-        f"{thread_link(CLAUDE_THREAD_ID)}\n"
+        f"{t3_support.thread_link(t3_support.CLAUDE_THREAD_ID)}\n"
     )
     assert support.read_task(ledger_path)["status"] == ledger.STATUS_DONE
 
@@ -236,7 +134,7 @@ def test_pickup_adds_missing_project(server, claude_task):
     assert cli.main(["pickup", support.TASK_ID, "--client", "t3-code"]) == 0
 
     assert f"project add {Path.cwd()}" in server.t3_calls()
-    assert created_thread(server)["projectId"] == ADDED_PROJECT_ID
+    assert t3_support.created_thread(server)["projectId"] == t3_support.ADDED_PROJECT_ID
 
 
 def test_pickup_starts_t3_code_when_it_is_not_running(
@@ -249,7 +147,7 @@ def test_pickup_starts_t3_code_when_it_is_not_running(
 
     assert fake_commands["open-args"].read_text(encoding="utf-8").splitlines() == [
         f"-b {t3_code.APP_BUNDLE_ID}",
-        thread_link(CLAUDE_THREAD_ID),
+        t3_support.thread_link(t3_support.CLAUDE_THREAD_ID),
     ]
     assert support.read_task(ledger_path)["status"] == ledger.STATUS_DONE
 
@@ -275,18 +173,26 @@ def skip_thread_creation(server, _monkeypatch):
 
 
 def return_malformed_projects(_server, monkeypatch):
-    monkeypatch.setattr(t3_code, "fetch_projects", lambda _origin, _token: [{"id": PROJECT_ID}])
+    monkeypatch.setattr(
+        t3_code, "fetch_projects", lambda _origin, _token: [{"id": t3_support.PROJECT_ID}]
+    )
 
 
 @pytest.mark.parametrize(
     ("break_t3_code", "message"),
     [
         pytest.param(remove_cli, "golem: T3 Code is not installed: ", id="not-installed"),
-        pytest.param(stop_server, f"{T3_VERSION} .*did not start", id="start-timeout"),
-        pytest.param(reject_commands, f"{T3_VERSION} .*project is archived", id="rejected"),
-        pytest.param(skip_thread_creation, f"{T3_VERSION} .*missing", id="thread-missing"),
+        pytest.param(stop_server, f"{t3_support.T3_VERSION} .*did not start", id="start-timeout"),
         pytest.param(
-            return_malformed_projects, f"{T3_VERSION} could not open thread", id="malformed"
+            reject_commands, f"{t3_support.T3_VERSION} .*project is archived", id="rejected"
+        ),
+        pytest.param(
+            skip_thread_creation, f"{t3_support.T3_VERSION} .*missing", id="thread-missing"
+        ),
+        pytest.param(
+            return_malformed_projects,
+            f"{t3_support.T3_VERSION} could not open thread",
+            id="malformed",
         ),
     ],
 )
@@ -317,23 +223,27 @@ def test_deleting_task_deletes_its_thread_only_while_t3_code_runs(
     support.write_task(
         ledger_path,
         ledger.STATUS_DONE,
-        pull_requests=FINISHED_PULL_REQUESTS,
-        t3_code_thread_id=CLAUDE_THREAD_ID,
+        pull_requests=t3_support.FINISHED_PULL_REQUESTS,
+        t3_code_thread_id=t3_support.CLAUDE_THREAD_ID,
     )
     if not is_running:
         server.runtime_path.unlink()
 
     assert cli.main(command) == 0
 
-    expected_commands = [{"type": "thread.delete", "threadId": CLAUDE_THREAD_ID}]
-    assert sent_commands(server) == (expected_commands if is_running else [])
+    expected_commands = [{"type": "thread.delete", "threadId": t3_support.CLAUDE_THREAD_ID}]
+    assert t3_support.sent_commands(server) == (expected_commands if is_running else [])
     assert fake_commands["open-args"].read_text(encoding="utf-8") == ""
 
 
 def test_rejected_thread_delete_warns_without_failing(server, ledger_path, capsys, monkeypatch):
-    support.write_task(ledger_path, ledger.STATUS_DONE, t3_code_thread_id=CLAUDE_THREAD_ID)
+    support.write_task(
+        ledger_path, ledger.STATUS_DONE, t3_code_thread_id=t3_support.CLAUDE_THREAD_ID
+    )
     reject_commands(server, monkeypatch)
 
     assert cli.main(["delete", support.TASK_ID]) == 0
 
-    assert f"could not delete T3 Code thread {CLAUDE_THREAD_ID}" in capsys.readouterr().err
+    assert (
+        f"could not delete T3 Code thread {t3_support.CLAUDE_THREAD_ID}" in capsys.readouterr().err
+    )

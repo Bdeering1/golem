@@ -181,8 +181,9 @@ def run_task_from_arguments(arguments: ledger.Arguments) -> int:
         raise SystemExit(
             f"golem: --auto-pickup requires a default app client for {backend.NAME} tasks"
         )
-    if arguments.gate is not None and not backend.IS_GATE_SUPPORTED:
-        raise SystemExit(f"golem: --gate does not support {backend.NAME} tasks")
+    is_t3 = arguments.backend == ledger.BACKEND_T3
+    if is_t3 and arguments.env:
+        raise SystemExit(f"golem: --env does not support {backend.NAME} tasks")
     launch_agent.require_launch_agent()
     task_id = task_id_from_arguments(arguments)
     prompt_text = (
@@ -193,7 +194,7 @@ def run_task_from_arguments(arguments: ledger.Arguments) -> int:
     task_args = tuple(arguments.agent_args)
     placement = scheduling.RunPlacement(
         str(Path.cwd()),
-        environment=task_environment(arguments.env),
+        environment={} if is_t3 else task_environment(arguments.env),
         auto_pickup_client=auto_pickup_client,
         is_no_worktree=arguments.no_worktree,
         gate=arguments.gate,

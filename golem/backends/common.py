@@ -49,17 +49,20 @@ class RunOutcome:
     is_usage_limit: bool
     stderr: str = ""
     working_directory: str | None = None
+    reset_time: datetime | None = None
+    stop_reason: str | None = None
+
+
+class UsageBackend(Protocol):
+    def next_reset_time(self) -> datetime | None: ...
 
 
 class Backend(Protocol):
     NAME: str
-    IS_GATE_SUPPORTED: bool
 
     def run(
         self, task_id: str, task: ledger.Task, lock_file_descriptors: tuple[int, ...]
     ) -> RunOutcome: ...
-
-    def next_reset_time(self) -> datetime | None: ...
 
     def validate_run_arguments(self, agent_args: list[str]) -> None: ...
 

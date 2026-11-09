@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     import io
     from collections.abc import Callable
 
-from golem import git, ledger, progress_log, spawn, task_directories
+from golem import ledger, progress_log, spawn, task_directories
 from golem.backends import common
 
 CODEX_ACCOUNT_ERROR = "golem: Codex account lookup unavailable"
@@ -41,7 +41,6 @@ CODEX_UNSUPPORTED_ARGUMENTS = {
 CODEX_PROVIDER_OVERRIDE = 'model_provider="openai"'
 CODEX_PROVIDER_ARGUMENTS = ("-c", CODEX_PROVIDER_OVERRIDE)
 NAME: str = "Codex"
-IS_GATE_SUPPORTED: bool = False
 type AppServerRequests = list[ledger.JsonObject]
 type AppServerResponses = dict[int, ledger.JsonObject]
 
@@ -89,40 +88,6 @@ def reject_unsupported_codex_arguments(agent_args: list[str], *, is_run: bool) -
     for value in codex_config_values(agent_args):
         if codex_config_key(value) in {"model_provider", "forced_login_method"}:
             raise SystemExit(f"golem: Codex argument is not supported: {value}")
-
-
-def create_codex_worktree(task_id: str, task: ledger.Task) -> str | None:
-    worktree = task.get("worktree")
-    if worktree is None:
-        return "golem: task has no worktree"
-    cwd = task["cwd"]
-    git.fetch_stale_default_branch(cwd)
-    base = git.ORIGIN_HEAD
-    if git.run_git(cwd, "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}").returncode:
-        base = "HEAD"
-    result = git.run_git(
-        cwd,
-        "worktree",
-        "add",
-        "--no-track",
-        "-b",
-        f"worktree-{Path(worktree).name}",
-        worktree,
-        base,
-    )
-    if result.returncode:
-        error = result.stderr.strip() or result.stdout.strip()
-        return f"golem: could not create worktree: {error}"
-    common_directory = cast("str", git.git_common_directory(cwd))
-    exclude_path = Path(common_directory) / "info" / "exclude"
-    exclude_path.parent.mkdir(parents=True, exist_ok=True)
-    exclude_text = exclude_path.read_text(encoding="utf-8") if exclude_path.exists() else ""
-    if ".claude/worktrees/" not in exclude_text.splitlines():
-        separator = "\n" if exclude_text and not exclude_text.endswith("\n") else ""
-        with exclude_path.open("a", encoding="utf-8") as exclude_file:
-            exclude_file.write(f"{separator}.claude/worktrees/\n")
-    task_directories.record_created_worktree_owner(task_id, task)
-    return None
 
 
 def record_codex_thread(task_id: str, session_id: str, thread_id: str) -> None:
@@ -262,12 +227,8 @@ def run_codex(
             require_codex_subscription(spawn.task_environment(task))
         except SystemExit as error:
             return 1, str(error), False
-        worktree = task.get("worktree")
-        if worktree is not None and not Path(worktree).is_dir():
-            if task.get("worktree_pending") is not True:
-                return 1, f"golem: worktree is missing: {worktree}", False
-            if error := create_codex_worktree(task_id, task):
-                return 1, error, False
+        if error := task_directories.prepare_worktree(task_id, task):
+            return 1, error, False
         if common.is_usage_limit_resume(task) and not isinstance(task.get("thread_id"), str):
             return 1, "golem: task has no Codex conversation", False
         command, prompt = codex_command(task)
@@ -330,12 +291,14 @@ def conversation_id(task: ledger.Task) -> str | None:
     return thread_id if isinstance(thread_id, str) else None
 
 
-def transcript_paths(task: ledger.Task) -> list[Path]:
-    thread_id = conversation_id(task)
-    if thread_id is None:
-        return []
+def session_transcript_paths(task: ledger.Task, thread_id: str) -> list[Path]:
     codex_home = Path(task.get("environment", {}).get("CODEX_HOME", Path.home() / ".codex"))
     return list((codex_home / "sessions").glob(f"**/rollout-*-{thread_id}.jsonl"))
+
+
+def transcript_paths(task: ledger.Task) -> list[Path]:
+    thread_id = conversation_id(task)
+    return [] if thread_id is None else session_transcript_paths(task, thread_id)
 
 
 def codex_app_server_requests(*, has_rate_limits: bool) -> AppServerRequests:

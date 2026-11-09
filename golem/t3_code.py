@@ -55,6 +55,8 @@ def server_runtime_path() -> Path:
 
 
 def task_thread_id(task: ledger.Task, conversation_id: str) -> str:
+    if task["backend"] == ledger.BACKEND_T3:
+        return conversation_id
     return f"golem:{task['backend']}:{conversation_id}"
 
 
@@ -108,7 +110,7 @@ def fetch_projects(origin: str, token: str) -> list[ledger.JsonObject]:
     return cast("list[ledger.JsonObject]", snapshot["projects"])
 
 
-def dispatch_command_exit(origin: str, token: str, command: ledger.JsonObject) -> ledger.JsonObject:
+def rpc_exit(origin: str, token: str, tag: str, payload: ledger.JsonObject) -> ledger.JsonObject:
     host = parse.urlsplit(origin).netloc
     with websocket_client.connect(
         f"ws://{host}/ws?orchestrationProtocol=2",
@@ -120,9 +122,9 @@ def dispatch_command_exit(origin: str, token: str, command: ledger.JsonObject) -
                 {
                     "_tag": "Request",
                     "id": "1",
-                    "tag": "orchestration.dispatchCommand",
+                    "tag": tag,
                     "headers": [],
-                    "payload": command,
+                    "payload": payload,
                 }
             )
         )
@@ -148,10 +150,25 @@ def error_message(value: object) -> str | None:
     return next((message for child in children if (message := error_message(child))), None)
 
 
+def dispatch_command_exit(origin: str, token: str, command: ledger.JsonObject) -> ledger.JsonObject:
+    return rpc_exit(origin, token, "orchestration.dispatchCommand", command)
+
+
+def successful_value(rpc_exit_value: ledger.JsonObject) -> object:
+    if rpc_exit_value.get("_tag") != "Success":
+        raise T3CodeError(error_message(rpc_exit_value) or json.dumps(rpc_exit_value))
+    return rpc_exit_value.get("value")
+
+
 def dispatch_command(origin: str, token: str, command: ledger.JsonObject) -> None:
-    command_exit = dispatch_command_exit(origin, token, command)
-    if command_exit.get("_tag") != "Success":
-        raise T3CodeError(error_message(command_exit) or json.dumps(command_exit))
+    successful_value(dispatch_command_exit(origin, token, command))
+
+
+def thread_projection(origin: str, token: str, thread_id: str) -> ledger.JsonObject:
+    projection_exit = rpc_exit(
+        origin, token, "orchestration.getThreadProjection", {"threadId": thread_id}
+    )
+    return cast("ledger.JsonObject", successful_value(projection_exit))
 
 
 def wait_for_server() -> None:
@@ -215,39 +232,50 @@ def worktree_and_branch(task: ledger.Task, root: str) -> tuple[str | None, str |
     return directory, branch or None
 
 
+def thread_create_command(
+    origin: str, token: str, task: ledger.Task, thread_id: str, instance_id: str, model: str
+) -> ledger.JsonObject:
+    root = project_root(task)
+    worktree, branch = worktree_and_branch(task, root)
+    return {
+        "type": "thread.create",
+        "createdBy": "user",
+        "creationSource": "web",
+        "commandId": str(uuid.uuid4()),
+        "threadId": thread_id,
+        "projectId": project_id(origin, token, root),
+        "title": (task["prompt"].strip().splitlines() or [thread_id])[0],
+        "modelSelection": {"instanceId": instance_id, "model": model},
+        "runtimeMode": "full-access",
+        "interactionMode": "default",
+        "branch": branch,
+        "worktreePath": worktree,
+    }
+
+
 def ensure_thread(task: ledger.Task, conversation_id: str, thread_id: str) -> None:
     if not server_runtime_path().exists():
         start_app()
     if is_thread_present(thread_id):
         return
+    if task["backend"] == ledger.BACKEND_T3:
+        raise T3CodeError("thread no longer exists in T3 Code")
     origin = server_origin()
     token = issue_token()
     instance_id = INSTANCE_IDS[task["backend"]]
-    root = project_root(task)
-    worktree, branch = worktree_and_branch(task, root)
-    dispatch_command(
-        origin,
-        token,
-        {
-            "type": "thread.create",
-            "createdBy": "user",
-            "creationSource": "web",
-            "commandId": str(uuid.uuid4()),
-            "threadId": thread_id,
-            "projectId": project_id(origin, token, root),
-            "title": (task["prompt"].strip().splitlines() or [thread_id])[0],
-            "modelSelection": {"instanceId": instance_id, "model": default_model(instance_id)},
-            "runtimeMode": "full-access",
-            "interactionMode": "default",
-            "branch": branch,
-            "worktreePath": worktree,
-            "importedNativeThread": {
-                "ref": {"driver": instance_id, "nativeId": conversation_id, "strength": "strong"}
-            },
-        },
+    command = thread_create_command(
+        origin, token, task, thread_id, instance_id, default_model(instance_id)
     )
+    command["importedNativeThread"] = {
+        "ref": {"driver": instance_id, "nativeId": conversation_id, "strength": "strong"}
+    }
+    dispatch_command(origin, token, command)
     if not is_thread_present(thread_id):
         raise T3CodeError("thread is missing after thread.create")
+
+
+def version() -> str:
+    return run_t3("--version").stdout.strip()
 
 
 def prepare_thread(task: ledger.Task, conversation_id: str) -> None:
@@ -258,9 +286,8 @@ def prepare_thread(task: ledger.Task, conversation_id: str) -> None:
     try:
         ensure_thread(task, conversation_id, thread_id)
     except T3_CODE_ERRORS as error:
-        version = run_t3("--version").stdout.strip()
         raise SystemExit(
-            f"golem: T3 Code {version} could not open thread {thread_id}: {error}"
+            f"golem: T3 Code {version()} could not open thread {thread_id}: {error}"
         ) from error
 
 

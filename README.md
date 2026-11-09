@@ -38,6 +38,9 @@ golem pickup fix-login
 # Run in Codex at 9pm
 golem run fix-signup "Fix the signup redirect" --backend codex --at 9pm
 
+# Run as a T3 Code thread with Codex. --provider defaults to claude
+golem run fix-logout "Fix the logout redirect" --backend t3 -- --provider codex --model gpt-6-astra
+
 # The script must print {"directory": "<path>"} for the task to run in
 # The review runs if the tests pass (exit code of zero). Arguments after -- go to the agent
 golem run add-auth "Add password reset" \
@@ -47,6 +50,10 @@ golem run add-auth "Add password reset" \
   --then review-auth "Review the password reset changes and fix what you find" \
   -- --permission-mode auto
 ```
+
+## T3 Code
+
+`--backend t3` runs each task as a thread in T3 Code, so T3 Code shows every turn. golem opens T3 Code if it isn't running. `[env]` and `--env` don't apply to `t3` tasks. Leave T3 Code's "auto-resume limited threads" setting off, since golem resumes after usage limits itself.
 
 ## Commands
 

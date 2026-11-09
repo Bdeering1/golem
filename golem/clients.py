@@ -8,7 +8,11 @@ from golem import ledger, t3_code
 from golem.backends import codex, registry
 
 CLAUDE_DESKTOP_CLIENT = "claude-desktop"
-BUILT_IN_DEFAULT_CLIENTS = {ledger.BACKEND_CLAUDE: CLAUDE_DESKTOP_CLIENT}
+T3_CODE_CLIENT = "t3-code"
+BUILT_IN_DEFAULT_CLIENTS = {
+    ledger.BACKEND_CLAUDE: CLAUDE_DESKTOP_CLIENT,
+    ledger.BACKEND_T3: T3_CODE_CLIENT,
+}
 
 
 def keep_environment(environment: dict[str, str]) -> dict[str, str]:
@@ -73,8 +77,8 @@ CLIENTS: dict[str, Client] = {
             ],
         ),
         Client(
-            name="t3-code",
-            backend_ids=frozenset({ledger.BACKEND_CLAUDE, ledger.BACKEND_CODEX}),
+            name=T3_CODE_CLIENT,
+            backend_ids=frozenset({ledger.BACKEND_CLAUDE, ledger.BACKEND_CODEX, ledger.BACKEND_T3}),
             is_terminal=False,
             command=lambda task, conversation_id, _agent_args: [
                 "open",
@@ -97,11 +101,10 @@ def task_client(task_id: str, task: ledger.Task, client_name: str | None) -> Cli
                 f"golem: {client.name} does not support {backend.NAME} tasks: {task_id}"
             )
         return client
-    return next(
-        client
-        for client in CLIENTS.values()
-        if client.is_terminal and task_backend_id in client.backend_ids
-    )
+    backend_clients = [
+        client for client in CLIENTS.values() if task_backend_id in client.backend_ids
+    ]
+    return next((client for client in backend_clients if client.is_terminal), backend_clients[0])
 
 
 def default_clients(configured: dict[str, str], invalid_config_prefix: str) -> dict[str, str]:

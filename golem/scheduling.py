@@ -3,7 +3,16 @@ import uuid
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 
-from golem import chains, delete, launch_agent, ledger, progress_log, spawn, task_directories
+from golem import (
+    chains,
+    delete,
+    launch_agent,
+    ledger,
+    progress_log,
+    spawn,
+    t3_code,
+    task_directories,
+)
 from golem.backends import claude_hooks, common, registry
 
 
@@ -150,7 +159,11 @@ def retry_task(task_id: str, *, is_now: bool, at_text: str | None) -> int:
     task_directories.reject_missing_worktree(retryable, ledger.load_worktrees())
     launch_agent.require_launch_agent()
     when = (
-        planned_execution_time(registry.task_backend(retryable), is_now=is_now, at_text=at_text)
+        planned_execution_time(
+            registry.usage_backend(retryable["backend"], retryable["agent_args"]),
+            is_now=is_now,
+            at_text=at_text,
+        )
         or datetime.now(UTC).astimezone()
     )
 
@@ -186,9 +199,11 @@ def retry_task(task_id: str, *, is_now: bool, at_text: str | None) -> int:
         if "setup_directory" in task:
             record["setup_directory"] = task["setup_directory"]
         tasks[task_id] = record
+        previous_thread_ids = t3_code.recorded_thread_ids([task])
         progress_log.remove_progress(task["session_id"])
         task_directories.clear_worktree_release(tasks, worktrees, record)
         directories = claude_hooks.hook_affected_directories(tasks, record)
+    t3_code.delete_threads(previous_thread_ids)
     for directory in directories:
         claude_hooks.sync_hooks(directory)
     return launch_agent.wake_launch_agent_and_report(task_id, when)
@@ -205,7 +220,11 @@ def reschedule_task(task_id: str, *, is_now: bool, at_text: str | None) -> int:
     task = scheduled_task(ledger.load_tasks(), task_id)
     launch_agent.require_launch_agent()
     when = (
-        planned_execution_time(registry.task_backend(task), is_now=is_now, at_text=at_text)
+        planned_execution_time(
+            registry.usage_backend(task["backend"], task["agent_args"]),
+            is_now=is_now,
+            at_text=at_text,
+        )
         or datetime.now(UTC).astimezone()
     )
 
@@ -215,18 +234,20 @@ def reschedule_task(task_id: str, *, is_now: bool, at_text: str | None) -> int:
     return launch_agent.wake_launch_agent_and_report(task_id, when)
 
 
-def planned_execution_time(
-    backend: common.Backend, *, is_now: bool, at_text: str | None
-) -> datetime | None:
-    if is_now:
-        return None
-    when = backend.next_reset_time() if at_text is None else scheduled_time(at_text)
-    if when is None:
-        return None
+def rounded_execution_time(when: datetime) -> datetime:
     when = when.astimezone(UTC)
     if when.second or when.microsecond:
         when += timedelta(minutes=1)
     return when.replace(second=0, microsecond=0).astimezone()
+
+
+def planned_execution_time(
+    backend: common.UsageBackend, *, is_now: bool, at_text: str | None
+) -> datetime | None:
+    if is_now:
+        return None
+    when = backend.next_reset_time() if at_text is None else scheduled_time(at_text)
+    return None if when is None else rounded_execution_time(when)
 
 
 def reserve_dependent_task(
@@ -265,7 +286,9 @@ def schedule_run_task(
             print(f"golem: {task_id} will run after {after}")
             return 0
     when = planned_execution_time(
-        registry.BACKENDS[arguments.backend], is_now=arguments.now, at_text=arguments.at
+        registry.usage_backend(arguments.backend, list(task_args)),
+        is_now=arguments.now,
+        at_text=arguments.at,
     )
     return schedule_new_task(
         task_id,

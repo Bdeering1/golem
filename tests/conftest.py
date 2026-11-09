@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from golem import cli, ledger
-from tests import support
+from golem import cli, ledger, t3_code
+from tests import support, t3_support
 
 
 @pytest.fixture(scope="session")
@@ -295,3 +295,24 @@ def git_repository(tmp_path, git_repository_template):
     repository_path = tmp_path / "repository"
     shutil.copytree(git_repository_template, repository_path)
     return repository_path
+
+
+@pytest.fixture
+def server(monkeypatch, tmp_path):
+    home = tmp_path / "t3"
+    (home / "bin").mkdir(parents=True)
+    (home / "userdata").mkdir()
+    (home / "caches").mkdir()
+    cli_path = home / "bin" / "t3"
+    cli_path.write_text(t3_support.FAKE_T3, encoding="utf-8")
+    cli_path.chmod(0o755)
+    (home / "userdata" / "environment-id").write_text(
+        f"{t3_support.ENVIRONMENT_ID}\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("T3CODE_HOME", str(home))
+    fake_server = t3_support.FakeServer(home, project_root=str(Path.cwd()))
+    fake_server.mark_running()
+    monkeypatch.setattr(t3_code, "fetch_projects", fake_server.fetch_projects)
+    monkeypatch.setattr(t3_code, "dispatch_command_exit", fake_server.dispatch_command_exit)
+    monkeypatch.setattr(t3_code, "thread_projection", fake_server.thread_projection)
+    return fake_server
