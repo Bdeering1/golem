@@ -48,6 +48,7 @@ def test_retry_refuses_unretryable_task_before_usage_lookup(ledger_path, monkeyp
         ("t3", ["--", "--yolo"], "argument is not supported: --yolo"),
         ("t3", ["--", "--provider", "gemini"], "--provider must be claude or codex"),
         ("t3", ["--", "--model"], "--model needs a value"),
+        ("t3", ["--", "--model", "--provider", "codex"], "--model needs a value"),
     ],
 )
 def test_run_option_rejects_backend_without_changing_ledger(

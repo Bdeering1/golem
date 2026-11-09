@@ -90,15 +90,6 @@ def reject_unsupported_codex_arguments(agent_args: list[str], *, is_run: bool) -
             raise SystemExit(f"golem: Codex argument is not supported: {value}")
 
 
-def record_codex_thread(task_id: str, session_id: str, thread_id: str) -> None:
-    with ledger.locked_tasks() as tasks:
-        stored_task = tasks.get(task_id)
-        if stored_task is not None:
-            task = stored_task
-            if task.get("session_id") == session_id:
-                task["thread_id"] = thread_id
-
-
 def codex_event_message(event: dict[str, object]) -> str | None:
     message = event.get("message")
     return message if isinstance(message, str) else None
@@ -173,7 +164,7 @@ def update_codex_event_state(
     if event_type == "thread.started":
         thread_id = event.get("thread_id")
         if isinstance(thread_id, str):
-            record_codex_thread(task_id, session_id, thread_id)
+            common.record_session_field(task_id, session_id, "thread_id", thread_id)
         return
     if event_type == "item.completed":
         item = event.get("item")

@@ -5,7 +5,7 @@ import time
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     import io
@@ -34,10 +34,9 @@ def provider_and_model(agent_args: list[str]) -> tuple[str, str | None]:
         if name not in {PROVIDER_ARGUMENT, MODEL_ARGUMENT}:
             raise SystemExit(f"golem: T3 Code argument is not supported: {argument}")
         if not separator:
-            next_argument = next(remaining_args, None)
-            if next_argument is None:
-                raise SystemExit(f"golem: {name} needs a value")
-            value = next_argument
+            value = next(remaining_args, "")
+        if not value or value.startswith("-"):
+            raise SystemExit(f"golem: {name} needs a value")
         values[name] = value
     provider = values.get(PROVIDER_ARGUMENT, ledger.BACKEND_CLAUDE)
     if provider not in t3_code.INSTANCE_IDS:
@@ -66,18 +65,6 @@ def transcript_paths(task: ledger.Task) -> list[Path]:
     return codex.session_transcript_paths(task, native_session_id)
 
 
-def record_thread_field(
-    task_id: str,
-    session_id: str,
-    name: Literal["t3_code_thread_id", "native_session_id"],
-    value: str,
-) -> None:
-    with ledger.locked_tasks() as tasks:
-        task = tasks.get(task_id)
-        if task is not None and task.get("session_id") == session_id:
-            task[name] = value
-
-
 def create_thread(task_id: str, task: ledger.Task, thread_id: str) -> None:
     provider, model = provider_and_model(task["agent_args"])
     instance_id = t3_code.INSTANCE_IDS[provider]
@@ -90,7 +77,7 @@ def create_thread(task_id: str, task: ledger.Task, thread_id: str) -> None:
             origin, token, task, thread_id, instance_id, model or t3_code.default_model(instance_id)
         ),
     )
-    record_thread_field(task_id, task["session_id"], "t3_code_thread_id", thread_id)
+    common.record_session_field(task_id, task["session_id"], "t3_code_thread_id", thread_id)
 
 
 def json_objects(value: object) -> list[ledger.JsonObject]:
@@ -192,7 +179,7 @@ class ThreadWatcher:
                     self.record_progress(progress)
             native_session_id = projection_native_session_id(projection)
             if native_session_id is not None and native_session_id != self.native_session_id:
-                record_thread_field(
+                common.record_session_field(
                     self.task_id, self.session_id, "native_session_id", native_session_id
                 )
                 self.native_session_id = native_session_id

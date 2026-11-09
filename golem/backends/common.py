@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -25,6 +25,18 @@ def has_agent_argument(agent_args: list[str], names: set[str]) -> bool:
 
 def is_usage_limit_resume(task: ledger.Task) -> bool:
     return task.get("usage_limit_resume_count", 0) > 0
+
+
+def record_session_field(
+    task_id: str,
+    session_id: str,
+    name: Literal["thread_id", "t3_code_thread_id", "native_session_id"],
+    value: str,
+) -> None:
+    with ledger.locked_tasks() as tasks:
+        task = tasks.get(task_id)
+        if task is not None and task.get("session_id") == session_id:
+            task[name] = value
 
 
 def tool_call_progress(name: str, argument: object) -> str:

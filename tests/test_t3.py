@@ -17,6 +17,13 @@ COMMAND_ITEM = {
     "type": "command_execution",
     "input": "make test",
 }
+MESSAGE_ITEM = {
+    "id": "message",
+    "runId": "run",
+    "status": "completed",
+    "type": "assistant_message",
+    "text": T3_REPLY,
+}
 USAGE_LIMIT_ITEM = {
     "id": "usage-limit",
     "runId": "run",
@@ -28,6 +35,10 @@ USAGE_LIMIT_ITEM = {
         "resetAt": "2030-01-01T10:00:00.000Z",
     },
 }
+CLAUDE_TRANSCRIPT = f".claude/projects/project/{NATIVE_SESSION_ID}.jsonl"
+CODEX_TRANSCRIPT = (
+    f".codex/sessions/2030/01/01/rollout-2030-01-01T10-00-00-{NATIVE_SESSION_ID}.jsonl"
+)
 
 
 def projection(*items: object):
@@ -67,7 +78,7 @@ def run_t3_task(ledger_path, *agent_args: str):
 
 @pytest.fixture
 def t3_server(server, installed_launch_agent):
-    server.projections.append(projection(COMMAND_ITEM))
+    server.projections.append(projection(COMMAND_ITEM, MESSAGE_ITEM))
     write_send_result(server, 0, reply=T3_REPLY)
     return server
 
@@ -115,6 +126,7 @@ def test_run_creates_thread_in_worktree_and_records_reply(
     assert task["native_session_id"] == NATIVE_SESSION_ID
     progress = progress_log.progress_path(task["session_id"]).read_text(encoding="utf-8")
     assert common.tool_call_progress("command", "make test") in progress
+    assert T3_REPLY in progress
 
 
 def test_failed_run_fails_task_with_t3_code_error(t3_server, ledger_path):
@@ -157,8 +169,8 @@ def test_run_waiting_for_answer_stops_task_until_continue(
 def test_usage_limit_resumes_same_thread_at_reported_reset(t3_server, ledger_path, monkeypatch):
     monkeypatch.setattr(claude, "next_reset_time", lambda: pytest.fail("usage lookup ran"))
     t3_server.projections[1:] = [
-        projection(USAGE_LIMIT_ITEM),
-        projection(USAGE_LIMIT_ITEM, COMMAND_ITEM),
+        projection(COMMAND_ITEM, USAGE_LIMIT_ITEM),
+        projection(COMMAND_ITEM, USAGE_LIMIT_ITEM, MESSAGE_ITEM),
     ]
     write_send_result(t3_server, 1, error="usage limit reached")
 
@@ -174,23 +186,23 @@ def test_usage_limit_resumes_same_thread_at_reported_reset(t3_server, ledger_pat
         encoding="utf-8"
     ) == common.USAGE_LIMIT_RESUME_PROMPT
     assert [command["type"] for command in t3_server.commands] == ["thread.create"]
+    progress = progress_log.progress_path(task["session_id"]).read_text(encoding="utf-8")
+    assert progress.count(common.tool_call_progress("command", "make test")) == 1
 
 
 @pytest.mark.parametrize(
-    ("backend_id", "agent_args", "is_claude"),
+    ("backend_id", "agent_args", "transcript_name"),
     [
-        pytest.param("t3", [], True, id="t3-claude"),
-        pytest.param("t3", ["--provider", "codex"], False, id="t3-codex"),
-        pytest.param("codex", [], False, id="codex"),
+        pytest.param("t3", [], CLAUDE_TRANSCRIPT, id="t3-claude"),
+        pytest.param("t3", ["--provider", "codex"], CODEX_TRANSCRIPT, id="t3-codex"),
+        pytest.param("codex", [], None, id="codex"),
     ],
 )
 def test_gate_stops_chain_and_hooks_only_claude_tasks(
-    t3_server, ledger_path, tmp_path, backend_id, agent_args, is_claude
+    t3_server, ledger_path, tmp_path, backend_id, agent_args, transcript_name
 ):
-    transcript_path = (
-        Path.home() / ".claude" / "projects" / "project" / f"{NATIVE_SESSION_ID}.jsonl"
-    )
-    support.write_idle_file(transcript_path, 0)
+    for name in (CLAUDE_TRANSCRIPT, CODEX_TRANSCRIPT):
+        support.write_idle_file(Path.home() / name, 0)
     support.schedule_gated_chain(
         ledger_path,
         support.gate_command(tmp_path, exit_code=1, stderr=support.GATE_STOP_REASON),
@@ -204,7 +216,10 @@ def test_gate_stops_chain_and_hooks_only_claude_tasks(
     assert parent["gate_stop_reason"] == support.GATE_STOP_REASON
     assert support.read_task(ledger_path, support.CHILD_ID)["status"] == ledger.STATUS_WAITING
     gate_input = json.loads((tmp_path / "gate-stdin").read_text(encoding="utf-8"))
-    assert gate_input["transcript_path"] == (str(transcript_path) if is_claude else None)
+    assert gate_input["transcript_path"] == (
+        str(Path.home() / transcript_name) if transcript_name else None
+    )
+    is_claude = transcript_name == CLAUDE_TRANSCRIPT
     assert (Path.cwd() / ".claude" / "settings.local.json").exists() == is_claude
 
 
