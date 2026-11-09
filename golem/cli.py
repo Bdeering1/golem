@@ -89,7 +89,7 @@ def load_default_backend() -> str:
         raise SystemExit(f"{invalid_config_message_prefix()}: default_backend must be a string")
     if default_backend not in registry.BACKENDS:
         raise SystemExit(
-            f"{invalid_config_message_prefix()}: default_backend names an unknown backend: "
+            f"{invalid_config_message_prefix()}: default_backend names unknown backend "
             f"{default_backend}"
         )
     return default_backend
@@ -172,7 +172,8 @@ def task_id_from_arguments(arguments: ledger.Arguments) -> str:
 
 
 def run_task_from_arguments(arguments: ledger.Arguments) -> int:
-    arguments.backend = arguments.backend or load_default_backend()
+    default_backend = load_default_backend()
+    arguments.backend = arguments.backend or default_backend
     backend = registry.BACKENDS[arguments.backend]
     default_clients = load_default_clients()
     auto_pickup_client = default_clients.get(arguments.backend) if arguments.auto_pickup else None

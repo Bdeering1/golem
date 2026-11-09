@@ -248,7 +248,7 @@ def test_run_after_parent_uses_saved_default_not_parent_backend(
         pytest.param("default_backend = 1\n", "default_backend must be a string", id="non-string"),
         pytest.param(
             'default_backend = "gemini"\n',
-            "default_backend names an unknown backend: gemini",
+            "default_backend names unknown backend gemini",
             id="unknown",
         ),
     ],
@@ -259,7 +259,9 @@ def test_invalid_default_backend_fails_run_only(
     support.write_config_text(config_text)
 
     with pytest.raises(SystemExit, match=message):
-        cli.main(["run", support.TASK_ID, support.PROMPT, "--now"])
+        cli.main(
+            ["run", support.TASK_ID, support.PROMPT, "--now", "--backend", ledger.BACKEND_CLAUDE]
+        )
 
     assert not ledger_path.exists()
     assert cli.main(["alias", "list"]) == 0
