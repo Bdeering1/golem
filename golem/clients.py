@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-from golem import ledger
+from golem import ledger, t3_code
 from golem.backends import codex, registry
 
 AUTO_PICKUP_CLIENT = "claude-desktop"
@@ -18,14 +18,20 @@ def accept_arguments(_agent_args: list[str]) -> None:
     pass
 
 
+def skip_preparation(_task: ledger.Task, _conversation_id: str) -> None:
+    pass
+
+
 @dataclass(frozen=True)
 class Client:
     name: str
-    backend_id: str
+    backend_ids: frozenset[str]
     is_terminal: bool
-    command: Callable[[str, list[str]], list[str]]
+    command: Callable[[ledger.Task, str, list[str]], list[str]]
     environment: Callable[[dict[str, str]], dict[str, str]] = keep_environment
     validate_arguments: Callable[[list[str]], None] = accept_arguments
+    prepare: Callable[[ledger.Task, str], None] = skip_preparation
+    has_t3_code_thread: bool = False
 
 
 CLIENTS: dict[str, Client] = {
@@ -33,9 +39,9 @@ CLIENTS: dict[str, Client] = {
     for client in (
         Client(
             name="claude-code",
-            backend_id=ledger.BACKEND_CLAUDE,
+            backend_ids=frozenset({ledger.BACKEND_CLAUDE}),
             is_terminal=True,
-            command=lambda conversation_id, agent_args: [
+            command=lambda _task, conversation_id, agent_args: [
                 "claude",
                 "--resume",
                 conversation_id,
@@ -44,9 +50,9 @@ CLIENTS: dict[str, Client] = {
         ),
         Client(
             name="codex-cli",
-            backend_id=ledger.BACKEND_CODEX,
+            backend_ids=frozenset({ledger.BACKEND_CODEX}),
             is_terminal=True,
-            command=lambda conversation_id, agent_args: [
+            command=lambda _task, conversation_id, agent_args: [
                 "codex",
                 "resume",
                 conversation_id,
@@ -58,12 +64,23 @@ CLIENTS: dict[str, Client] = {
         ),
         Client(
             name=AUTO_PICKUP_CLIENT,
-            backend_id=ledger.BACKEND_CLAUDE,
+            backend_ids=frozenset({ledger.BACKEND_CLAUDE}),
             is_terminal=False,
-            command=lambda conversation_id, _agent_args: [
+            command=lambda _task, conversation_id, _agent_args: [
                 "open",
                 f"claude://resume?session={conversation_id}",
             ],
+        ),
+        Client(
+            name="t3-code",
+            backend_ids=frozenset({ledger.BACKEND_CLAUDE, ledger.BACKEND_CODEX}),
+            is_terminal=False,
+            command=lambda task, conversation_id, _agent_args: [
+                "open",
+                t3_code.thread_link(task, conversation_id),
+            ],
+            prepare=t3_code.prepare_thread,
+            has_t3_code_thread=True,
         ),
     )
 }
@@ -74,7 +91,7 @@ def task_client(task_id: str, task: ledger.Task, client_name: str | None) -> Cli
     task_backend_id = ledger.task_backend(task)
     if client_name is not None:
         client = CLIENTS[client_name]
-        if client.backend_id != task_backend_id:
+        if task_backend_id not in client.backend_ids:
             raise SystemExit(
                 f"golem: {client.name} does not support {backend.NAME} tasks: {task_id}"
             )
@@ -82,5 +99,5 @@ def task_client(task_id: str, task: ledger.Task, client_name: str | None) -> Cli
     return next(
         client
         for client in CLIENTS.values()
-        if client.is_terminal and client.backend_id == task_backend_id
+        if client.is_terminal and task_backend_id in client.backend_ids
     )

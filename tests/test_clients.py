@@ -10,9 +10,9 @@ STUB_APP_CLIENT = "stub-app"
 def stub_client(name, *, is_terminal, program):
     return clients.Client(
         name=name,
-        backend_id=ledger.BACKEND_CLAUDE,
+        backend_ids=frozenset({ledger.BACKEND_CLAUDE}),
         is_terminal=is_terminal,
-        command=lambda conversation_id, agent_args: [
+        command=lambda _task, conversation_id, agent_args: [
             program,
             f"stub:{conversation_id}",
             *agent_args,

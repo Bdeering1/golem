@@ -3,7 +3,9 @@ name = "golem"
 version = "0.1.0"
 description = "Run and review Claude and Codex tasks"
 requires-python = ">=3.14"
-dependencies = []
+dependencies = [
+    "websockets>=17.4",
+]
 
 [build-system]
 requires = ["setuptools>=68"]

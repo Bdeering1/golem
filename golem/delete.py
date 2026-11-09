@@ -2,7 +2,7 @@ from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from golem import chains, git, ledger, progress_log, task_directories, worktree_cleanup
+from golem import chains, git, ledger, progress_log, t3_code, task_directories, worktree_cleanup
 from golem.backends import claude_hooks, registry
 
 
@@ -11,6 +11,7 @@ class ReplacedTasks:
     task_ids: list[str]
     session_ids: list[str]
     directories: set[str]
+    t3_code_thread_ids: list[str]
 
 
 def delete_task_and_release_worktrees(
@@ -62,8 +63,9 @@ def remove_replaceable_tasks(
     directories: set[str] = set()
     for task_id in ordered_ids:
         directories |= claude_hooks.hook_affected_directories(tasks, tasks[task_id])
+    thread_ids = t3_code.recorded_thread_ids(tasks[task_id] for task_id in ordered_ids)
     session_ids = pop_tasks_and_release_worktrees(tasks, worktrees, ordered_ids)
-    return ReplacedTasks(ordered_ids, session_ids, directories)
+    return ReplacedTasks(ordered_ids, session_ids, directories, thread_ids)
 
 
 def finish_task_replacement(replaced: ReplacedTasks) -> None:
@@ -73,6 +75,7 @@ def finish_task_replacement(replaced: ReplacedTasks) -> None:
         print(f"golem: replaced task: {task_id}")
     for directory in replaced.directories:
         claude_hooks.sync_hooks(directory)
+    t3_code.delete_threads(replaced.t3_code_thread_ids)
 
 
 def selected_delete_task_ids(
@@ -170,6 +173,7 @@ def remove_selected_worktrees(
 
 def delete_tasks(task_ids: list[str], *, is_chain: bool, is_removing_worktree: bool) -> int:
     directories: set[str] = set()
+    thread_ids: list[str] = []
     with ledger.locked_ledger() as (tasks, worktrees):
         selected_task_ids, messages = selected_delete_task_ids(tasks, task_ids, is_chain=is_chain)
         worktrees_by_task, check_messages = task_worktrees_and_refusals(
@@ -187,6 +191,7 @@ def delete_tasks(task_ids: list[str], *, is_chain: bool, is_removing_worktree: b
             removed_worktrees = remove_selected_worktrees(tasks, worktrees, worktrees_by_task)
         if removed_worktrees is not None:
             selected_tasks = [(task_id, tasks[task_id]) for task_id in selected_task_ids]
+            thread_ids = t3_code.recorded_thread_ids(task for _, task in selected_tasks)
             delete_task_and_release_worktrees(tasks, worktrees, selected_task_ids)
             for task_id, task in selected_tasks:
                 worktree = worktrees_by_task[task_id]
@@ -195,6 +200,7 @@ def delete_tasks(task_ids: list[str], *, is_chain: bool, is_removing_worktree: b
                 )
     for directory in directories:
         claude_hooks.sync_hooks(directory)
+    t3_code.delete_threads(thread_ids)
     return 0 if removed_worktrees is not None else 1
 
 
