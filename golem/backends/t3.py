@@ -2,6 +2,7 @@ import json
 import subprocess
 import tempfile
 import time
+import uuid
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -150,12 +151,15 @@ class ThreadWatcher:
     run_items: dict[str, ledger.JsonObject] = field(default_factory=dict)
     recorded_item_ids: set[str] = field(default_factory=set)
 
-    def projection(self) -> ledger.JsonObject:
+    def current_token(self) -> str:
         now = time.monotonic()
         if self.token_issued_at is None or now - self.token_issued_at >= TOKEN_REISSUE_SECONDS:
             self.token = t3_code.issue_token()
             self.token_issued_at = now
-        return t3_code.thread_projection(self.origin, self.token, self.thread_id)
+        return self.token
+
+    def projection(self) -> ledger.JsonObject:
+        return t3_code.thread_projection(self.origin, self.current_token(), self.thread_id)
 
     def skip_previous_items(self) -> None:
         with suppress(*t3_code.T3_CODE_ERRORS):
@@ -184,14 +188,36 @@ class ThreadWatcher:
                 )
                 self.native_session_id = native_session_id
 
-    def last_failure(self) -> ledger.JsonObject:
+    def last_failed_error(self) -> ledger.JsonObject:
         failed_errors = [
             item
             for item in self.run_items.values()
             if item.get("type") == "error" and item.get("status") == "failed"
         ]
-        failure = failed_errors[-1].get("failure") if failed_errors else None
+        return failed_errors[-1] if failed_errors else {}
+
+    def last_failure(self) -> ledger.JsonObject:
+        failure = self.last_failed_error().get("failure")
         return cast("ledger.JsonObject", failure) if isinstance(failure, dict) else {}
+
+    def disable_auto_resume(self) -> None:
+        # golem resumes the thread itself, so T3 Code's auto-resume would send a second turn.
+        limit_recovery = {
+            "runId": self.last_failed_error().get("runId"),
+            "resetAt": self.last_failure().get("resetAt"),
+            "autoResume": False,
+        }
+        with suppress(*t3_code.T3_CODE_ERRORS):
+            t3_code.dispatch_command(
+                self.origin,
+                self.current_token(),
+                {
+                    "type": "thread.metadata.update",
+                    "commandId": str(uuid.uuid4()),
+                    "threadId": self.thread_id,
+                    "limitRecovery": limit_recovery,
+                },
+            )
 
 
 def send_message(
@@ -320,4 +346,7 @@ def run(
         )
         watcher.skip_previous_items()
         returncode, stdout, stderr = send_message(task, thread_id, watcher, lock_file_descriptors)
-    return send_outcome(returncode, stdout, stderr, watcher)
+    outcome = send_outcome(returncode, stdout, stderr, watcher)
+    if outcome.is_usage_limit:
+        watcher.disable_auto_resume()
+    return outcome
