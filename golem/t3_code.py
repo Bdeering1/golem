@@ -306,6 +306,17 @@ def require_running_to_delete(thread_ids: list[str]) -> None:
         )
 
 
+def open_to_delete(thread_ids: list[str]) -> None:
+    if not thread_ids or is_running():
+        return
+    try:
+        start_app()
+    except T3_CODE_ERRORS as error:
+        raise SystemExit(
+            f"golem: could not open T3 Code to delete thread: {', '.join(thread_ids)}: {error}"
+        ) from error
+
+
 def delete_threads(thread_ids: list[str]) -> None:
     if not thread_ids or not server_runtime_path().exists():
         return

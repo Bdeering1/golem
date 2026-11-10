@@ -157,7 +157,7 @@ def retry_task(task_id: str, *, is_now: bool, at_text: str | None) -> int:
     tasks = ledger.load_tasks()
     retryable = retryable_task(tasks, task_id)
     task_directories.reject_missing_worktree(retryable, ledger.load_worktrees())
-    t3_code.require_running_to_delete(t3_code.recorded_thread_ids([retryable]))
+    t3_code.open_to_delete(t3_code.recorded_thread_ids([retryable]))
     launch_agent.require_launch_agent()
     when = (
         planned_execution_time(
@@ -273,6 +273,9 @@ def schedule_run_task(
     *,
     default_clients: dict[str, str],
 ) -> int:
+    t3_code.open_to_delete(
+        delete.replaceable_thread_ids(ledger.load_tasks(), [task_id, *follow_up_records])
+    )
     after = arguments.after if isinstance(arguments.after, str) else None
     if after is not None:
         dependent_record = new_task_record(
