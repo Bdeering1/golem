@@ -51,10 +51,6 @@ golem run add-auth "Add password reset" \
   -- --permission-mode auto
 ```
 
-## T3 Code
-
-`--backend t3` runs each task as a thread in T3 Code, so T3 Code shows every turn. golem opens T3 Code if it isn't running. `[env]` and `--env` don't apply to `t3` tasks. Leave T3 Code's "auto-resume limited threads" setting off, since golem resumes after usage limits itself.
-
 ## Commands
 
 | Command | What it does |
