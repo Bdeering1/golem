@@ -246,15 +246,15 @@ def test_delete_refuses_while_t3_code_is_not_running(server, ledger_path):
     assert support.read_tasks(ledger_path) == tasks
 
 
-@pytest.mark.parametrize(
-    ("command", "status"),
-    [
-        pytest.param(
-            ["run", support.TASK_ID, support.PROMPT, "--now"], ledger.STATUS_DONE, id="replacement"
-        ),
-        pytest.param(["retry", support.TASK_ID, "--now"], ledger.STATUS_FAILED, id="retry"),
-    ],
-)
+STARTING_COMMANDS = [
+    pytest.param(
+        ["run", support.TASK_ID, support.PROMPT, "--now"], ledger.STATUS_DONE, id="replacement"
+    ),
+    pytest.param(["retry", support.TASK_ID, "--now"], ledger.STATUS_FAILED, id="retry"),
+]
+
+
+@pytest.mark.parametrize(("command", "status"), STARTING_COMMANDS)
 def test_starting_task_opens_t3_code_to_delete_previous_thread(
     server, installed_launch_agent, ledger_path, fake_commands, monkeypatch, command, status
 ):
@@ -270,6 +270,21 @@ def test_starting_task_opens_t3_code_to_delete_previous_thread(
     assert t3_support.sent_commands(server) == [
         {"type": "thread.delete", "threadId": t3_support.CLAUDE_THREAD_ID}
     ]
+
+
+@pytest.mark.parametrize(("command", "status"), STARTING_COMMANDS)
+def test_starting_task_refuses_if_t3_code_quits_before_ledger_changes(
+    server, installed_launch_agent, ledger_path, monkeypatch, command, status
+):
+    write_task_with_thread(ledger_path, status)
+    server.runtime_path.unlink()
+    monkeypatch.setattr(t3_code, "open_to_delete", lambda _thread_ids: None)
+    tasks = support.read_tasks(ledger_path)
+
+    with pytest.raises(SystemExit, match="T3 Code is not running"):
+        cli.main(command)
+
+    assert support.read_tasks(ledger_path) == tasks
 
 
 def test_prune_keeps_task_with_thread_while_t3_code_is_not_running(server, ledger_path):

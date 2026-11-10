@@ -100,3 +100,11 @@ def test_registered_backend_refuses_auto_pickup_without_default_client(stub_back
         cli.main(
             ["run", support.TASK_ID, support.PROMPT, "--backend", STUB_BACKEND_ID, "--auto-pickup"]
         )
+
+
+def test_session_field_is_not_recorded_on_a_newer_session(ledger_path):
+    support.write_task(ledger_path, ledger.STATUS_RUNNING)
+
+    common.record_session_field(support.TASK_ID, "stale-session", "thread_id", "thread")
+
+    assert "thread_id" not in support.read_task(ledger_path)

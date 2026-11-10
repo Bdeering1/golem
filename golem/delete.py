@@ -46,21 +46,9 @@ def is_replaceable_task(task: ledger.Task) -> bool:
     return task["status"] == ledger.STATUS_DONE and ledger.has_finished_pull_requests(task)
 
 
-def replaceable_thread_ids(tasks: ledger.Tasks, task_ids: list[str]) -> list[str]:
-    chain_ids = {
-        chain_id
-        for task_id in task_ids
-        if task_id in tasks
-        for chain_id in chains.chain_task_ids(tasks, task_id)
-    }
-    if not all(is_replaceable_task(tasks[chain_id]) for chain_id in chain_ids):
-        return []
-    return t3_code.recorded_thread_ids(tasks[chain_id] for chain_id in chain_ids)
-
-
-def remove_replaceable_tasks(
-    tasks: ledger.Tasks, worktrees: ledger.Worktrees, task_ids: list[str], parent_id: str | None
-) -> ReplacedTasks:
+def replaceable_chain_ids(
+    tasks: ledger.Tasks, task_ids: list[str], parent_id: str | None
+) -> list[str]:
     replaced_ids: set[str] = set()
     for task_id in task_ids:
         if task_id not in tasks:
@@ -71,7 +59,13 @@ def remove_replaceable_tasks(
         ):
             raise SystemExit(f"golem: task already exists: {task_id}")
         replaced_ids |= chain_ids
-    ordered_ids = [task_id for task_id in tasks if task_id in replaced_ids]
+    return [task_id for task_id in tasks if task_id in replaced_ids]
+
+
+def remove_replaceable_tasks(
+    tasks: ledger.Tasks, worktrees: ledger.Worktrees, task_ids: list[str], parent_id: str | None
+) -> ReplacedTasks:
+    ordered_ids = replaceable_chain_ids(tasks, task_ids, parent_id)
     directories: set[str] = set()
     for task_id in ordered_ids:
         directories |= claude_hooks.hook_affected_directories(tasks, tasks[task_id])

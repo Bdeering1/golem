@@ -157,7 +157,6 @@ def retry_task(task_id: str, *, is_now: bool, at_text: str | None) -> int:
     tasks = ledger.load_tasks()
     retryable = retryable_task(tasks, task_id)
     task_directories.reject_missing_worktree(retryable, ledger.load_worktrees())
-    t3_code.open_to_delete(t3_code.recorded_thread_ids([retryable]))
     launch_agent.require_launch_agent()
     when = (
         planned_execution_time(
@@ -167,10 +166,12 @@ def retry_task(task_id: str, *, is_now: bool, at_text: str | None) -> int:
         )
         or datetime.now(UTC).astimezone()
     )
+    t3_code.open_to_delete(t3_code.recorded_thread_ids([retryable]))
 
     with ledger.locked_ledger() as (tasks, worktrees):
         task = retryable_task(tasks, task_id)
         task_directories.reject_missing_worktree(task, worktrees)
+        t3_code.require_running_to_delete(t3_code.recorded_thread_ids([task]))
         record = new_task_record(
             RunPlacement(task["cwd"]),
             task["prompt"],
@@ -263,6 +264,12 @@ def reserve_dependent_task(
     return True
 
 
+def open_t3_code_for_replaced_threads(task_ids: list[str], parent_id: str | None) -> None:
+    tasks = ledger.load_tasks()
+    replaced_ids = delete.replaceable_chain_ids(tasks, task_ids, parent_id)
+    t3_code.open_to_delete(t3_code.recorded_thread_ids(tasks[task_id] for task_id in replaced_ids))
+
+
 def schedule_run_task(
     arguments: ledger.Arguments,
     task_id: str,
@@ -273,14 +280,13 @@ def schedule_run_task(
     *,
     default_clients: dict[str, str],
 ) -> int:
-    t3_code.open_to_delete(
-        delete.replaceable_thread_ids(ledger.load_tasks(), [task_id, *follow_up_records])
-    )
     after = arguments.after if isinstance(arguments.after, str) else None
+    task_ids = [task_id, *follow_up_records]
     if after is not None:
         dependent_record = new_task_record(
             placement, prompt_text, task_args, None, arguments.backend, after=after
         )
+        open_t3_code_for_replaced_threads(task_ids, after)
         if reserve_dependent_task(
             {task_id: dependent_record, **follow_up_records}, after, default_clients
         ):
@@ -294,6 +300,7 @@ def schedule_run_task(
         is_now=arguments.now,
         at_text=arguments.at,
     )
+    open_t3_code_for_replaced_threads(task_ids, after)
     return schedule_new_task(
         task_id,
         prompt_text,
