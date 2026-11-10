@@ -1,6 +1,7 @@
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
 from golem import git, ledger
 from golem.backends import common
@@ -176,3 +177,46 @@ def task_uses_worktree(tasks: ledger.Tasks, task: ledger.Task, worktree: str) ->
 
 def worktree_task_ids(tasks: ledger.Tasks, worktree: str) -> list[str]:
     return [task_id for task_id, task in tasks.items() if task_uses_worktree(tasks, task, worktree)]
+
+
+def create_worktree(task_id: str, task: ledger.Task) -> str | None:
+    worktree = task.get("worktree")
+    if worktree is None:
+        return "golem: task has no worktree"
+    cwd = task["cwd"]
+    git.fetch_stale_default_branch(cwd)
+    base = git.ORIGIN_HEAD
+    if git.run_git(cwd, "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}").returncode:
+        base = "HEAD"
+    result = git.run_git(
+        cwd,
+        "worktree",
+        "add",
+        "--no-track",
+        "-b",
+        f"worktree-{Path(worktree).name}",
+        worktree,
+        base,
+    )
+    if result.returncode:
+        error = result.stderr.strip() or result.stdout.strip()
+        return f"golem: could not create worktree: {error}"
+    common_directory = cast("str", git.git_common_directory(cwd))
+    exclude_path = Path(common_directory) / "info" / "exclude"
+    exclude_path.parent.mkdir(parents=True, exist_ok=True)
+    exclude_text = exclude_path.read_text(encoding="utf-8") if exclude_path.exists() else ""
+    if ".claude/worktrees/" not in exclude_text.splitlines():
+        separator = "\n" if exclude_text and not exclude_text.endswith("\n") else ""
+        with exclude_path.open("a", encoding="utf-8") as exclude_file:
+            exclude_file.write(f"{separator}.claude/worktrees/\n")
+    record_created_worktree_owner(task_id, task)
+    return None
+
+
+def prepare_worktree(task_id: str, task: ledger.Task) -> str | None:
+    worktree = task.get("worktree")
+    if worktree is None or Path(worktree).is_dir():
+        return None
+    if task.get("worktree_pending") is not True:
+        return f"golem: worktree is missing: {worktree}"
+    return create_worktree(task_id, task)

@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -27,6 +27,18 @@ def is_usage_limit_resume(task: ledger.Task) -> bool:
     return task.get("usage_limit_resume_count", 0) > 0
 
 
+def record_session_field(
+    task_id: str,
+    session_id: str,
+    name: Literal["thread_id", "t3_code_thread_id", "native_session_id"],
+    value: str,
+) -> None:
+    with ledger.locked_tasks() as tasks:
+        task = tasks.get(task_id)
+        if task is not None and task.get("session_id") == session_id:
+            task[name] = value
+
+
 def tool_call_progress(name: str, argument: object) -> str:
     line = (
         f"[tool] {name} {display.first_line(argument)}"
@@ -49,17 +61,20 @@ class RunOutcome:
     is_usage_limit: bool
     stderr: str = ""
     working_directory: str | None = None
+    reset_time: datetime | None = None
+    stop_reason: str | None = None
+
+
+class UsageBackend(Protocol):
+    def next_reset_time(self) -> datetime | None: ...
 
 
 class Backend(Protocol):
     NAME: str
-    IS_GATE_SUPPORTED: bool
 
     def run(
         self, task_id: str, task: ledger.Task, lock_file_descriptors: tuple[int, ...]
     ) -> RunOutcome: ...
-
-    def next_reset_time(self) -> datetime | None: ...
 
     def validate_run_arguments(self, agent_args: list[str]) -> None: ...
 

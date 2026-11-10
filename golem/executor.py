@@ -43,13 +43,19 @@ def clear_recorded_worktree_pending(task_id: str) -> None:
             task_directories.clear_worktree_pending_if_created(task)
 
 
-def mark_task_waiting_for_reset(task_id: str, result: str) -> bool:
+def mark_task_waiting_for_reset(task_id: str, result: str, reset_time: datetime | None) -> bool:
     try:
         task = ledger.load_tasks().get(task_id)
         if task is None:
             return False
-        when = scheduling.planned_execution_time(
-            registry.task_backend(task), is_now=False, at_text=None
+        when = (
+            scheduling.rounded_execution_time(reset_time)
+            if reset_time is not None
+            else scheduling.planned_execution_time(
+                registry.task_usage_backend(task),
+                is_now=False,
+                at_text=None,
+            )
         )
     except SystemExit:
         return False
@@ -77,6 +83,7 @@ def finish_task(
     *,
     is_usage_limit: bool,
     is_background_work_stopped: bool,
+    stop_reason: str | None = None,
 ) -> None:
     with ledger.locked_tasks() as tasks:
         stored_task = tasks.get(task_id)
@@ -89,12 +96,15 @@ def finish_task(
             task_record["result"] = result
         if repository_branches is not None:
             task_record["repository_branches"] = repository_branches
+        is_succeeded = returncode == 0 and not is_usage_limit and not is_background_work_stopped
         task_record["status"] = (
             ledger.STATUS_NEEDS_REVIEW
-            if returncode == 0 and not is_usage_limit and not is_background_work_stopped
+            if is_succeeded or stop_reason is not None
             else ledger.STATUS_FAILED
         )
         task_record["returncode"] = returncode
+        if stop_reason is not None:
+            task_record["gate_stop_reason"] = stop_reason
         stored_parent = tasks.get(task_record.get("after", ""))
         if task_record["status"] != ledger.STATUS_NEEDS_REVIEW or stored_parent is None:
             return
@@ -222,7 +232,7 @@ def execute_task(task_id: str, task: ledger.Task, lock_file_descriptors: tuple[i
         outcome.is_usage_limit
         and usage_limit_resume_count < MAX_USAGE_LIMIT_RESUMES
         and outcome.result is not None
-        and mark_task_waiting_for_reset(task_id, outcome.result)
+        and mark_task_waiting_for_reset(task_id, outcome.result, outcome.reset_time)
     ):
         return 0
     stored_result = outcome.result
@@ -237,12 +247,15 @@ def execute_task(task_id: str, task: ledger.Task, lock_file_descriptors: tuple[i
         branch_pull_requests.task_branches(task_id),
         is_usage_limit=outcome.is_usage_limit,
         is_background_work_stopped=stop_line_match is not None,
+        stop_reason=outcome.stop_reason,
     )
     tasks = ledger.load_tasks()
     stored_task = tasks.get(task_id)
     if stored_task is not None:
         if stored_task.get("status") == ledger.STATUS_FAILED:
             notifications.notify_task(task_id, stored_task, notifications.OUTCOME_FAILED)
+        elif outcome.stop_reason is not None:
+            notifications.notify_task(task_id, stored_task, notifications.OUTCOME_GATE_STOPPED)
         elif review.is_ready_for_review(tasks, task_id):
             notifications.notify_task(task_id, stored_task, notifications.OUTCOME_NEEDS_REVIEW)
     return outcome.returncode

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import NotRequired, TypedDict, cast
 
 from golem import chains, ledger, spawn
+from golem.backends import registry
 
 HOOK_STOP_TIMEOUT_SECONDS = 30
 HOOK_ARGUMENT_STOP = "stop"
@@ -173,6 +174,7 @@ def has_pending_follow_up(tasks: ledger.Tasks, task_id: str) -> bool:
 def is_hook_needed(tasks: ledger.Tasks, directory: str) -> bool:
     return any(
         "gate" in task
+        and registry.agent_backend_id(task["backend"], task["agent_args"]) == ledger.BACKEND_CLAUDE
         and task["status"] in ledger.SUCCEEDED_STATUSES
         and ledger.task_directory(task) == directory
         and has_pending_follow_up(tasks, task_id)

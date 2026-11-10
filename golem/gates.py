@@ -110,7 +110,11 @@ def session_task_id(tasks: ledger.Tasks, session_id: str | None) -> str | None:
     if session_id is None:
         return None
     return next(
-        (task_id for task_id, task in tasks.items() if task.get("session_id") == session_id),
+        (
+            task_id
+            for task_id, task in tasks.items()
+            if session_id in {task.get("session_id"), task.get("native_session_id")}
+        ),
         None,
     )
 

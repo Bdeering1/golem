@@ -143,6 +143,9 @@ def delete_pruned_tasks(selected_tasks: ledger.Tasks) -> None:
             ):
                 print(f"golem: kept {task_id}: no longer eligible", file=sys.stderr)
                 continue
+            if "t3_code_thread_id" in evaluated_task and not t3_code.is_running():
+                print(f"golem: kept {task_id}: T3 Code is not running", file=sys.stderr)
+                continue
             delete.delete_task_and_release_worktrees(tasks, worktrees, [task_id])
             deleted_tasks.append(evaluated_task)
             print(f"golem: deleted task: {task_id}")

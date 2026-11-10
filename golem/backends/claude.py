@@ -26,7 +26,6 @@ PERMISSION_ARGUMENTS = {
 }
 VERBOSE_ARGUMENT = "--verbose"
 NAME: str = "Claude"
-IS_GATE_SUPPORTED: bool = True
 
 
 class ClaudeRateLimit(TypedDict):
@@ -180,8 +179,12 @@ def conversation_id(task: ledger.Task) -> str | None:
     return task["session_id"]
 
 
+def session_transcript_paths(session_id: str) -> list[Path]:
+    return list((Path.home() / ".claude" / "projects").glob(f"*/{session_id}.jsonl"))
+
+
 def transcript_paths(task: ledger.Task) -> list[Path]:
-    return list((Path.home() / ".claude" / "projects").glob(f"*/{task['session_id']}.jsonl"))
+    return session_transcript_paths(task["session_id"])
 
 
 def next_reset_time() -> datetime | None:
