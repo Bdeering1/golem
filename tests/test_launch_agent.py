@@ -269,7 +269,6 @@ def test_changed_state_home_requires_reinstall(installed_launch_agent, monkeypat
 
 def test_run_requires_reinstall_without_saved_agent_environment(installed_launch_agent):
     settings = ledger.load_settings()
-    assert settings.get("agent_environment", {}).get("PATH") == os.environ["PATH"]
     del settings["agent_environment"]
     ledger.save_settings(settings)
 

@@ -85,6 +85,7 @@ def open_due_usage_windows(
                 continue
             label = f"{backend.NAME} usage window for {occurrence:%Y-%m-%d %H:%M}"
             if now - occurrence >= USAGE_WINDOW_CUTOFF:
+                records[key] = {"date": occurrence_date, "is_settled": True}
                 error = None if record is None else record.get("error")
                 if error is None:
                     late_minutes = int(USAGE_WINDOW_CUTOFF.total_seconds() // 60)
@@ -92,22 +93,19 @@ def open_due_usage_windows(
                         f"golem: skipped {label}, {late_minutes} or more minutes late",
                         file=sys.stderr,
                     )
-                else:
-                    print(f"golem: gave up opening {label}: {error}", file=sys.stderr)
-                    notifications.notify(
-                        f"golem: could not open {backend.NAME} usage window",
-                        f"{occurrence:%H:%M}: {error}"[
-                            : notifications.NOTIFICATION_MESSAGE_MAX_LENGTH
-                        ],
-                    )
-                records[key] = {"date": occurrence_date, "is_settled": True}
+                    continue
+                print(f"golem: gave up opening {label}: {error}", file=sys.stderr)
+                notifications.notify(
+                    f"golem: could not open {backend.NAME} usage window",
+                    f"{occurrence:%H:%M}: {error}"[: notifications.NOTIFICATION_MESSAGE_MAX_LENGTH],
+                )
                 continue
             error = backend.open_usage_window(environment)
             if error is None:
                 print(f"golem: opened {label}", file=sys.stderr)
                 records[key] = {"date": occurrence_date, "is_settled": True}
-            else:
-                print(f"golem: could not open {label}: {error}", file=sys.stderr)
-                records[key] = {"date": occurrence_date, "is_settled": False, "error": error}
+                continue
+            print(f"golem: could not open {label}: {error}", file=sys.stderr)
+            records[key] = {"date": occurrence_date, "is_settled": False, "error": error}
     if json.dumps(records) != original_records_text:
         ledger.save_json(state_path, records)

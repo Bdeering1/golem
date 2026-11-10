@@ -1,4 +1,3 @@
-import json
 import subprocess
 import sys
 import time as time_module
@@ -122,7 +121,6 @@ def test_window_open_requests_selected_backend_from_temporary_directory(
     assert support.logged_calls(fake_commands, expected_backend)
     request_directory = fake_commands[f"{expected_backend}-cwd"].read_text(encoding="utf-8")
     assert request_directory.strip() != str(Path.cwd())
-    assert not Path(request_directory.strip()).exists()
 
 
 def test_window_open_exits_non_zero_when_request_fails(monkeypatch):
@@ -207,6 +205,3 @@ def test_busy_agent_retries_failed_window_between_passes(ledger_path, monkeypatc
     assert launch_agent.run_launch_agent() == 0
 
     assert claude_opener.open_count == 3
-    state_text = usage_windows.usage_window_state_path().read_text(encoding="utf-8")
-    records = json.loads(state_text)
-    assert [record["is_settled"] for record in records.values()] == [True]

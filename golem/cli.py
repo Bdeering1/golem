@@ -243,9 +243,7 @@ def add_worktree_commands(add_parser: Callable[..., argparse.ArgumentParser]) ->
 def open_usage_window_from_arguments(arguments: ledger.Arguments) -> int:
     usage_windows.usage_window_times()
     default_backend = load_default_backend()
-    backend = registry.USAGE_BACKENDS[
-        arguments.backend or registry.agent_backend_id(default_backend, [])
-    ]
+    backend = registry.usage_backend(arguments.backend or default_backend, [])
     error = backend.open_usage_window(os.environ.copy())
     if error is not None:
         raise SystemExit(f"golem: could not open {backend.NAME} usage window: {error}")
