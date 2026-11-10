@@ -3,7 +3,6 @@ import os
 import re
 import shlex
 import sys
-import tomllib
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -15,6 +14,7 @@ if TYPE_CHECKING:
 from golem import (
     board,
     clients,
+    config,
     delete,
     display,
     executor,
@@ -25,6 +25,7 @@ from golem import (
     prune,
     review,
     scheduling,
+    usage_windows,
     worktree_cleanup,
 )
 from golem.backends import claude_hooks, common, registry
@@ -34,36 +35,18 @@ ALIAS_PLACEHOLDER_PATTERN = re.compile(r"\{(\d+)\}")
 ENVIRONMENT_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
-def config_path() -> Path:
-    return ledger.xdg_golem_directory("XDG_CONFIG_HOME", Path.home() / ".config") / "config.toml"
-
-
-def invalid_config_message_prefix() -> str:
-    return f"golem: invalid config file {config_path()}"
-
-
-def load_config() -> dict[str, object]:
-    path = config_path()
-    if not path.exists():
-        return {}
-    try:
-        return tomllib.loads(path.read_text(encoding="utf-8"))
-    except tomllib.TOMLDecodeError as error:
-        raise SystemExit(f"{invalid_config_message_prefix()}: {error}") from error
-
-
 def load_string_table(table_name: str, item_label: str) -> dict[str, str]:
-    table = load_config().get(table_name)
+    table = config.load_config().get(table_name)
     if table is None:
         return {}
     if not isinstance(table, dict):
-        raise SystemExit(f"{invalid_config_message_prefix()}: {table_name} must be a table")
+        raise SystemExit(f"{config.invalid_config_message_prefix()}: {table_name} must be a table")
     entries = cast("dict[str, object]", table)
     validated_table: dict[str, str] = {}
     for name, value in entries.items():
         if not isinstance(value, str):
             raise SystemExit(
-                f"{invalid_config_message_prefix()}: {item_label} {name} must be a string"
+                f"{config.invalid_config_message_prefix()}: {item_label} {name} must be a string"
             )
         validated_table[name] = value
     return validated_table
@@ -77,19 +60,25 @@ def load_environment() -> dict[str, str]:
     environment = load_string_table("env", "env")
     for name, value in environment.items():
         if not ENVIRONMENT_NAME_PATTERN.fullmatch(name):
-            raise SystemExit(f"{invalid_config_message_prefix()}: env name {name} is invalid")
+            raise SystemExit(
+                f"{config.invalid_config_message_prefix()}: env name {name} is invalid"
+            )
         if "\0" in value:
-            raise SystemExit(f"{invalid_config_message_prefix()}: env {name} contains a null byte")
+            raise SystemExit(
+                f"{config.invalid_config_message_prefix()}: env {name} contains a null byte"
+            )
     return environment
 
 
 def load_default_backend() -> str:
-    default_backend = load_config().get("default_backend", ledger.BACKEND_CLAUDE)
+    default_backend = config.load_config().get("default_backend", ledger.BACKEND_CLAUDE)
     if not isinstance(default_backend, str):
-        raise SystemExit(f"{invalid_config_message_prefix()}: default_backend must be a string")
+        raise SystemExit(
+            f"{config.invalid_config_message_prefix()}: default_backend must be a string"
+        )
     if default_backend not in registry.BACKENDS:
         raise SystemExit(
-            f"{invalid_config_message_prefix()}: default_backend names unknown backend "
+            f"{config.invalid_config_message_prefix()}: default_backend names unknown backend "
             f"{default_backend}"
         )
     return default_backend
@@ -97,7 +86,8 @@ def load_default_backend() -> str:
 
 def load_default_clients() -> dict[str, str]:
     return clients.default_clients(
-        load_string_table("default_clients", "default client"), invalid_config_message_prefix()
+        load_string_table("default_clients", "default client"),
+        config.invalid_config_message_prefix(),
     )
 
 
@@ -172,6 +162,7 @@ def task_id_from_arguments(arguments: ledger.Arguments) -> str:
 
 
 def run_task_from_arguments(arguments: ledger.Arguments) -> int:
+    usage_windows.usage_window_times()
     default_backend = load_default_backend()
     arguments.backend = arguments.backend or default_backend
     backend = registry.BACKENDS[arguments.backend]
@@ -247,6 +238,27 @@ def add_worktree_commands(add_parser: Callable[..., argparse.ArgumentParser]) ->
     set_command_handler(
         auto_remove_worktree_command, worktree_cleanup.set_worktree_auto_remove_from_arguments
     )
+
+
+def open_usage_window_from_arguments(arguments: ledger.Arguments) -> int:
+    usage_windows.usage_window_times()
+    default_backend = load_default_backend()
+    backend = registry.USAGE_BACKENDS[
+        arguments.backend or registry.agent_backend_id(default_backend, [])
+    ]
+    error = backend.open_usage_window(os.environ.copy())
+    if error is not None:
+        raise SystemExit(f"golem: could not open {backend.NAME} usage window: {error}")
+    print(f"golem: opened {backend.NAME} usage window")
+    return 0
+
+
+def add_window_commands(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
+    window_command = add_parser("window")
+    window_commands = window_command.add_subparsers(dest="window_command", required=True)
+    open_window_command = window_commands.add_parser("open")
+    open_window_command.add_argument("--backend", choices=tuple(registry.USAGE_BACKENDS))
+    set_command_handler(open_window_command, open_usage_window_from_arguments)
 
 
 def add_prune_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
@@ -549,6 +561,7 @@ COMMAND_REGISTRARS = (
     add_board_command,
     add_alias_command,
     add_worktree_commands,
+    add_window_commands,
     add_agent_command,
     add_launch_agent_command,
     add_execute_command,

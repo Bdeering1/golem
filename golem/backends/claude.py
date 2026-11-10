@@ -264,6 +264,25 @@ def next_reset_time() -> datetime | None:
         raise SystemExit(common.USAGE_ERROR) from error
 
 
+def open_usage_window(environment: dict[str, str]) -> str | None:
+    return common.usage_window_request_error(
+        [
+            "claude",
+            "-p",
+            "k",
+            "--model",
+            "haiku",
+            "--safe-mode",
+            "--tools",
+            "",
+            "--system-prompt",
+            common.USAGE_WINDOW_PROMPT,
+            "--no-session-persistence",
+        ],
+        {**environment, "CLAUDE_CODE_MAX_RETRIES": "0", "API_TIMEOUT_MS": "8000"},
+    )
+
+
 def reset_time_from_limit(limit: ClaudeRateLimit) -> datetime:
     resets_at = limit["resets_at"]
     if resets_at is None:

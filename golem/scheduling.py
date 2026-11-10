@@ -1,4 +1,3 @@
-import re
 import uuid
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -12,6 +11,7 @@ from golem import (
     spawn,
     t3_code,
     task_directories,
+    usage_windows,
 )
 from golem.backends import claude_hooks, common, registry
 
@@ -106,19 +106,13 @@ def cancel_task(task_id: str) -> int:
 
 
 def scheduled_time(value: str) -> datetime:
-    match = re.fullmatch(r"(1[0-2]|[1-9])(?::([0-5][0-9]))?(am|pm)( tomorrow)?", value.lower())
-    if match is None:
+    parsed = usage_windows.parsed_time(value)
+    if parsed is None:
         raise SystemExit('golem: --at expects a time like 9pm or "8:30am tomorrow"')
-    hour, minute, period, tomorrow = match.groups()
+    time_of_day, is_tomorrow = parsed
     now = datetime.now(UTC)
-    local_time = now.astimezone().replace(tzinfo=None)
-    when = local_time.replace(
-        hour=int(hour) % 12 + (12 if period == "pm" else 0),
-        minute=int(minute or 0),
-        second=0,
-        microsecond=0,
-    )
-    if tomorrow or when.astimezone() <= now:
+    when = datetime.combine(now.astimezone().date(), time_of_day)
+    if is_tomorrow or when.astimezone() <= now:
         when += timedelta(days=1)
     return when.astimezone()
 

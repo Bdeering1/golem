@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
-from golem import cli, git, ledger, spawn, task_directories
+from golem import cli, config, git, ledger, spawn, task_directories
 from golem.backends import claude
 
 TASK_ID = "fix-thing"
@@ -68,7 +68,7 @@ def write_tasks(ledger_path, tasks):
 
 
 def write_config_text(text):
-    path = cli.config_path()
+    path = config.config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
 

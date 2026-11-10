@@ -1,3 +1,5 @@
+import subprocess
+import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal, Protocol
@@ -10,6 +12,7 @@ from golem import display, ledger
 PROGRESS_LINE_WIDTH = 120
 USAGE_ERROR = "golem: usage lookup unavailable"
 USAGE_TIMEOUT_SECONDS = 30
+USAGE_WINDOW_PROMPT = "Reply with the single character: k"
 FULL_UTILIZATION = 100
 USAGE_LIMIT_RESUME_PROMPT = "The usage limit has reset. Continue the task."
 WORKTREE_ARGUMENTS = {"-w", "--worktree"}
@@ -54,6 +57,32 @@ def validated_reset_time(reset_time: datetime) -> datetime:
     return reset_time
 
 
+def usage_window_request_error(command: list[str], environment: dict[str, str]) -> str | None:
+    with tempfile.TemporaryDirectory() as directory:
+        try:
+            result = subprocess.run(
+                command,
+                cwd=directory,
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=USAGE_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except OSError as error:
+            return str(error)
+        except subprocess.TimeoutExpired:
+            return f"{command[0]} timed out after {USAGE_TIMEOUT_SECONDS}s"
+    if result.returncode == 0:
+        return None
+    output_lines = (result.stderr.strip() or result.stdout.strip()).splitlines()
+    if not output_lines:
+        return f"{command[0]} exited with status {result.returncode}"
+    return output_lines[-1].strip()
+
+
 @dataclass(frozen=True)
 class RunOutcome:
     returncode: int
@@ -66,7 +95,11 @@ class RunOutcome:
 
 
 class UsageBackend(Protocol):
+    NAME: str
+
     def next_reset_time(self) -> datetime | None: ...
+
+    def open_usage_window(self, environment: dict[str, str]) -> str | None: ...
 
 
 class Backend(Protocol):
