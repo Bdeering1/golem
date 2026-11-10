@@ -64,6 +64,7 @@ def remove_replaceable_tasks(
     for task_id in ordered_ids:
         directories |= claude_hooks.hook_affected_directories(tasks, tasks[task_id])
     thread_ids = t3_code.recorded_thread_ids(tasks[task_id] for task_id in ordered_ids)
+    t3_code.require_running_to_delete(thread_ids)
     session_ids = pop_tasks_and_release_worktrees(tasks, worktrees, ordered_ids)
     return ReplacedTasks(ordered_ids, session_ids, directories, thread_ids)
 
@@ -181,6 +182,9 @@ def delete_tasks(task_ids: list[str], *, is_chain: bool, is_removing_worktree: b
         )
         if messages or check_messages:
             raise SystemExit("\n".join([*messages, *check_messages]))
+        t3_code.require_running_to_delete(
+            t3_code.recorded_thread_ids(tasks[task_id] for task_id in selected_task_ids)
+        )
         for task_id in selected_task_ids:
             directories |= claude_hooks.hook_affected_directories(tasks, tasks[task_id])
         removed_worktrees: set[str] | None = set()

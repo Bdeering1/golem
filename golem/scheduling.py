@@ -157,6 +157,7 @@ def retry_task(task_id: str, *, is_now: bool, at_text: str | None) -> int:
     tasks = ledger.load_tasks()
     retryable = retryable_task(tasks, task_id)
     task_directories.reject_missing_worktree(retryable, ledger.load_worktrees())
+    t3_code.require_running_to_delete(t3_code.recorded_thread_ids([retryable]))
     launch_agent.require_launch_agent()
     when = (
         planned_execution_time(

@@ -208,6 +208,15 @@ def test_failed_pickup_leaves_task_needing_review(
     assert "t3code://" not in fake_commands["open-args"].read_text(encoding="utf-8")
 
 
+def write_task_with_thread(ledger_path, status=ledger.STATUS_DONE):
+    support.write_task(
+        ledger_path,
+        status,
+        pull_requests=t3_support.FINISHED_PULL_REQUESTS,
+        t3_code_thread_id=t3_support.CLAUDE_THREAD_ID,
+    )
+
+
 @pytest.mark.parametrize(
     "command",
     [
@@ -216,24 +225,46 @@ def test_failed_pickup_leaves_task_needing_review(
         pytest.param(["run", support.TASK_ID, support.PROMPT, "--now"], id="replacement"),
     ],
 )
-@pytest.mark.parametrize("is_running", [True, False], ids=["running", "not-running"])
-def test_deleting_task_deletes_its_thread_only_while_t3_code_runs(
-    server, installed_launch_agent, ledger_path, fake_commands, command, is_running
-):
-    support.write_task(
-        ledger_path,
-        ledger.STATUS_DONE,
-        pull_requests=t3_support.FINISHED_PULL_REQUESTS,
-        t3_code_thread_id=t3_support.CLAUDE_THREAD_ID,
-    )
-    if not is_running:
-        server.runtime_path.unlink()
+def test_deleting_task_deletes_its_thread(server, installed_launch_agent, ledger_path, command):
+    write_task_with_thread(ledger_path)
 
     assert cli.main(command) == 0
 
-    expected_commands = [{"type": "thread.delete", "threadId": t3_support.CLAUDE_THREAD_ID}]
-    assert t3_support.sent_commands(server) == (expected_commands if is_running else [])
-    assert fake_commands["open-args"].read_text(encoding="utf-8") == ""
+    assert t3_support.sent_commands(server) == [
+        {"type": "thread.delete", "threadId": t3_support.CLAUDE_THREAD_ID}
+    ]
+
+
+@pytest.mark.parametrize(
+    ("command", "status"),
+    [
+        pytest.param(["delete", support.TASK_ID], ledger.STATUS_DONE, id="delete"),
+        pytest.param(
+            ["run", support.TASK_ID, support.PROMPT, "--now"], ledger.STATUS_DONE, id="replacement"
+        ),
+        pytest.param(["retry", support.TASK_ID, "--now"], ledger.STATUS_FAILED, id="retry"),
+    ],
+)
+def test_thread_deleting_command_refuses_while_t3_code_is_not_running(
+    server, installed_launch_agent, ledger_path, command, status
+):
+    write_task_with_thread(ledger_path, status)
+    server.runtime_path.unlink()
+    tasks = support.read_tasks(ledger_path)
+
+    with pytest.raises(SystemExit, match="T3 Code is not running"):
+        cli.main(command)
+
+    assert support.read_tasks(ledger_path) == tasks
+
+
+def test_prune_keeps_task_with_thread_while_t3_code_is_not_running(server, ledger_path):
+    write_task_with_thread(ledger_path)
+    server.runtime_path.unlink()
+
+    assert cli.main(["prune", "--yes"]) == 0
+
+    assert support.TASK_ID in support.read_tasks(ledger_path)
 
 
 def test_rejected_thread_delete_warns_without_failing(server, ledger_path, capsys, monkeypatch):

@@ -295,6 +295,17 @@ def print_delete_failure(thread_id: str, error: Exception) -> None:
     print(f"golem: could not delete T3 Code thread {thread_id}: {error}", file=sys.stderr)
 
 
+def is_running() -> bool:
+    return server_runtime_path().exists()
+
+
+def require_running_to_delete(thread_ids: list[str]) -> None:
+    if thread_ids and not is_running():
+        raise SystemExit(
+            f"golem: T3 Code is not running; open it to delete thread: {', '.join(thread_ids)}"
+        )
+
+
 def delete_threads(thread_ids: list[str]) -> None:
     if not thread_ids or not server_runtime_path().exists():
         return
