@@ -48,9 +48,12 @@ def usage_window_times() -> dict[str, list[time]]:
         window_times[backend_id] = []
         for value in cast("list[str]", values):
             parsed = parsed_time(value)
-            if parsed is None or parsed[1]:
+            if parsed is None:
                 raise SystemExit(f"{entry_message_prefix} has invalid time {value}")
-            window_times[backend_id].append(parsed[0])
+            time_of_day, is_tomorrow = parsed
+            if is_tomorrow:
+                raise SystemExit(f"{entry_message_prefix} has invalid time {value}")
+            window_times[backend_id].append(time_of_day)
     return window_times
 
 
