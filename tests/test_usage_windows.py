@@ -1,17 +1,18 @@
 import json
-import os
 import subprocess
 import sys
-from datetime import UTC, datetime, time, timedelta
+import time as time_module
+from datetime import datetime, time
 from pathlib import Path
 
 import pytest
 
-from golem import cli, launch_agent, ledger, spawn, usage_windows
+from golem import cli, launch_agent, ledger, scheduling, spawn, usage_windows
 from golem.backends import claude
 from tests import support
 
 WINDOW_ERROR = "rate limited"
+LAUNCHD_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 INVALID_CONFIGS = [
     pytest.param("usage_windows = 1\n", "usage_windows", id="not-a-table"),
     pytest.param('[usage_windows]\nt3 = ["6am"]\n', "usage_windows.t3", id="unknown-key"),
@@ -177,11 +178,10 @@ def write_current_minute_window_config() -> None:
 
 
 def test_agent_opens_due_window_with_saved_agent_environment(
-    installed_launch_agent, monkeypatch, fake_bin_path, fake_commands
+    installed_launch_agent, monkeypatch, fake_commands
 ):
     write_current_minute_window_config()
-    launchd_path = os.environ["PATH"].removeprefix(f"{fake_bin_path}{os.pathsep}")
-    monkeypatch.setenv("PATH", launchd_path)
+    monkeypatch.setenv("PATH", LAUNCHD_PATH)
 
     assert launch_agent.run_launch_agent() == 0
 
@@ -191,25 +191,22 @@ def test_agent_opens_due_window_with_saved_agent_environment(
 def test_busy_agent_retries_failed_window_between_passes(ledger_path, monkeypatch, claude_opener):
     write_current_minute_window_config()
     claude_opener.error = WINDOW_ERROR
-    due_at = datetime.now(UTC) + timedelta(seconds=0.2)
-    support.write_task(ledger_path, ledger.STATUS_SCHEDULED, due_at=due_at.isoformat())
-    processes: list[subprocess.Popen[bytes]] = []
+    support.write_task(ledger_path, ledger.STATUS_SCHEDULED, due_at=support.RESET_TIME.isoformat())
+    sleep_count = 0
 
-    def start_executor_that_finishes(task_id: str, _: ledger.Task) -> subprocess.Popen[bytes]:
-        claude_opener.error = None
-        with ledger.locked_tasks() as tasks:
-            tasks[task_id]["status"] = ledger.STATUS_DONE
-        processes.append(subprocess.Popen([sys.executable, "-c", ""]))
-        return processes[-1]
+    def succeed_then_cancel_while_sleeping(_: float) -> None:
+        nonlocal sleep_count
+        sleep_count += 1
+        if sleep_count == 2:
+            claude_opener.error = None
+        if sleep_count == 3:
+            scheduling.cancel_task(support.TASK_ID)
 
-    monkeypatch.setattr(spawn, "start_task_executor", start_executor_that_finishes)
-    monkeypatch.setattr(launch_agent, "LAUNCH_AGENT_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(time_module, "sleep", succeed_then_cancel_while_sleeping)
 
     assert launch_agent.run_launch_agent() == 0
-    for process in processes:
-        process.wait()
 
-    assert claude_opener.open_count > 2
+    assert claude_opener.open_count == 3
     state_text = usage_windows.usage_window_state_path().read_text(encoding="utf-8")
     records = json.loads(state_text)
     assert [record["is_settled"] for record in records.values()] == [True]
