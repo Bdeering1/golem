@@ -24,6 +24,7 @@ MESSAGE_ITEM = {
     "type": "assistant_message",
     "text": T3_REPLY,
 }
+USAGE_LIMIT_RESET_AT = "2030-01-01T10:00:00.000Z"
 USAGE_LIMIT_ITEM = {
     "id": "usage-limit",
     "runId": "run",
@@ -32,7 +33,7 @@ USAGE_LIMIT_ITEM = {
     "failure": {
         "class": "usage_limit",
         "message": "usage limit reached",
-        "resetAt": "2030-01-01T10:00:00.000Z",
+        "resetAt": USAGE_LIMIT_RESET_AT,
     },
 }
 CLAUDE_TRANSCRIPT = f".claude/projects/project/{NATIVE_SESSION_ID}.jsonl"
@@ -178,6 +179,15 @@ def test_usage_limit_resumes_same_thread_at_reported_reset(t3_server, ledger_pat
 
     assert task["status"] == ledger.STATUS_SCHEDULED
     assert datetime.fromisoformat(task["due_at"]) == support.RESET_TIME
+    assert t3_support.sent_commands(t3_server)[-1] == {
+        "type": "thread.metadata.update",
+        "threadId": t3.conversation_id(task),
+        "limitRecovery": {
+            "runId": USAGE_LIMIT_ITEM["runId"],
+            "resetAt": USAGE_LIMIT_RESET_AT,
+            "autoResume": False,
+        },
+    }
     write_send_result(t3_server, 0, reply=T3_REPLY)
     support.set_task_due_now(ledger_path)
     task = execute(ledger_path)
@@ -185,7 +195,10 @@ def test_usage_limit_resumes_same_thread_at_reported_reset(t3_server, ledger_pat
     assert (t3_server.home / "sent-message").read_text(
         encoding="utf-8"
     ) == common.USAGE_LIMIT_RESUME_PROMPT
-    assert [command["type"] for command in t3_server.commands] == ["thread.create"]
+    assert [command["type"] for command in t3_server.commands] == [
+        "thread.create",
+        "thread.metadata.update",
+    ]
     progress = progress_log.progress_path(task["session_id"]).read_text(encoding="utf-8")
     assert progress.count(common.tool_call_progress("command", "make test")) == 1
 
