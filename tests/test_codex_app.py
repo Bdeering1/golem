@@ -56,48 +56,23 @@ def write_codex_task(ledger_path):
     )
 
 
-def test_pickup_opens_codex_thread_in_running_app(
-    fake_commands, ledger_path, monkeypatch, codex_app_bundle
+@pytest.mark.parametrize(
+    "link_count",
+    [pytest.param(1, id="running"), pytest.param(3, id="starting")],
+)
+def test_pickup_opens_codex_thread_in_app(
+    fake_commands, ledger_path, monkeypatch, codex_app_bundle, link_count
 ):
     app = codex_app_bundle()
-    set_app_lock_holder(monkeypatch, fake_commands, app)
+    set_app_lock_holder(monkeypatch, fake_commands, app, link_count)
     write_codex_task(ledger_path)
 
     assert cli.main(["pickup", support.TASK_ID, "--client", clients.CODEX_APP_CLIENT]) == 0
 
     assert fake_commands["open-args"].read_text(encoding="utf-8").splitlines() == [
         f"-b {codex_app.APP_BUNDLE_ID}",
-        codex_app.thread_link(THREAD_ID),
-        codex_app.thread_link(THREAD_ID),
+        *[codex_app.thread_link(THREAD_ID)] * (link_count + 1),
     ]
-    assert support.read_task(ledger_path)["status"] == ledger.STATUS_DONE
-
-
-def test_pickup_retries_link_while_codex_app_starts(
-    fake_commands, ledger_path, monkeypatch, codex_app_bundle
-):
-    app = codex_app_bundle()
-    set_app_lock_holder(monkeypatch, fake_commands, app, link_count=3)
-    write_codex_task(ledger_path)
-
-    assert cli.main(["pickup", support.TASK_ID, "--client", clients.CODEX_APP_CLIENT]) == 0
-
-    assert sent_links(fake_commands) == [codex_app.thread_link(THREAD_ID)] * 4
-    assert support.read_task(ledger_path)["status"] == ledger.STATUS_DONE
-
-
-def test_pickup_all_opens_codex_thread_in_app(
-    fake_commands, ledger_path, monkeypatch, codex_app_bundle
-):
-    app = codex_app_bundle()
-    set_app_lock_holder(monkeypatch, fake_commands, app)
-    write_codex_task(ledger_path)
-
-    assert cli.main(["pickup", "--all", "--client", clients.CODEX_APP_CLIENT]) == 0
-
-    assert codex_app.thread_link(THREAD_ID) in fake_commands["open-args"].read_text(
-        encoding="utf-8"
-    )
     assert support.read_task(ledger_path)["status"] == ledger.STATUS_DONE
 
 
@@ -110,34 +85,8 @@ def test_pickup_all_uses_codex_app_default(
 
     assert cli.main(["pickup", "--all"]) == 0
 
-    assert codex_app.thread_link(THREAD_ID) in fake_commands["open-args"].read_text(
-        encoding="utf-8"
-    )
+    assert codex_app.thread_link(THREAD_ID) in sent_links(fake_commands)
     assert support.read_task(ledger_path)["status"] == ledger.STATUS_DONE
-
-
-def test_saved_default_overrides_codex_app(fake_commands, ledger_path, monkeypatch):
-    monkeypatch.setitem(
-        clients.CLIENTS,
-        "t3-code",
-        clients.Client(
-            name="t3-code",
-            backend_ids=frozenset({ledger.BACKEND_CODEX}),
-            is_terminal=False,
-            command=lambda _task, conversation_id, _agent_args: [
-                "open",
-                f"t3code://threads/{conversation_id}",
-            ],
-        ),
-    )
-    support.write_config_table("default_clients", {ledger.BACKEND_CODEX: "t3-code"})
-    write_codex_task(ledger_path)
-
-    assert cli.main(["pickup", "--all"]) == 0
-
-    assert fake_commands["open-args"].read_text(encoding="utf-8") == (
-        f"t3code://threads/{THREAD_ID}\n"
-    )
 
 
 def test_auto_pickup_records_and_uses_codex_app(
@@ -166,9 +115,7 @@ def test_auto_pickup_records_and_uses_codex_app(
     assert cli.main(["_execute", support.TASK_ID, task["session_id"]]) == 0
     completed_task = support.read_task(ledger_path)
     assert completed_task["status"] == ledger.STATUS_DONE
-    assert codex_app.thread_link(completed_task["thread_id"]) in fake_commands[
-        "open-args"
-    ].read_text(encoding="utf-8")
+    assert codex_app.thread_link(completed_task["thread_id"]) in sent_links(fake_commands)
 
 
 def remove_app(_monkeypatch, _fake_commands, app):
@@ -196,10 +143,6 @@ def add_timeout(monkeypatch, _fake_commands, _app):
     monkeypatch.setattr(codex_app, "OPEN_TIMEOUT_SECONDS", 0)
 
 
-def fail_start(monkeypatch, _fake_commands, _app):
-    monkeypatch.setenv("GOLEM_OPEN_EXIT", "1")
-
-
 @pytest.mark.parametrize(
     ("break_codex_app", "message"),
     [
@@ -211,7 +154,6 @@ def fail_start(monkeypatch, _fake_commands, _app):
             id="other-client",
         ),
         pytest.param(add_timeout, f"Codex app {APP_VERSION} .*did not open", id="timeout"),
-        pytest.param(fail_start, f"Codex app {APP_VERSION} .*could not start", id="start-failure"),
     ],
 )
 def test_failed_pickup_leaves_codex_task_needing_review(

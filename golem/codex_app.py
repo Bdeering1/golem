@@ -24,7 +24,10 @@ def application_directories() -> tuple[Path, ...]:
 
 
 def info_plist(app: Path) -> dict[str, object]:
-    with (app / "Contents" / "Info.plist").open("rb") as file:
+    plist_path = app / "Contents" / "Info.plist"
+    if not plist_path.exists():
+        return {}
+    with plist_path.open("rb") as file:
         return cast("dict[str, object]", plistlib.load(file))
 
 
@@ -32,8 +35,7 @@ def app_path() -> Path | None:
     for directory in application_directories():
         for name in APP_NAMES:
             app = directory / name
-            plist_path = app / "Contents" / "Info.plist"
-            if plist_path.exists() and info_plist(app).get("CFBundleIdentifier") == APP_BUNDLE_ID:
+            if info_plist(app).get("CFBundleIdentifier") == APP_BUNDLE_ID:
                 return app
     return None
 
@@ -46,37 +48,27 @@ def thread_link(conversation_id: str) -> str:
     return f"codex://threads/{conversation_id}"
 
 
+def run_command(*arguments: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        arguments,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        check=False,
+        encoding="utf-8",
+    )
+
+
 def lock_holder_paths(lock_path: Path) -> list[str]:
     if not lock_path.exists():
         return []
-    holders = subprocess.run(
-        ["lsof", "-t", str(lock_path)],
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        check=False,
-        encoding="utf-8",
-    )
-    process_ids = holders.stdout.split()
+    process_ids = run_command("lsof", "-t", str(lock_path)).stdout.split()
     if not process_ids:
         return []
-    commands = subprocess.run(
-        ["ps", "-o", "comm=", "-p", ",".join(process_ids)],
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        check=False,
-        encoding="utf-8",
-    )
-    return commands.stdout.splitlines()
+    return run_command("ps", "-o", "comm=", "-p", ",".join(process_ids)).stdout.splitlines()
 
 
 def open_returncode(*arguments: str) -> int:
-    return subprocess.run(
-        ["open", *arguments],
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        check=False,
-        encoding="utf-8",
-    ).returncode
+    return run_command("open", *arguments).returncode
 
 
 def start_app() -> None:
