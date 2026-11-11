@@ -66,7 +66,7 @@ def test_passing_gate_continues_chain_and_receives_task_as_json(
 def test_gate_of_task_resumed_after_usage_limit_sees_first_run_start(
     installed_launch_agent, fake_commands, monkeypatch, ledger_path, tmp_path
 ):
-    monkeypatch.setattr(claude, "next_reset_time", lambda: support.RESET_TIME)
+    monkeypatch.setattr(claude, "next_reset_time", lambda _environment: support.RESET_TIME)
     support.write_claude_output(
         fake_commands,
         support.USAGE_LIMIT_RESULT,
@@ -209,7 +209,7 @@ def test_unsuccessful_task_never_runs_its_gate(
     expected_returncode,
     expected_status,
 ):
-    monkeypatch.setattr(claude, "next_reset_time", lambda: support.RESET_TIME)
+    monkeypatch.setattr(claude, "next_reset_time", lambda _environment: support.RESET_TIME)
     if is_usage_limited:
         support.write_claude_output(
             fake_commands,

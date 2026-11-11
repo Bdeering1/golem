@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import subprocess
 from datetime import UTC, datetime, timedelta
@@ -133,7 +134,7 @@ def test_next_codex_reset_time(
     )
     write_codex_rate_limits(monkeypatch, tmp_path, primary, secondary)
 
-    reset_time = codex.next_codex_reset_time()
+    reset_time = codex.next_codex_reset_time(os.environ.copy())
 
     if expected_offset is None:
         assert reset_time is None
@@ -154,7 +155,7 @@ def test_codex_usage_limit_resumes_saved_conversation(
         ],
     )
     reset_time = datetime.now(UTC).replace(second=0, microsecond=0) + timedelta(hours=1)
-    monkeypatch.setattr(codex, "next_codex_reset_time", lambda: reset_time)
+    monkeypatch.setattr(codex, "next_codex_reset_time", lambda _environment: reset_time)
 
     cli.main(["run", support.TASK_ID, support.PROMPT, "--backend", "codex", "--now"])
     task = support.read_task(ledger_path)
@@ -336,7 +337,7 @@ def test_next_codex_reset_time_rejects_unavailable_or_past_limits(
         )
 
     with pytest.raises(SystemExit, match=re.escape(common.USAGE_ERROR)):
-        codex.next_codex_reset_time()
+        codex.next_codex_reset_time(os.environ.copy())
 
 
 def test_codex_app_server_reads_batched_responses(fake_commands, monkeypatch, tmp_path):
@@ -349,7 +350,7 @@ def test_codex_app_server_reads_batched_responses(fake_commands, monkeypatch, tm
     )
     monkeypatch.setenv("GOLEM_CODEX_BATCH_RESPONSES", "1")
 
-    assert codex.next_codex_reset_time() == reset_time.replace(microsecond=0)
+    assert codex.next_codex_reset_time(os.environ.copy()) == reset_time.replace(microsecond=0)
 
 
 def test_codex_usage_limit_stores_result_and_stops_after_resume_limit(
@@ -366,7 +367,7 @@ def test_codex_usage_limit_stores_result_and_stops_after_resume_limit(
     )
     monkeypatch.setenv("GOLEM_CODEX_EXIT", "1")
     reset_time = datetime.now(UTC).replace(second=0, microsecond=0) + timedelta(hours=1)
-    monkeypatch.setattr(codex, "next_codex_reset_time", lambda: reset_time)
+    monkeypatch.setattr(codex, "next_codex_reset_time", lambda _environment: reset_time)
     assert cli.main(["run", support.TASK_ID, support.PROMPT, "--backend", "codex", "--now"]) == 0
     session_id = support.read_task(ledger_path)["session_id"]
 
@@ -403,8 +404,10 @@ def test_codex_retry_and_reschedule_use_codex_reset_time(
 ):
     reset_time = datetime.now(UTC).replace(second=0, microsecond=0) + timedelta(hours=1)
     support.write_task(ledger_path, status, backend=backend_id, agent_args=agent_args)
-    monkeypatch.setattr(claude, "next_reset_time", lambda: pytest.fail("Claude lookup ran"))
-    monkeypatch.setattr(codex, "next_codex_reset_time", lambda: reset_time)
+    monkeypatch.setattr(
+        claude, "next_reset_time", lambda _environment: pytest.fail("Claude lookup ran")
+    )
+    monkeypatch.setattr(codex, "next_codex_reset_time", lambda _environment: reset_time)
 
     assert cli.main([command, support.TASK_ID]) == 0
 

@@ -189,8 +189,8 @@ def test_watch_follows_progress_across_rotation(ledger_path, monkeypatch):
 def test_watch_prints_usage_limit_pause_and_its_resume(
     installed_launch_agent, fake_commands, ledger_path, monkeypatch, tmp_path, capsys, backend
 ):
-    monkeypatch.setattr(claude, "next_reset_time", lambda: support.RESET_TIME)
-    monkeypatch.setattr(codex, "next_codex_reset_time", lambda: support.RESET_TIME)
+    monkeypatch.setattr(claude, "next_reset_time", lambda _environment: support.RESET_TIME)
+    monkeypatch.setattr(codex, "next_codex_reset_time", lambda _environment: support.RESET_TIME)
     paused_progress = write_agent_run_and_expected_progress(
         fake_commands, monkeypatch, tmp_path, backend, "paused", is_usage_limit=True
     )

@@ -82,6 +82,7 @@ class Task(TypedDict):
     setup_busy_retry_count: NotRequired[int]
     repository_branches: NotRequired[list[RepositoryBranch]]
     pull_requests: NotRequired[list[PullRequest]]
+    account: NotRequired[int]
 
 
 class WorktreeResource(TypedDict):
@@ -128,6 +129,8 @@ class Arguments(argparse.Namespace):
     ids: list[str]
     chain: bool
     directory: str | None
+    account: str | None
+    account_value: str
 
 
 type Tasks = dict[str, Task]

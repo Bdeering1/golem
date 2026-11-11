@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 from golem import (
+    accounts,
     board,
     clients,
     config,
@@ -166,6 +167,9 @@ def run_task_from_arguments(arguments: ledger.Arguments) -> int:
     default_backend = load_default_backend()
     arguments.backend = arguments.backend or default_backend
     backend = registry.BACKENDS[arguments.backend]
+    if arguments.account is not None and arguments.backend != ledger.BACKEND_CLAUDE:
+        raise SystemExit(f"golem: --account supports only Claude tasks, not {backend.NAME} tasks")
+    account = accounts.task_account_number(arguments.account)
     default_clients = load_default_clients()
     auto_pickup_client = default_clients.get(arguments.backend) if arguments.auto_pickup else None
     if arguments.auto_pickup and auto_pickup_client is None:
@@ -190,6 +194,7 @@ def run_task_from_arguments(arguments: ledger.Arguments) -> int:
         is_no_worktree=arguments.no_worktree,
         gate=arguments.gate,
         setup=arguments.setup,
+        account=account,
     )
     has_worktree_argument = common.has_agent_argument(list(task_args), common.WORKTREE_ARGUMENTS)
     parent = ledger.load_tasks().get(arguments.after) if isinstance(arguments.after, str) else None
@@ -257,6 +262,20 @@ def add_window_commands(add_parser: Callable[..., argparse.ArgumentParser]) -> N
     open_window_command = window_commands.add_parser("open")
     open_window_command.add_argument("--backend", choices=tuple(registry.USAGE_BACKENDS))
     set_command_handler(open_window_command, open_usage_window_from_arguments)
+
+
+def add_account_commands(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
+    account_command = add_parser("account")
+    account_commands = account_command.add_subparsers(dest="account_command", required=True)
+    add_account_command = account_commands.add_parser("add")
+    add_account_command.add_argument("backend", choices=(ledger.BACKEND_CLAUDE,))
+    set_command_handler(add_account_command, lambda _: accounts.add_account())
+    set_command_handler(account_commands.add_parser("list"), lambda _: accounts.list_accounts())
+    remove_account_command = account_commands.add_parser("remove")
+    remove_account_command.add_argument("account_value", metavar="EMAIL")
+    set_command_handler(
+        remove_account_command, lambda arguments: accounts.remove_account(arguments.account_value)
+    )
 
 
 def add_prune_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
@@ -361,6 +380,11 @@ def add_run_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
         default=[],
         metavar="NAME=VALUE",
         help="set an environment variable for the task; repeatable; follow-ups get it too",
+    )
+    run_command.add_argument(
+        "--account",
+        metavar="EMAIL",
+        help="run on this Claude account; follow-ups get it too",
     )
     run_command.add_argument(
         "--auto-pickup",
@@ -560,6 +584,7 @@ COMMAND_REGISTRARS = (
     add_alias_command,
     add_worktree_commands,
     add_window_commands,
+    add_account_commands,
     add_agent_command,
     add_launch_agent_command,
     add_execute_command,

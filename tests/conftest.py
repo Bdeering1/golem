@@ -16,6 +16,25 @@ def fake_bin_path(tmp_path_factory):
     command_path = tmp_path_factory.mktemp("bin")
     for name, script in {
         "claude": """#!/bin/sh
+if [ "$1" = auth ]; then
+    printf '%s\\n' "$2" >> "$GOLEM_CLAUDE_AUTH"
+    credentials="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.credentials.json"
+    case "$2" in
+        status)
+            if [ -f "$credentials" ]; then cat "$credentials"; exit 0; fi
+            printf '{"loggedIn": false}'
+            exit 1 ;;
+        login)
+            if [ -n "${GOLEM_CLAUDE_LOGIN-}" ]; then cp "$GOLEM_CLAUDE_LOGIN" "$credentials"; fi
+            exit "${GOLEM_CLAUDE_LOGIN_EXIT:-0}" ;;
+        logout)
+            if [ "${GOLEM_CLAUDE_LOGOUT_EXIT:-0}" != 0 ]; then exit "$GOLEM_CLAUDE_LOGOUT_EXIT"; fi
+            rm -f "$credentials"
+            exit 0 ;;
+    esac
+fi
+printf '%s|%s|%s\\n' "${CLAUDE_CONFIG_DIR-}" "${CLAUDE_CODE_OAUTH_TOKEN+token}" \\
+    "${ANTHROPIC_API_KEY+token}" >> "$GOLEM_CLAUDE_ACCOUNT"
 printf '\036\\n' >> "$GOLEM_CLAUDE_ARGS"
 printf '%s\\n' "$@" >> "$GOLEM_CLAUDE_ARGS"
 printf '%s\\n' "$PWD" >> "$GOLEM_CLAUDE_CWD"
@@ -192,7 +211,9 @@ def fake_commands(monkeypatch, tmp_path, fake_bin_path):
     paths = {
         name: tmp_path / name
         for name in (
+            "claude-account",
             "claude-args",
+            "claude-auth",
             "claude-cwd",
             "claude-lang",
             "claude-lc-time",

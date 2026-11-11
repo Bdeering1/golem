@@ -51,6 +51,20 @@ golem run add-auth "Add password reset" \
   -- --permission-mode auto
 ```
 
+## Claude accounts
+
+Tasks run on your normal Claude Code login. To run some on another account:
+
+```bash
+# Sign in to another Claude account
+golem account add claude
+
+# Run on that account. A unique prefix of the email works too
+golem run fix-billing "Fix the billing page" --account work@example.com
+```
+
+Other accounts share your instructions, settings, skills, plugins and transcripts. They don't get settings that Claude keeps only in `.claude.json`, such as user-scope MCP servers and per-project tool approvals.
+
 ## Commands
 
 | Command | What it does |
@@ -62,6 +76,7 @@ golem run add-auth "Add password reset" \
 | `golem show` | Prints a task's final result |
 | `golem pickup` | Opens a task's session and marks the task done |
 | `golem prune` | Cleans up cancelled and finished tasks |
+| `golem account` | Adds, lists and removes Claude accounts |
 
 `golem --help` lists the rest.
 

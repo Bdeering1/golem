@@ -422,8 +422,8 @@ def require_codex_subscription(environment: dict[str, str]) -> None:
     validate_codex_subscription(codex_app_server_responses(environment, has_rate_limits=False))
 
 
-def codex_rate_limits() -> ledger.JsonObject:
-    responses = codex_app_server_responses(os.environ.copy(), has_rate_limits=True)
+def codex_rate_limits(environment: dict[str, str]) -> ledger.JsonObject:
+    responses = codex_app_server_responses(environment, has_rate_limits=True)
     validate_codex_subscription(responses)
     rate_limits_result = responses[3]["result"]
     rate_limits_fields = (
@@ -459,9 +459,9 @@ def codex_active_reset_time(primary: ledger.JsonObject) -> datetime | None:
     return codex_reset_time_from_limit(primary)
 
 
-def next_codex_reset_time() -> datetime | None:
+def next_codex_reset_time(environment: dict[str, str]) -> datetime | None:
     try:
-        rate_limits = codex_rate_limits()
+        rate_limits = codex_rate_limits(environment)
         primary = required_codex_primary_limit(rate_limits)
         secondary = rate_limits.get("secondary")
         limits = [
@@ -486,8 +486,8 @@ def next_codex_reset_time() -> datetime | None:
         raise SystemExit(common.USAGE_ERROR) from error
 
 
-def next_reset_time() -> datetime | None:
-    return next_codex_reset_time()
+def next_reset_time(environment: dict[str, str]) -> datetime | None:
+    return next_codex_reset_time(environment)
 
 
 def open_usage_window(environment: dict[str, str]) -> str | None:

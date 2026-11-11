@@ -1,5 +1,4 @@
 import json
-import os
 import subprocess
 import sys
 import tempfile
@@ -11,7 +10,7 @@ from typing import TYPE_CHECKING, TypedDict, cast
 if TYPE_CHECKING:
     import io
 
-from golem import ledger, progress_log, spawn, task_directories
+from golem import accounts, ledger, progress_log, spawn, task_directories
 from golem.backends import common
 
 PROGRESS_TOOL_INPUT_KEYS = ("command", "file_path", "pattern", "url", "description")
@@ -131,7 +130,10 @@ def run_claude(
                 *default_args,
             ],
             cwd=ledger.task_directory(task),
-            env={**spawn.task_environment(task), BACKGROUND_WAIT_CEILING_VARIABLE: "0"},
+            env={
+                **accounts.account_environment(spawn.task_environment(task), task.get("account")),
+                BACKGROUND_WAIT_CEILING_VARIABLE: "0",
+            },
             stdout=subprocess.PIPE,
             stderr=stderr_file,
             encoding="utf-8",
@@ -187,7 +189,7 @@ def transcript_paths(task: ledger.Task) -> list[Path]:
     return session_transcript_paths(task["session_id"])
 
 
-def next_reset_time() -> datetime | None:
+def next_reset_time(environment: dict[str, str]) -> datetime | None:
     requests = (
         {
             "type": "control_request",
@@ -200,7 +202,7 @@ def next_reset_time() -> datetime | None:
             "request": {"subtype": "get_usage", "skip_behaviors": True},
         },
     )
-    child_environment = os.environ.copy()
+    child_environment = dict(environment)
     child_environment.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
     try:
         result = subprocess.run(
