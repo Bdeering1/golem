@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from golem import accounts, cli, ledger
+from golem import accounts, cli, executor, ledger
 from golem.backends import claude
 from tests import support
 
@@ -230,7 +230,31 @@ def test_gate_runs_on_task_account(installed_launch_agent, add_account, ledger_p
     assert output_path.read_text(encoding="utf-8") == str(accounts.account_directory(1))
 
 
-def test_usage_lookup_runs_on_task_account(installed_launch_agent, add_account, monkeypatch):
+def schedule_account_run(ledger_path) -> None:
+    assert cli.main(["run", support.TASK_ID, support.PROMPT, "--account", WORK_EMAIL]) == 0
+
+
+def pause_usage_limited_account_task(ledger_path) -> None:
+    support.write_task(ledger_path, ledger.STATUS_RUNNING, account=1)
+    executor.execute_task(support.TASK_ID, support.read_task(ledger_path), ())
+
+
+def retry_account_task(ledger_path) -> None:
+    support.write_task(ledger_path, ledger.STATUS_FAILED, account=1)
+    assert cli.main(["retry", support.TASK_ID]) == 0
+
+
+@pytest.mark.parametrize(
+    "look_up_reset_time",
+    [
+        pytest.param(schedule_account_run, id="run"),
+        pytest.param(pause_usage_limited_account_task, id="usage-limit-pause"),
+        pytest.param(retry_account_task, id="retry"),
+    ],
+)
+def test_usage_lookup_runs_on_task_account(
+    installed_launch_agent, add_account, fake_commands, ledger_path, monkeypatch, look_up_reset_time
+):
     add_account()
     environments: list[dict[str, str]] = []
 
@@ -238,8 +262,11 @@ def test_usage_lookup_runs_on_task_account(installed_launch_agent, add_account, 
         environments.append(environment)
 
     monkeypatch.setattr(claude, "next_reset_time", record_environment)
+    support.write_claude_output(
+        fake_commands, support.USAGE_LIMIT_RESULT, api_error_status=claude.USAGE_LIMIT_HTTP_STATUS
+    )
 
-    assert cli.main(["run", support.TASK_ID, support.PROMPT, "--account", WORK_EMAIL]) == 0
+    look_up_reset_time(ledger_path)
 
     assert environments[0]["CLAUDE_CONFIG_DIR"] == str(accounts.account_directory(1))
 

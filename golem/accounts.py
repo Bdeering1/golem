@@ -173,7 +173,7 @@ def is_same_account(first: Account, second: Account) -> bool:
     return first["email"] == second["email"] and first["org_id"] == second["org_id"]
 
 
-def new_signed_in_account(records: AccountRecords, environment: dict[str, str]) -> Account:
+def sign_in_new_account(records: AccountRecords, environment: dict[str, str]) -> Account:
     login_returncode = subprocess.run(
         ["claude", "auth", "login"], env=environment, check=False
     ).returncode
@@ -192,7 +192,7 @@ def add_account() -> int:
     directory = account_directory(number)
     directory.mkdir(parents=True, exist_ok=True)
     try:
-        account = new_signed_in_account(records, account_environment(os.environ.copy(), number))
+        account = sign_in_new_account(records, account_environment(os.environ.copy(), number))
     except BaseException:
         shutil.rmtree(directory, ignore_errors=True)
         raise
