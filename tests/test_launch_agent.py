@@ -267,6 +267,15 @@ def test_changed_state_home_requires_reinstall(installed_launch_agent, monkeypat
         cli.main(["run", support.TASK_ID, support.PROMPT, "--now"])
 
 
+def test_run_requires_reinstall_without_saved_agent_environment(installed_launch_agent):
+    settings = ledger.load_settings()
+    del settings["agent_environment"]
+    ledger.save_settings(settings)
+
+    with pytest.raises(SystemExit, match=LAUNCH_AGENT_ERROR_PATTERN):
+        cli.main(["run", support.TASK_ID, support.PROMPT, "--now"])
+
+
 def test_launch_agent_install_removes_plist_when_bootstrap_fails(fake_commands, monkeypatch):
     monkeypatch.setenv("GOLEM_LAUNCHCTL_BOOTSTRAP_EXIT", "1")
 

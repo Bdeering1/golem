@@ -96,6 +96,7 @@ class WorktreeResource(TypedDict):
 
 class Settings(TypedDict):
     worktree_retention_days: NotRequired[int]
+    agent_environment: NotRequired[dict[str, str]]
 
 
 class Arguments(argparse.Namespace):

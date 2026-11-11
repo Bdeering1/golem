@@ -488,3 +488,26 @@ def next_codex_reset_time() -> datetime | None:
 
 def next_reset_time() -> datetime | None:
     return next_codex_reset_time()
+
+
+def open_usage_window(environment: dict[str, str]) -> str | None:
+    return common.usage_window_request_error(
+        [
+            "codex",
+            "exec",
+            "--ephemeral",
+            "--ignore-user-config",
+            "--skip-git-repo-check",
+            "--disable",
+            "plugins",
+            "--disable",
+            "shell_tool",
+            "-m",
+            "gpt-6-luna",
+            "-c",
+            "model_reasoning_effort=low",
+            *CODEX_PROVIDER_ARGUMENTS,
+            common.USAGE_WINDOW_PROMPT,
+        ],
+        codex_environment(environment),
+    )

@@ -4,7 +4,7 @@ from typing import override
 
 import pytest
 
-from golem import cli, launch_agent, ledger, scheduling
+from golem import cli, config, launch_agent, ledger, scheduling
 from tests import support
 
 
@@ -118,7 +118,7 @@ def test_missing_and_invalid_alias_config_do_not_block_builtin_commands(capsys):
     assert cli.main(["alias", "list"]) == 0
     assert capsys.readouterr().out == "golem: no aliases\n"
 
-    path = cli.config_path()
+    path = config.config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("[aliases\n", encoding="utf-8")
 

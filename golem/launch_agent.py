@@ -6,6 +6,7 @@ import sys
 import threading
 import time
 from datetime import UTC, datetime
+from datetime import time as datetime_time
 from pathlib import Path
 
 from golem import (
@@ -17,6 +18,7 @@ from golem import (
     progress_log,
     spawn,
     task_directories,
+    usage_windows,
     worktree_cleanup,
 )
 from golem.backends import claude_hooks
@@ -78,6 +80,9 @@ def install_launch_agent() -> int:
     plist_path = launch_agent_plist_path()
     plist_path.parent.mkdir(parents=True, exist_ok=True)
     plist_path.write_bytes(launch_agent_plist_data())
+    settings = ledger.load_settings()
+    settings["agent_environment"] = spawn.captured_environment()
+    ledger.save_settings(settings)
     run_launchctl(["bootout", launch_agent_target()])
     error = run_launchctl(["bootstrap", f"gui/{os.getuid()}", str(plist_path)])
     if error is not None:
@@ -94,7 +99,11 @@ def uninstall_launch_agent() -> int:
 
 def require_launch_agent() -> None:
     plist_path = launch_agent_plist_path()
-    if not plist_path.exists() or plist_path.read_bytes() != launch_agent_plist_data():
+    if (
+        not plist_path.exists()
+        or plist_path.read_bytes() != launch_agent_plist_data()
+        or "agent_environment" not in ledger.load_settings()
+    ):
         raise SystemExit(LAUNCH_AGENT_ERROR)
 
 
@@ -169,11 +178,22 @@ def has_pending_tasks(tasks: ledger.Tasks) -> bool:
     )
 
 
+def agent_usage_window_times() -> dict[str, list[datetime_time]]:
+    try:
+        return usage_windows.usage_window_times()
+    except SystemExit as error:
+        print(error, file=sys.stderr)
+        return {}
+
+
 def run_launch_agent() -> int:
+    window_times = agent_usage_window_times()
+    window_environment = {**os.environ, **ledger.load_settings().get("agent_environment", {})}
     pull_request_refresh = threading.Thread(target=branch_pull_requests.refresh_pull_requests)
     pull_request_refresh.start()
     worktree_cleanup.auto_remove_worktrees()
     processes = run_launch_agent_pass()
+    usage_windows.open_due_usage_windows(window_times, window_environment, datetime.now(UTC))
     while True:
         if has_pending_tasks(ledger.load_tasks()):
             time.sleep(LAUNCH_AGENT_POLL_SECONDS)
@@ -184,3 +204,4 @@ def run_launch_agent() -> int:
             return 0
         processes = spawn.reap_finished_executors(processes)
         processes.extend(run_launch_agent_pass())
+        usage_windows.open_due_usage_windows(window_times, window_environment, datetime.now(UTC))

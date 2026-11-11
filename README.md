@@ -80,7 +80,13 @@ review = 'run review-{1} "Review PR {1} and fix what you find" --now'
 [env]
 # Set for every task. --env overrides it for one run
 NODE_ENV = "development"
+
+[usage_windows]
+# Open a usage window at these times each day
+claude = ["6am", "11am"]
 ```
+
+golem can't wake a sleeping Mac to open a window. Use `sudo pmset repeat` to wake it each day.
 
 Worktrees stay on disk after you delete their task. To clean them up:
 
