@@ -65,7 +65,9 @@ def pickup(
     if not client.is_terminal:
         locks.release_lock(directory_lock_file)
         if client.name == clients.CLAUDE_DESKTOP_CLIENT and "account" in task:
-            print(f"golem: {task_id} continues on the Claude desktop app's sign-in")
+            print(
+                f"golem: {task_id} continues on the Claude desktop app's sign-in", file=sys.stderr
+            )
         client.prepare(task, conversation_id)
         return open_app_and_mark_done(
             task_id,
