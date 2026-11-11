@@ -58,7 +58,7 @@ def run_command(*arguments: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def lock_holder_paths(lock_path: Path) -> list[str]:
+def lock_holder_commands(lock_path: Path) -> list[str]:
     if not lock_path.exists():
         return []
     process_ids = run_command("lsof", "-t", str(lock_path)).stdout.split()
@@ -80,7 +80,7 @@ def wait_for_thread(app: Path, conversation_id: str, lock_path: Path) -> None:
     deadline = time.monotonic() + OPEN_TIMEOUT_SECONDS
     app_prefix = f"{app.resolve()}/"
     while True:
-        holders = lock_holder_paths(lock_path)
+        holders = lock_holder_commands(lock_path)
         if any(holder.startswith(app_prefix) for holder in holders):
             return
         if holders:
@@ -96,7 +96,7 @@ def prepare_thread(task: ledger.Task, conversation_id: str) -> None:
     app = app_path()
     if app is None:
         raise SystemExit(
-            "golem: Codex app is not installed: no com.openai.codex app in /Applications or ~/Applications"
+            f"golem: Codex app is not installed: no {APP_BUNDLE_ID} app in /Applications or ~/Applications"
         )
     try:
         start_app()

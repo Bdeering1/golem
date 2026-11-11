@@ -40,10 +40,10 @@ def sent_links(fake_commands) -> list[str]:
 def set_app_lock_holder(monkeypatch, fake_commands, app: Path, link_count=1):
     app_server = app / "Contents" / "Resources" / "codex-cli" / "codex"
 
-    def lock_holder_paths(_lock_path: Path) -> list[str]:
+    def lock_holder_commands(_lock_path: Path) -> list[str]:
         return [str(app_server)] if len(sent_links(fake_commands)) >= link_count else []
 
-    monkeypatch.setattr(codex_app, "lock_holder_paths", lock_holder_paths)
+    monkeypatch.setattr(codex_app, "lock_holder_commands", lock_holder_commands)
     monkeypatch.setattr(codex_app, "LINK_INTERVAL_SECONDS", 0)
 
 
@@ -58,7 +58,11 @@ def write_codex_task(ledger_path):
 
 @pytest.mark.parametrize(
     "link_count",
-    [pytest.param(1, id="running"), pytest.param(3, id="starting")],
+    [
+        pytest.param(0, id="already-open"),
+        pytest.param(1, id="running"),
+        pytest.param(3, id="starting"),
+    ],
 )
 def test_pickup_opens_codex_thread_in_app(
     fake_commands, ledger_path, monkeypatch, codex_app_bundle, link_count
@@ -135,11 +139,13 @@ def add_wrong_app(_monkeypatch, _fake_commands, app):
 
 
 def add_other_lock_holder(monkeypatch, _fake_commands, _app):
-    monkeypatch.setattr(codex_app, "lock_holder_paths", lambda _lock_path: ["/usr/local/bin/codex"])
+    monkeypatch.setattr(
+        codex_app, "lock_holder_commands", lambda _lock_path: ["/usr/local/bin/codex"]
+    )
 
 
 def add_timeout(monkeypatch, _fake_commands, _app):
-    monkeypatch.setattr(codex_app, "lock_holder_paths", lambda _lock_path: [])
+    monkeypatch.setattr(codex_app, "lock_holder_commands", lambda _lock_path: [])
     monkeypatch.setattr(codex_app, "OPEN_TIMEOUT_SECONDS", 0)
 
 
