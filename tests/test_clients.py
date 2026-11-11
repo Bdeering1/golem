@@ -147,7 +147,7 @@ def test_follow_up_after_auto_pickup_parent_uses_its_backends_default(
 
     tasks = support.read_tasks(ledger_path)
     assert tasks[support.CHILD_ID]["auto_pickup_client"] == STUB_APP_CLIENT
-    assert "auto_pickup_client" not in tasks[support.GRANDCHILD_ID]
+    assert tasks[support.GRANDCHILD_ID]["auto_pickup_client"] == clients.CODEX_APP_CLIENT
 
 
 def test_then_follow_up_of_auto_pickup_run_uses_saved_default(
@@ -195,8 +195,9 @@ def test_pickup_all_client_skips_default_clients(fake_commands, ledger_path):
 
 
 def test_pickup_all_opens_backend_defaults_and_fails_backend_without_one(
-    fake_commands, ledger_path, stub_clients, capsys
+    fake_commands, ledger_path, stub_clients, capsys, monkeypatch
 ):
+    monkeypatch.delitem(clients.BUILT_IN_DEFAULT_CLIENTS, ledger.BACKEND_CODEX)
     support.write_config_table("default_clients", {ledger.BACKEND_CLAUDE: STUB_APP_CLIENT})
     status = ledger.STATUS_NEEDS_REVIEW
     codex_task = support.task_record(status, backend=ledger.BACKEND_CODEX)
