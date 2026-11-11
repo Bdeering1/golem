@@ -18,6 +18,8 @@ PRIVATE_ENTRY_NAMES = frozenset(
 )
 NORMAL_LOGIN_NUMBER = 0
 UNKNOWN = "unknown"
+CLAUDE_AUTH_COMMAND = ("claude", "auth")
+ACCOUNT_LABEL = "{email} ({org_name})"
 
 
 class Account(TypedDict):
@@ -87,7 +89,7 @@ def account_environment(environment: dict[str, str], account_number: int | None)
 def logged_in_account(environment: dict[str, str]) -> Account | None:
     try:
         result = subprocess.run(
-            ["claude", "auth", "status", "--json"],
+            [*CLAUDE_AUTH_COMMAND, "status", "--json"],
             env=environment,
             capture_output=True,
             encoding="utf-8",
@@ -166,7 +168,7 @@ def task_account_number(value: str | None) -> int | None:
 
 
 def run_auth_logout(environment: dict[str, str]) -> int:
-    return subprocess.run(["claude", "auth", "logout"], env=environment, check=False).returncode
+    return subprocess.run([*CLAUDE_AUTH_COMMAND, "logout"], env=environment, check=False).returncode
 
 
 def is_same_account(first: Account, second: Account) -> bool:
@@ -174,15 +176,15 @@ def is_same_account(first: Account, second: Account) -> bool:
 
 
 def sign_in_new_account(records: AccountRecords, environment: dict[str, str]) -> Account:
-    login_returncode = subprocess.run(
-        ["claude", "auth", "login"], env=environment, check=False
-    ).returncode
-    account = logged_in_account(environment) if login_returncode == 0 else None
+    if subprocess.run([*CLAUDE_AUTH_COMMAND, "login"], env=environment, check=False).returncode:
+        raise SystemExit("golem: Claude login failed")
+    account = logged_in_account(environment)
     if account is None:
+        run_auth_logout(environment)
         raise SystemExit("golem: Claude login failed")
     if any(is_same_account(account, other) for _, other in known_accounts(records)):
         run_auth_logout(environment)
-        raise SystemExit(f"golem: {account['email']} ({account['org_name']}) is already signed in")
+        raise SystemExit(f"golem: {ACCOUNT_LABEL.format_map(account)} is already signed in")
     return account
 
 
@@ -199,7 +201,7 @@ def add_account() -> int:
     records["accounts"][str(number)] = account
     records["next_number"] = number + 1
     ledger.save_json(account_records_path(), records)
-    print(f"golem: added {account['email']} ({account['org_name']})")
+    print(f"golem: added {ACCOUNT_LABEL.format_map(account)}")
     return 0
 
 
@@ -232,5 +234,5 @@ def remove_account(value: str) -> int:
     records = load_account_records()
     account = records["accounts"].pop(str(number))
     ledger.save_json(account_records_path(), records)
-    print(f"golem: removed {account['email']} ({account['org_name']})")
+    print(f"golem: removed {ACCOUNT_LABEL.format_map(account)}")
     return 0

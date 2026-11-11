@@ -56,7 +56,7 @@ def run_and_execute(ledger_path, *arguments: str):
 def test_add_records_account_and_links_shared_entries(add_account, claude_config_directory):
     assert add_account() == 0
 
-    assert accounts.load_account_records()["accounts"]["1"]["email"] == WORK_EMAIL
+    assert accounts.resolved_account_number(WORK_EMAIL) == 1
     shadow_directory = accounts.account_directory(1)
     assert (shadow_directory / "settings.json").resolve() == (
         claude_config_directory / "settings.json"
@@ -91,7 +91,8 @@ def test_refused_add_removes_directory(
         add_account(*new_account)
 
     assert not accounts.account_directory(existing_accounts + 1).exists()
-    assert len(accounts.load_account_records()["accounts"]) == existing_accounts
+    with pytest.raises(SystemExit):
+        accounts.resolved_account_number(str(existing_accounts + 1))
     assert ("logout" in auth_calls(fake_commands)) == is_duplicate
 
 
@@ -109,16 +110,14 @@ def test_list_shows_normal_login_and_accounts(add_account, capsys):
     ]
 
 
-def test_remove_logs_out_and_keeps_shared_targets(
-    add_account, claude_config_directory, fake_commands
-):
+def test_remove_logs_out_and_deletes_account(add_account, fake_commands):
     add_account()
 
     assert cli.main(["account", "remove", WORK_EMAIL]) == 0
 
     assert not accounts.account_directory(1).exists()
-    assert (claude_config_directory / "settings.json").exists()
-    assert accounts.load_account_records()["accounts"] == {}
+    with pytest.raises(SystemExit):
+        accounts.resolved_account_number("1")
     assert "logout" in auth_calls(fake_commands)
 
 
@@ -298,7 +297,7 @@ def test_remove_keeps_account_when_logout_fails(add_account, monkeypatch):
         cli.main(["account", "remove", WORK_EMAIL])
 
     assert accounts.account_directory(1).is_dir()
-    assert "1" in accounts.load_account_records()["accounts"]
+    assert accounts.resolved_account_number("1") == 1
 
 
 def test_claude_code_pickup_resumes_on_task_account(
