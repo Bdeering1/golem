@@ -29,16 +29,19 @@ def codex_app_bundle(tmp_path):
     return create
 
 
+def sent_links(fake_commands) -> list[str]:
+    return [
+        arguments
+        for arguments in fake_commands["open-args"].read_text(encoding="utf-8").splitlines()
+        if arguments.startswith("codex://")
+    ]
+
+
 def set_app_lock_holder(monkeypatch, fake_commands, app: Path, link_count=1):
     app_server = app / "Contents" / "Resources" / "codex-cli" / "codex"
 
     def lock_holder_paths(_lock_path: Path) -> list[str]:
-        links = [
-            arguments
-            for arguments in fake_commands["open-args"].read_text(encoding="utf-8").splitlines()
-            if arguments.startswith("codex://")
-        ]
-        return [str(app_server)] if len(links) >= link_count else []
+        return [str(app_server)] if len(sent_links(fake_commands)) >= link_count else []
 
     monkeypatch.setattr(codex_app, "lock_holder_paths", lock_holder_paths)
     monkeypatch.setattr(codex_app, "LINK_INTERVAL_SECONDS", 0)
@@ -79,12 +82,7 @@ def test_pickup_retries_link_while_codex_app_starts(
 
     assert cli.main(["pickup", support.TASK_ID, "--client", clients.CODEX_APP_CLIENT]) == 0
 
-    links = [
-        arguments
-        for arguments in fake_commands["open-args"].read_text(encoding="utf-8").splitlines()
-        if arguments.startswith("codex://")
-    ]
-    assert links == [codex_app.thread_link(THREAD_ID)] * 4
+    assert sent_links(fake_commands) == [codex_app.thread_link(THREAD_ID)] * 4
     assert support.read_task(ledger_path)["status"] == ledger.STATUS_DONE
 
 
@@ -118,10 +116,7 @@ def test_pickup_all_uses_codex_app_default(
     assert support.read_task(ledger_path)["status"] == ledger.STATUS_DONE
 
 
-def test_saved_default_overrides_codex_app(
-    fake_commands, ledger_path, monkeypatch, codex_app_bundle
-):
-    codex_app_bundle()
+def test_saved_default_overrides_codex_app(fake_commands, ledger_path, monkeypatch):
     monkeypatch.setitem(
         clients.CLIENTS,
         "t3-code",
@@ -235,10 +230,4 @@ def test_failed_pickup_leaves_codex_task_needing_review(
         cli.main(["pickup", support.TASK_ID, "--client", clients.CODEX_APP_CLIENT])
 
     assert support.read_task(ledger_path)["status"] == ledger.STATUS_NEEDS_REVIEW
-    links = [
-        arguments
-        for arguments in fake_commands["open-args"].read_text(encoding="utf-8").splitlines()
-        if arguments.startswith("codex://")
-    ]
-    if break_codex_app is add_other_lock_holder:
-        assert links == []
+    assert sent_links(fake_commands) == []

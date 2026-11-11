@@ -89,8 +89,7 @@ def wait_for_thread(app: Path, conversation_id: str, lock_path: Path) -> None:
     app_prefix = f"{app.resolve()}/"
     while True:
         holders = lock_holder_paths(lock_path)
-        app_holder = next((holder for holder in holders if holder.startswith(app_prefix)), None)
-        if app_holder is not None:
+        if any(holder.startswith(app_prefix) for holder in holders):
             return
         if holders:
             raise CodexAppError(f"it is open in another Codex client: {holders[0]}")
