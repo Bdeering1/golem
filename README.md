@@ -82,7 +82,7 @@ review = 'run review-{1} "Review PR {1} and fix what you find" --now'
 NODE_ENV = "development"
 
 [usage_windows]
-# Open a usage window at these times each day. One opened at 6am resets at 11am
+# Open a usage window at these times each day
 claude = ["6am", "11am"]
 ```
 
