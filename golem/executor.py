@@ -1,3 +1,4 @@
+import os
 import re
 import sys
 from datetime import UTC, datetime
@@ -7,6 +8,7 @@ if TYPE_CHECKING:
     import io
 
 from golem import (
+    accounts,
     branch_pull_requests,
     chains,
     gates,
@@ -53,6 +55,7 @@ def mark_task_waiting_for_reset(task_id: str, result: str, reset_time: datetime 
             if reset_time is not None
             else scheduling.planned_execution_time(
                 registry.task_usage_backend(task),
+                accounts.account_environment(os.environ.copy(), task.get("account")),
                 is_now=False,
                 at_text=None,
             )

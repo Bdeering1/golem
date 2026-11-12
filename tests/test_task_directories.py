@@ -189,7 +189,7 @@ def test_usage_limit_resume_and_pickup_use_task_worktree(
     installed_launch_agent, fake_commands, git_repository, ledger_path, monkeypatch
 ):
     monkeypatch.chdir(git_repository)
-    monkeypatch.setattr(claude, "next_reset_time", lambda: support.RESET_TIME)
+    monkeypatch.setattr(claude, "next_reset_time", lambda _environment: support.RESET_TIME)
     support.write_claude_output(
         fake_commands, support.USAGE_LIMIT_RESULT, api_error_status=claude.USAGE_LIMIT_HTTP_STATUS
     )

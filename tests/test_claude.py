@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 from datetime import UTC, datetime
 
@@ -131,4 +132,4 @@ def test_next_reset_time_picks_latest_exhausted_window(
         "\n".join(json.dumps(frame) for frame in frames), encoding="utf-8"
     )
 
-    assert claude.next_reset_time() == expected
+    assert claude.next_reset_time(os.environ.copy()) == expected

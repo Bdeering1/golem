@@ -1,8 +1,10 @@
+import os
 import uuid
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 
 from golem import (
+    accounts,
     chains,
     delete,
     launch_agent,
@@ -28,6 +30,7 @@ class RunPlacement:
     gate: str | None = None
     setup: str | None = None
     environment: dict[str, str] = field(default_factory=dict)
+    account: int | None = None
 
 
 def new_task_record(
@@ -58,6 +61,8 @@ def new_task_record(
         record["gate"] = placement.gate
     if placement.setup is not None:
         record["setup"] = placement.setup
+    if placement.account is not None:
+        record["account"] = placement.account
     if when is not None:
         record["status"] = ledger.STATUS_SCHEDULED
         record["due_at"] = when.isoformat()
@@ -152,9 +157,11 @@ def retry_task(task_id: str, *, is_now: bool, at_text: str | None) -> int:
     retryable = retryable_task(tasks, task_id)
     task_directories.reject_missing_worktree(retryable, ledger.load_worktrees())
     launch_agent.require_launch_agent()
+    usage_environment = accounts.account_environment(os.environ.copy(), retryable.get("account"))
     when = (
         planned_execution_time(
             registry.task_usage_backend(retryable),
+            usage_environment,
             is_now=is_now,
             at_text=at_text,
         )
@@ -167,7 +174,7 @@ def retry_task(task_id: str, *, is_now: bool, at_text: str | None) -> int:
         task_directories.reject_missing_worktree(task, worktrees)
         t3_code.require_running_to_delete(t3_code.recorded_thread_ids([task]))
         record = new_task_record(
-            RunPlacement(task["cwd"]),
+            RunPlacement(task["cwd"], account=task.get("account")),
             task["prompt"],
             tuple(task["agent_args"]),
             when,
@@ -218,6 +225,7 @@ def reschedule_task(task_id: str, *, is_now: bool, at_text: str | None) -> int:
     when = (
         planned_execution_time(
             registry.task_usage_backend(task),
+            accounts.account_environment(os.environ.copy(), task.get("account")),
             is_now=is_now,
             at_text=at_text,
         )
@@ -238,11 +246,15 @@ def rounded_execution_time(when: datetime) -> datetime:
 
 
 def planned_execution_time(
-    backend: common.UsageBackend, *, is_now: bool, at_text: str | None
+    backend: common.UsageBackend,
+    environment: dict[str, str],
+    *,
+    is_now: bool,
+    at_text: str | None,
 ) -> datetime | None:
     if is_now:
         return None
-    when = backend.next_reset_time() if at_text is None else scheduled_time(at_text)
+    when = backend.next_reset_time(environment) if at_text is None else scheduled_time(at_text)
     return None if when is None else rounded_execution_time(when)
 
 
@@ -291,6 +303,7 @@ def schedule_run_task(
             return 0
     when = planned_execution_time(
         registry.usage_backend(arguments.backend, list(task_args)),
+        accounts.account_environment(os.environ.copy(), placement.account),
         is_now=arguments.now,
         at_text=arguments.at,
     )

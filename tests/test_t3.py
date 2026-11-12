@@ -168,7 +168,9 @@ def test_run_waiting_for_answer_stops_task_until_continue(
 
 
 def test_usage_limit_resumes_same_thread_at_reported_reset(t3_server, ledger_path, monkeypatch):
-    monkeypatch.setattr(claude, "next_reset_time", lambda: pytest.fail("usage lookup ran"))
+    monkeypatch.setattr(
+        claude, "next_reset_time", lambda _environment: pytest.fail("usage lookup ran")
+    )
     t3_server.projections[1:] = [
         projection(COMMAND_ITEM, USAGE_LIMIT_ITEM),
         projection(COMMAND_ITEM, USAGE_LIMIT_ITEM, MESSAGE_ITEM),

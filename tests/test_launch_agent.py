@@ -41,7 +41,9 @@ PULL_REQUEST_URL = "https://github.com/owner/repository/pull/1"
 def test_run_and_retry_require_an_installed_launch_agent(ledger_path, monkeypatch, command, status):
     if status is not None:
         support.write_task(ledger_path, status)
-    monkeypatch.setattr(claude, "next_reset_time", lambda: pytest.fail("usage lookup ran"))
+    monkeypatch.setattr(
+        claude, "next_reset_time", lambda _environment: pytest.fail("usage lookup ran")
+    )
 
     with pytest.raises(SystemExit, match=LAUNCH_AGENT_ERROR_PATTERN):
         cli.main(command)

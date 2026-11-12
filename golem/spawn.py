@@ -6,7 +6,7 @@ import tempfile
 from contextlib import suppress
 from pathlib import Path
 
-from golem import ledger
+from golem import accounts, ledger
 
 
 def golem_command() -> list[str]:
@@ -48,7 +48,7 @@ def shell_command_outcome(
             process = subprocess.Popen(
                 ["/bin/sh", "-c", command],
                 cwd=ledger.task_directory(task),
-                env=task_environment(task),
+                env=accounts.account_environment(task_environment(task), task.get("account")),
                 stdin=subprocess.PIPE,
                 stdout=stdout_file,
                 stderr=stderr_file,

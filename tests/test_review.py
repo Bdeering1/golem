@@ -195,7 +195,7 @@ def test_pickup_all_continues_after_busy_directory(fake_commands, ledger_path, c
 def test_auto_pickup_waits_for_usage_limit_resume(
     installed_launch_agent, fake_commands, ledger_path, monkeypatch
 ):
-    monkeypatch.setattr(claude, "next_reset_time", lambda: support.RESET_TIME)
+    monkeypatch.setattr(claude, "next_reset_time", lambda _environment: support.RESET_TIME)
     support.write_claude_output(
         fake_commands, support.USAGE_LIMIT_RESULT, api_error_status=claude.USAGE_LIMIT_HTTP_STATUS
     )

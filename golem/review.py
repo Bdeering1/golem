@@ -2,7 +2,7 @@ import os
 import subprocess
 import sys
 
-from golem import chains, clients, ledger, locks, t3_code, task_directories
+from golem import accounts, chains, clients, ledger, locks, t3_code, task_directories
 from golem.backends import registry
 
 
@@ -29,6 +29,13 @@ def pickup(
         raise SystemExit(f"golem: task not found: {task_id}")
     client = clients.task_client(task_id, preflight_task, client_name)
     client.validate_arguments(list(agent_args))
+    environment = (
+        client.environment(
+            accounts.account_environment(os.environ.copy(), preflight_task.get("account"))
+        )
+        if client.is_terminal
+        else {}
+    )
     with ledger.locked_ledger() as (tasks, worktrees):
         if task_id not in tasks:
             raise SystemExit(f"golem: task not found: {task_id}")
@@ -57,6 +64,10 @@ def pickup(
         cwd = ledger.task_directory(task)
     if not client.is_terminal:
         locks.release_lock(directory_lock_file)
+        if client.name == clients.CLAUDE_DESKTOP_CLIENT and "account" in task:
+            print(
+                f"golem: {task_id} continues on the Claude desktop app's sign-in", file=sys.stderr
+            )
         client.prepare(task, conversation_id)
         return open_app_and_mark_done(
             task_id,
@@ -67,7 +78,7 @@ def pickup(
         return subprocess.run(
             client.command(task, conversation_id, list(agent_args)),
             cwd=cwd,
-            env=client.environment(os.environ.copy()),
+            env=environment,
             pass_fds=(directory_lock_file.fileno(),),
             check=False,
         ).returncode
