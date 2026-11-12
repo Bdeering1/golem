@@ -41,7 +41,7 @@ golem run fix-signup "Fix the signup redirect" --backend codex --at 9pm
 # Run as a T3 Code thread with Codex. --provider defaults to claude
 golem run fix-logout "Fix the logout redirect" --backend t3 -- --provider codex --model gpt-6-astra
 
-# Run on another Claude account, after signing in with golem account add claude
+# Run on another Claude account, after signing in with `golem account add claude`
 golem run fix-billing "Fix the billing page" --account work@example.com
 
 # The script must print {"directory": "<path>"} for the task to run in
