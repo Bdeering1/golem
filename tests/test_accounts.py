@@ -453,11 +453,13 @@ def test_remove_keeps_account_when_t3_cannot_remove_instance(
     assert accounts.resolved_account_number("1") == 1
 
 
-def open_windows_at(minute: int) -> None:
+def open_windows_at(
+    minute: int, entries: list[usage_windows.UsageWindowEntry] | None = None
+) -> None:
     now = datetime(2030, 1, 1, 6, minute).astimezone()
-    usage_windows.open_due_usage_windows(
-        usage_windows.usage_window_entries(dict(os.environ)), dict(os.environ), now
-    )
+    if entries is None:
+        entries = usage_windows.usage_window_entries(dict(os.environ))
+    usage_windows.open_due_usage_windows(entries, dict(os.environ), now)
 
 
 def window_config_directories(fake_commands) -> list[str]:
@@ -493,9 +495,7 @@ def test_failed_account_window_retries_then_notifies_with_account(add_account, f
     shutil.rmtree(accounts.account_directory(1))
 
     for minute in (1, 10, 30, 40):
-        usage_windows.open_due_usage_windows(
-            entries, dict(os.environ), datetime(2030, 1, 1, 6, minute).astimezone()
-        )
+        open_windows_at(minute, entries)
 
     assert window_config_directories(fake_commands) == []
     notifications = support.logged_osascript_calls(fake_commands)
