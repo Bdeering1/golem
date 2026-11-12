@@ -129,7 +129,7 @@ def logged_in_account(environment: dict[str, str]) -> Account | None:
     return {"email": email, "org_id": org_id, "org_name": org_name}
 
 
-def default_account(environment: dict[str, str]) -> Account | None:
+def logged_in_default_account(environment: dict[str, str]) -> Account | None:
     return logged_in_account(account_environment(environment, None))
 
 
@@ -140,7 +140,7 @@ def extra_accounts(records: AccountRecords) -> list[tuple[int, Account]]:
 def known_accounts(
     records: AccountRecords, environment: dict[str, str]
 ) -> list[tuple[int, Account]]:
-    default = default_account(environment)
+    default = logged_in_default_account(environment)
     accounts = extra_accounts(records)
     return accounts if default is None else [(DEFAULT_ACCOUNT_NUMBER, default), *accounts]
 
@@ -251,7 +251,7 @@ def add_account() -> int:
 def list_accounts() -> int:
     records = load_account_records()
     accounts: list[tuple[int, Account | None]] = [
-        (DEFAULT_ACCOUNT_NUMBER, default_account(os.environ.copy())),
+        (DEFAULT_ACCOUNT_NUMBER, logged_in_default_account(os.environ.copy())),
         *extra_accounts(records),
     ]
     print("\n".join(account_lines(accounts)))

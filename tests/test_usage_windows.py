@@ -386,10 +386,13 @@ def test_remove_warns_when_usage_windows_lists_account(add_account, capsys, conf
     ("keys", "lookup_count"),
     [
         pytest.param(["claude"], 0, id="backend-keys"),
+        pytest.param(['"1"'], 0, id="number-keys"),
         pytest.param([f'"{support.DEFAULT_EMAIL}"', f'"{support.WORK_EMAIL}"'], 1, id="email-keys"),
     ],
 )
-def test_window_keys_look_up_login_at_most_once(add_account, fake_commands, keys, lookup_count):
+def test_window_keys_look_up_default_account_at_most_once(
+    add_account, fake_commands, keys, lookup_count
+):
     add_account()
     support.write_config_text("[usage_windows]\n" + "".join(f'{key} = ["6am"]\n' for key in keys))
     calls_before = len(support.auth_calls(fake_commands))
