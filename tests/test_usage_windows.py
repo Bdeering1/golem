@@ -13,7 +13,6 @@ from tests import support
 WINDOW_ERROR = "rate limited"
 INVALID_CONFIGS = [
     pytest.param("usage_windows = 1\n", "usage_windows", id="not-a-table"),
-    pytest.param('[usage_windows]\nt3 = ["6am"]\n', "usage_windows.t3", id="unknown-account"),
     pytest.param('[usage_windows]\nclaude = "6am"\n', "usage_windows.claude", id="not-a-list"),
     pytest.param('[usage_windows]\nclaude = ["25am"]\n', "usage_windows.claude", id="bad-time"),
     pytest.param(

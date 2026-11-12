@@ -27,6 +27,27 @@ class UsageWindowEntry(NamedTuple):
     account: tuple[int, accounts.Account] | None
     times: list[time]
 
+    @property
+    def account_number(self) -> int | None:
+        return None if self.account is None else self.account[0]
+
+    @property
+    def state_key_prefix(self) -> str:
+        if self.account is None:
+            return self.backend_id
+        return f"{self.backend_id} account {self.account[0]}"
+
+    @property
+    def window_name(self) -> str:
+        name = f"{registry.USAGE_BACKENDS[self.backend_id].NAME} usage window"
+        if self.account is None:
+            return name
+        return f"{name} for {accounts.ACCOUNT_LABEL.format_map(self.account[1])}"
+
+    def occurrence_label(self, occurrence: datetime) -> str:
+        preposition = "for" if self.account is None else "at"
+        return f"{self.window_name} {preposition} {occurrence:%Y-%m-%d %H:%M}"
+
 
 def parsed_time(value: str) -> tuple[time, bool] | None:
     match = TIME_PATTERN.fullmatch(value.lower())
@@ -37,14 +58,9 @@ def parsed_time(value: str) -> tuple[time, bool] | None:
     return time_of_day, tomorrow is not None
 
 
-def configured_account(
-    key: str, entry_message_prefix: str, environment: dict[str, str]
+def extra_account(
+    matches: list[tuple[int, accounts.Account | None]], entry_message_prefix: str
 ) -> tuple[int, accounts.Account] | None:
-    matches = accounts.matching_accounts(
-        key, accounts.load_account_records(), environment, is_prefix_allowed=False
-    )
-    if not matches:
-        raise SystemExit(f"{entry_message_prefix} matches no Claude account")
     if len(matches) > 1:
         raise SystemExit(accounts.ambiguous_account_message(entry_message_prefix, matches))
     number, account = matches[0]
@@ -61,15 +77,24 @@ def usage_window_entries(environment: dict[str, str]) -> list[UsageWindowEntry]:
     if not isinstance(table, dict):
         raise SystemExit(f"{message_prefix} must be a table")
     window_entries: list[UsageWindowEntry] = []
-    keys_by_account: dict[tuple[str, int], str] = {}
+    keys_by_account: dict[tuple[str, int | None], str] = {}
     for key, values in cast("dict[str, object]", table).items():
         entry_message_prefix = f"{message_prefix}.{key}"
-        if key in registry.USAGE_BACKENDS:
-            backend_id, account = key, None
-        else:
+        backend_id, account = key, None
+        if key not in registry.USAGE_BACKENDS:
+            matches = accounts.matching_accounts(
+                key, accounts.load_account_records(), environment, is_prefix_allowed=False
+            )
+            if not matches:
+                print(
+                    f"golem: warning: skipping usage_windows.{key} in {config.config_path()}, "
+                    "it matches no Claude account",
+                    file=sys.stderr,
+                )
+                continue
             backend_id = ledger.BACKEND_CLAUDE
-            account = configured_account(key, entry_message_prefix, environment)
-        account_number = accounts.NORMAL_LOGIN_NUMBER if account is None else account[0]
+            account = extra_account(matches, entry_message_prefix)
+        account_number = None if account is None else account[0]
         other_key = keys_by_account.get((backend_id, account_number))
         if other_key is not None:
             raise SystemExit(
@@ -106,10 +131,8 @@ def latest_occurrence(time_of_day: time, now: datetime) -> datetime:
 
 
 def usage_window_error(
-    backend: common.UsageBackend, account_number: int, environment: dict[str, str]
+    backend: common.UsageBackend, account_number: int | None, environment: dict[str, str]
 ) -> str | None:
-    if account_number == accounts.NORMAL_LOGIN_NUMBER:
-        return backend.open_usage_window(environment)
     try:
         account_environment = accounts.account_environment(environment, account_number)
     except SystemExit as error:
@@ -123,27 +146,18 @@ def open_due_usage_windows(
     state_path = usage_window_state_path()
     records = cast("dict[str, UsageWindowRecord]", ledger.load_json(state_path))
     original_records_text = json.dumps(records)
-    for backend_id, account, times in window_entries:
-        backend = registry.USAGE_BACKENDS[backend_id]
-        account_number = accounts.NORMAL_LOGIN_NUMBER
-        window_name = f"{backend.NAME} usage window"
-        key_prefix = backend_id
-        occurrence_preposition = "for"
-        if account is not None:
-            account_number, account_record = account
-            window_name += f" for {accounts.ACCOUNT_LABEL.format_map(account_record)}"
-            key_prefix += f" account {account_number}"
-            occurrence_preposition = "at"
-        for time_of_day in times:
+    for entry in window_entries:
+        backend = registry.USAGE_BACKENDS[entry.backend_id]
+        for time_of_day in entry.times:
             occurrence = latest_occurrence(time_of_day, now)
             occurrence_date = occurrence.date().isoformat()
-            key = f"{key_prefix} {time_of_day:%H:%M}"
+            key = f"{entry.state_key_prefix} {time_of_day:%H:%M}"
             record = records.get(key)
             if record is None or record["date"] != occurrence_date:
                 record = None
             elif record["is_settled"]:
                 continue
-            label = f"{window_name} {occurrence_preposition} {occurrence:%Y-%m-%d %H:%M}"
+            label = entry.occurrence_label(occurrence)
             if now - occurrence >= USAGE_WINDOW_CUTOFF:
                 records[key] = {"date": occurrence_date, "is_settled": True}
                 error = None if record is None else record.get("error")
@@ -156,11 +170,11 @@ def open_due_usage_windows(
                     continue
                 print(f"golem: gave up opening {label}: {error}", file=sys.stderr)
                 notifications.notify(
-                    f"golem: could not open {window_name}",
+                    f"golem: could not open {entry.window_name}",
                     f"{occurrence:%H:%M}: {error}"[: notifications.NOTIFICATION_MESSAGE_MAX_LENGTH],
                 )
                 continue
-            error = usage_window_error(backend, account_number, environment)
+            error = usage_window_error(backend, entry.account_number, environment)
             if error is None:
                 print(f"golem: opened {label}", file=sys.stderr)
                 records[key] = {"date": occurrence_date, "is_settled": True}

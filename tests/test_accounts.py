@@ -561,18 +561,26 @@ def test_window_open_refuses_account_for_codex(
 
 
 @pytest.mark.parametrize(
+    "key",
+    [
+        pytest.param('"nobody@example.com"', id="unknown-email"),
+        pytest.param("work", id="prefix"),
+        pytest.param('"5"', id="unknown-number"),
+    ],
+)
+def test_unmatched_account_window_is_skipped_with_warning(add_account, fake_commands, capsys, key):
+    add_account()
+    support.write_config_text(f'[usage_windows]\nclaude = ["6am"]\n{key} = ["6am"]\n')
+
+    open_windows_at(2)
+
+    assert window_config_directories(fake_commands) == [""]
+    assert "matches no Claude account" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
     ("config_text", "error"),
     [
-        pytest.param(
-            '[usage_windows]\n"nobody@example.com" = ["6am"]\n',
-            "usage_windows.nobody@example.com matches no Claude account",
-            id="unknown-email",
-        ),
-        pytest.param(
-            '[usage_windows]\nwork = ["6am"]\n',
-            "usage_windows.work matches no Claude account",
-            id="prefix",
-        ),
         pytest.param(
             WORK_WINDOW_CONFIG,
             f"usage_windows.{WORK_EMAIL} matches more than one account",
@@ -582,11 +590,6 @@ def test_window_open_refuses_account_for_codex(
             f'[usage_windows]\nclaude = ["6am"]\n"{NORMAL_EMAIL}" = ["8am"]\n',
             f"usage_windows.{NORMAL_EMAIL} lists the same account as usage_windows.claude",
             id="normal-login-twice",
-        ),
-        pytest.param(
-            '[usage_windows]\n"5" = ["6am"]\n',
-            "usage_windows.5 matches no Claude account",
-            id="unknown-number",
         ),
     ],
 )
