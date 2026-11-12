@@ -335,8 +335,7 @@ def run(
             return failed_outcome(f"golem: T3 Code is not installed: {cli_path} not found")
         instance = accounts.t3_claude_instance(task.get("account"))
         try:
-            if not t3_code.server_runtime_path().exists():
-                t3_code.start_app()
+            t3_code.ensure_app_running()
             origin = t3_code.server_origin()
             if instance is not None:
                 t3_code.upsert_claude_instance(origin, t3_code.issue_token(), instance)

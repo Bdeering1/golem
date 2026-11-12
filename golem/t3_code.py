@@ -213,7 +213,9 @@ def wait_for_server() -> None:
         time.sleep(APP_START_POLL_SECONDS)
 
 
-def start_app() -> None:
+def ensure_app_running() -> None:
+    if is_running():
+        return
     if subprocess.run(["open", "-b", APP_BUNDLE_ID], check=False).returncode:
         raise T3CodeError(f"could not start {APP_BUNDLE_ID}")
     wait_for_server()
@@ -290,8 +292,7 @@ def thread_create_command(
 def ensure_thread(
     task: ledger.Task, conversation_id: str, thread_id: str, instance: ClaudeInstance | None
 ) -> None:
-    if not server_runtime_path().exists():
-        start_app()
+    ensure_app_running()
     if instance is not None:
         upsert_claude_instance(server_origin(), issue_token(), instance)
     if is_thread_present(thread_id):
@@ -347,10 +348,10 @@ def require_running_to_delete(thread_ids: list[str]) -> None:
 
 
 def open_to_delete(thread_ids: list[str]) -> None:
-    if not thread_ids or is_running():
+    if not thread_ids:
         return
     try:
-        start_app()
+        ensure_app_running()
     except T3_CODE_ERRORS as error:
         raise SystemExit(
             f"golem: could not open T3 Code to delete thread: {', '.join(thread_ids)}: {error}"
@@ -381,7 +382,6 @@ def delete_threads(thread_ids: list[str]) -> None:
 def remove_claude_instance(instance_id: str) -> None:
     if not t3_cli_path().exists():
         return
-    if not is_running():
-        start_app()
+    ensure_app_running()
     mutation: ledger.JsonObject = {"operation": "remove", "instanceId": instance_id}
     successful_value(update_settings_exit(server_origin(), issue_token(), mutation))
