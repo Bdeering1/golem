@@ -87,8 +87,8 @@ def usage_window_entries(environment: dict[str, str]) -> list[UsageWindowEntry]:
             )
             if not matches:
                 print(
-                    f"golem: warning: skipping usage_windows.{key} in {config.config_path()}, "
-                    "it matches no Claude account",
+                    f"golem: warning: skipped usage_windows.{key} in {config.config_path()} "
+                    "because it matches no Claude account",
                     file=sys.stderr,
                 )
                 continue
