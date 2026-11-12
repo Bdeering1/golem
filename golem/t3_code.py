@@ -293,14 +293,17 @@ def ensure_thread(
     task: ledger.Task, conversation_id: str, thread_id: str, instance: ClaudeInstance | None
 ) -> None:
     ensure_app_running()
+    is_present = is_thread_present(thread_id)
+    if is_present and instance is None:
+        return
+    if not is_present and task["backend"] == ledger.BACKEND_T3:
+        raise T3CodeError("thread does not exist in T3 Code")
     origin = server_origin()
     token = issue_token()
     if instance is not None:
         upsert_claude_instance(origin, token, instance)
-    if is_thread_present(thread_id):
+    if is_present:
         return
-    if task["backend"] == ledger.BACKEND_T3:
-        raise T3CodeError("thread does not exist in T3 Code")
     driver = INSTANCE_IDS[task["backend"]]
     command = thread_create_command(
         origin, token, task, thread_id, thread_instance_id(driver, instance), default_model(driver)
