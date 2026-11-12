@@ -390,6 +390,25 @@ def test_t3_run_creates_thread_on_account_instance(
     assert t3_support.created_thread(server)["modelSelection"]["instanceId"] == T3_INSTANCE_ID
 
 
+def test_t3_usage_limit_resume_updates_account_instance(
+    server, installed_launch_agent, add_account, ledger_path
+):
+    add_account()
+    support.write_task(
+        ledger_path,
+        ledger.STATUS_SCHEDULED,
+        backend=ledger.BACKEND_T3,
+        account=1,
+        usage_limit_resume_count=1,
+    )
+    (server.home / "thread-present").touch()
+
+    assert cli.main(["_execute", support.TASK_ID, f"{support.TASK_ID}-session"]) == 0
+
+    assert server.settings_mutations == [t3_upsert_mutation()]
+    assert server.commands == []
+
+
 @pytest.mark.parametrize("is_t3_running", [True, False], ids=["running", "not-running"])
 def test_remove_removes_t3_instance_before_logout(
     server, add_account, fake_commands, monkeypatch, is_t3_running
