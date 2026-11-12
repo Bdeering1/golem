@@ -240,6 +240,7 @@ def fake_commands(monkeypatch, tmp_path, fake_bin_path):
     work_path.mkdir()
     monkeypatch.setenv("PATH", f"{fake_bin_path}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.setenv("HOME", str(home_path))
+    monkeypatch.delenv("T3CODE_HOME", raising=False)
     monkeypatch.setenv("XDG_STATE_HOME", str(state_path))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(config_path))
     for name, path in paths.items():
@@ -336,5 +337,6 @@ def server(monkeypatch, tmp_path):
     fake_server.mark_running()
     monkeypatch.setattr(t3_code, "fetch_projects", fake_server.fetch_projects)
     monkeypatch.setattr(t3_code, "dispatch_command_exit", fake_server.dispatch_command_exit)
+    monkeypatch.setattr(t3_code, "update_settings_exit", fake_server.update_settings_exit)
     monkeypatch.setattr(t3_code, "thread_projection", fake_server.thread_projection)
     return fake_server

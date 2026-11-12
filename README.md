@@ -2,7 +2,7 @@
 
 golem is an orchestrator for coding agents.
 
-Queue agent sessions, chain them together and schedule them around your usage limits. golem runs them in the background, each in its own git worktree, and notifies you when one needs review. Setup scripts, gates and aliases let you build your own workflows on top.
+Queue agent sessions, chain them together, run them on different accounts, and schedule them around your usage limits. golem runs them in the background, each in its own git worktree, and notifies you when one needs review. Setup scripts, gates, and aliases let you build your own workflows on top.
 
 ## Install
 
@@ -41,6 +41,9 @@ golem run fix-signup "Fix the signup redirect" --backend codex --at 9pm
 # Run as a T3 Code thread with Codex. --provider defaults to claude
 golem run fix-logout "Fix the logout redirect" --backend t3 -- --provider codex --model gpt-6-astra
 
+# Run on another Claude account, after signing in with `golem account add claude`
+golem run fix-billing "Fix the billing page" --account work@example.com
+
 # The script must print {"directory": "<path>"} for the task to run in
 # The review runs if the tests pass (exit code of zero). Arguments after -- go to the agent
 golem run add-auth "Add password reset" \
@@ -50,20 +53,6 @@ golem run add-auth "Add password reset" \
   --then review-auth "Review the password reset changes and fix what you find" \
   -- --permission-mode auto
 ```
-
-## Claude accounts
-
-Tasks run on your normal Claude Code login. To run some on another account:
-
-```bash
-# Sign in to another Claude account
-golem account add claude
-
-# Run on that account. A unique prefix of the email works too
-golem run fix-billing "Fix the billing page" --account work@example.com
-```
-
-Other accounts share your instructions, settings, skills, plugins and transcripts. They don't get settings that Claude keeps only in `.claude.json`, such as user-scope MCP servers and per-project tool approvals.
 
 ## Commands
 
@@ -76,7 +65,7 @@ Other accounts share your instructions, settings, skills, plugins and transcript
 | `golem show` | Prints a task's final result |
 | `golem pickup` | Opens a task's session and marks the task done |
 | `golem prune` | Cleans up cancelled and finished tasks |
-| `golem account` | Adds, lists and removes Claude accounts |
+| `golem account` | Adds, lists, and removes Claude accounts |
 
 `golem --help` lists the rest.
 

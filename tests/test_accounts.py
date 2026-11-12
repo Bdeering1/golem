@@ -3,14 +3,15 @@ from pathlib import Path
 
 import pytest
 
-from golem import accounts, cli, executor, ledger
+from golem import accounts, cli, executor, ledger, t3_code
 from golem.backends import claude
-from tests import support
+from tests import support, t3_support
 
 NORMAL_EMAIL = "me@example.com"
 WORK_EMAIL = "work@example.com"
 SOLO_EMAIL = "solo@example.com"
 CREDENTIALS = ".credentials.json"
+T3_INSTANCE_ID = "golem-claude-1"
 
 
 def status_text(email: str, org_id: str, org_name: str) -> str:
@@ -45,6 +46,18 @@ def auth_calls(fake_commands):
 
 def last_agent_environment(fake_commands):
     return fake_commands["claude-account"].read_text(encoding="utf-8").splitlines()[-1]
+
+
+def t3_upsert_mutation():
+    return {
+        "operation": "upsert",
+        "instanceId": T3_INSTANCE_ID,
+        "instance": {
+            "driver": "claudeAgent",
+            "displayName": f"{WORK_EMAIL} (Work)",
+            "config": {"homePath": str(accounts.account_directory(1))},
+        },
+    }
 
 
 def run_and_execute(ledger_path, *arguments: str):
@@ -243,12 +256,24 @@ def retry_account_task(ledger_path) -> None:
     assert cli.main(["retry", support.TASK_ID]) == 0
 
 
+def schedule_t3_account_run(ledger_path) -> None:
+    command = ["run", support.TASK_ID, support.PROMPT, "--backend", "t3", "--account", WORK_EMAIL]
+    assert cli.main(command) == 0
+
+
+def retry_t3_account_task(ledger_path) -> None:
+    support.write_task(ledger_path, ledger.STATUS_FAILED, backend=ledger.BACKEND_T3, account=1)
+    assert cli.main(["retry", support.TASK_ID]) == 0
+
+
 @pytest.mark.parametrize(
     "look_up_reset_time",
     [
         pytest.param(schedule_account_run, id="run"),
         pytest.param(pause_usage_limited_account_task, id="usage-limit-pause"),
         pytest.param(retry_account_task, id="retry"),
+        pytest.param(schedule_t3_account_run, id="t3-run"),
+        pytest.param(retry_t3_account_task, id="t3-retry"),
     ],
 )
 def test_usage_lookup_runs_on_task_account(
@@ -329,3 +354,96 @@ def test_retry_refuses_removed_account_before_ledger_changes(installed_launch_ag
         cli.main(["retry", support.TASK_ID, "--now"])
 
     assert support.read_tasks(ledger_path) == tasks
+
+
+def test_t3_code_pickup_creates_thread_on_account_instance(server, add_account, ledger_path):
+    add_account()
+    support.write_task(ledger_path, ledger.STATUS_NEEDS_REVIEW, account=1)
+
+    assert cli.main(["pickup", support.TASK_ID, "--client", "t3-code"]) == 0
+
+    assert server.settings_mutations == [t3_upsert_mutation()]
+    thread = t3_support.created_thread(server)
+    assert thread["modelSelection"]["instanceId"] == T3_INSTANCE_ID
+    assert thread["importedNativeThread"]["ref"]["driver"] == "claudeAgent"
+
+
+def test_repeat_t3_code_pickup_updates_account_instance(server, add_account, ledger_path):
+    add_account()
+    support.write_task(ledger_path, ledger.STATUS_NEEDS_REVIEW, account=1)
+    (server.home / "thread-present").touch()
+
+    assert cli.main(["pickup", support.TASK_ID, "--client", "t3-code"]) == 0
+
+    assert server.settings_mutations == [t3_upsert_mutation()]
+    assert server.commands == []
+
+
+def test_t3_run_creates_thread_on_account_instance(
+    server, installed_launch_agent, add_account, ledger_path
+):
+    add_account()
+
+    run_and_execute(ledger_path, "--backend", "t3", "--account", WORK_EMAIL)
+
+    assert server.settings_mutations == [t3_upsert_mutation()]
+    assert t3_support.created_thread(server)["modelSelection"]["instanceId"] == T3_INSTANCE_ID
+
+
+def test_t3_usage_limit_resume_updates_account_instance(
+    server, installed_launch_agent, add_account, ledger_path
+):
+    add_account()
+    support.write_task(
+        ledger_path,
+        ledger.STATUS_SCHEDULED,
+        backend=ledger.BACKEND_T3,
+        account=1,
+        usage_limit_resume_count=1,
+    )
+    (server.home / "thread-present").touch()
+
+    assert cli.main(["_execute", support.TASK_ID, f"{support.TASK_ID}-session"]) == 0
+
+    assert server.settings_mutations == [t3_upsert_mutation()]
+    assert server.commands == []
+
+
+@pytest.mark.parametrize("is_t3_running", [True, False], ids=["running", "not-running"])
+def test_remove_removes_t3_instance_before_logout(
+    server, add_account, fake_commands, monkeypatch, is_t3_running
+):
+    add_account()
+    if not is_t3_running:
+        server.runtime_path.unlink()
+        monkeypatch.setattr(t3_code, "wait_for_server", server.mark_running)
+
+    assert cli.main(["account", "remove", WORK_EMAIL]) == 0
+
+    assert server.settings_mutations == [{"operation": "remove", "instanceId": T3_INSTANCE_ID}]
+    assert "logout" in auth_calls(fake_commands)
+    assert not accounts.account_directory(1).exists()
+
+
+def stop_t3(server, monkeypatch):
+    server.runtime_path.unlink()
+    monkeypatch.setattr(t3_code, "APP_START_TIMEOUT_SECONDS", 0)
+
+
+def reject_t3_settings(server, _monkeypatch):
+    server.settings_exit = {"_tag": "Failure", "cause": {"error": {"message": "rejected"}}}
+
+
+@pytest.mark.parametrize("break_t3", [stop_t3, reject_t3_settings], ids=["no-start", "rejected"])
+def test_remove_keeps_account_when_t3_cannot_remove_instance(
+    server, add_account, fake_commands, monkeypatch, break_t3
+):
+    add_account()
+    break_t3(server, monkeypatch)
+
+    with pytest.raises(SystemExit, match="T3 Code could not remove the account"):
+        cli.main(["account", "remove", WORK_EMAIL])
+
+    assert "logout" not in auth_calls(fake_commands)
+    assert accounts.account_directory(1).is_dir()
+    assert accounts.resolved_account_number("1") == 1

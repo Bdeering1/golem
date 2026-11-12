@@ -49,7 +49,11 @@ def test_retry_refuses_unretryable_task_before_usage_lookup(ledger_path, monkeyp
     [
         ("codex", ["--auto-pickup"], "--auto-pickup requires a default app client for Codex"),
         ("codex", ["--account", "work@example.com"], "--account supports only Claude"),
-        ("t3", ["--account", "work@example.com"], "--account supports only Claude"),
+        (
+            "t3",
+            ["--account", "work@example.com", "--", "--provider", "codex"],
+            "--account supports only Claude tasks, not Codex tasks",
+        ),
         ("t3", ["--env", "NAME=value"], "--env does not support T3 Code"),
         ("t3", ["--", "--yolo"], "argument is not supported: --yolo"),
         ("t3", ["--", "--provider", "gemini"], "--provider must be claude or codex"),

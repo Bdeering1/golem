@@ -117,6 +117,7 @@ def test_run_creates_thread_in_worktree_and_records_reply(
         "branch": f"worktree-{Path(worktree).name}",
         "worktreePath": worktree,
     }
+    assert t3_server.settings_mutations == []
     assert f"thread send {t3.conversation_id(task)} - --wait --json" in t3_server.t3_calls()
     assert (t3_server.home / "sent-message").read_text(encoding="utf-8") == support.PROMPT
     send_cwd = (t3_server.home / "send-cwd").read_text(encoding="utf-8").strip()

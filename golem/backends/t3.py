@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-from golem import ledger, progress_log, t3_code, task_directories
+from golem import accounts, ledger, progress_log, t3_code, task_directories
 from golem.backends import claude, codex, common
 
 NAME: str = "T3 Code"
@@ -66,16 +66,26 @@ def transcript_paths(task: ledger.Task) -> list[Path]:
     return codex.session_transcript_paths(task, native_session_id)
 
 
-def create_thread(task_id: str, task: ledger.Task, thread_id: str) -> None:
+def create_thread(
+    task_id: str,
+    task: ledger.Task,
+    thread_id: str,
+    origin: str,
+    token: str,
+    instance: t3_code.ClaudeInstance | None,
+) -> None:
     provider, model = provider_and_model(task["agent_args"])
-    instance_id = t3_code.INSTANCE_IDS[provider]
-    origin = t3_code.server_origin()
-    token = t3_code.issue_token()
+    driver = t3_code.INSTANCE_IDS[provider]
     t3_code.dispatch_command(
         origin,
         token,
         t3_code.thread_create_command(
-            origin, token, task, thread_id, instance_id, model or t3_code.default_model(instance_id)
+            origin,
+            token,
+            task,
+            thread_id,
+            t3_code.thread_instance_id(driver, instance),
+            model or t3_code.default_model(driver),
         ),
     )
     common.record_session_field(task_id, task["session_id"], "t3_code_thread_id", thread_id)
@@ -144,16 +154,16 @@ class ThreadWatcher:
     thread_id: str
     origin: str
     record_progress: Callable[[str], None]
+    token: str
+    token_issued_at: float
     native_session_id: str | None = None
-    token: str = ""
-    token_issued_at: float | None = None
     previous_item_ids: set[str] = field(default_factory=set)
     run_items: dict[str, ledger.JsonObject] = field(default_factory=dict)
     recorded_item_ids: set[str] = field(default_factory=set)
 
     def current_token(self) -> str:
         now = time.monotonic()
-        if self.token_issued_at is None or now - self.token_issued_at >= TOKEN_REISSUE_SECONDS:
+        if now - self.token_issued_at >= TOKEN_REISSUE_SECONDS:
             self.token = t3_code.issue_token()
             self.token_issued_at = now
         return self.token
@@ -326,12 +336,15 @@ def run(
         cli_path = t3_code.t3_cli_path()
         if not cli_path.exists():
             return failed_outcome(f"golem: T3 Code is not installed: {cli_path} not found")
+        instance = accounts.t3_claude_instance(task.get("account"))
         try:
-            if not t3_code.server_runtime_path().exists():
-                t3_code.start_app()
-            if not common.is_usage_limit_resume(task) and not t3_code.is_thread_present(thread_id):
-                create_thread(task_id, task, thread_id)
+            t3_code.ensure_app_running()
             origin = t3_code.server_origin()
+            token = t3_code.issue_token()
+            if instance is not None:
+                t3_code.upsert_claude_instance(origin, token, instance)
+            if not common.is_usage_limit_resume(task) and not t3_code.is_thread_present(thread_id):
+                create_thread(task_id, task, thread_id, origin, token, instance)
         except t3_code.T3_CODE_ERRORS as error:
             return failed_outcome(
                 f"golem: T3 Code {t3_code.version()} could not run thread {thread_id}: {error}"
@@ -343,6 +356,8 @@ def run(
             origin,
             record_progress,
             native_session_id=task.get("native_session_id"),
+            token=token,
+            token_issued_at=time.monotonic(),
         )
         watcher.skip_previous_items()
         returncode, stdout, stderr = send_message(task, thread_id, watcher, lock_file_descriptors)
