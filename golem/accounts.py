@@ -16,7 +16,7 @@ TOKEN_VARIABLES = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY")
 PRIVATE_ENTRY_NAMES = frozenset(
     {".claude.json", ".claude.json.lock", "backups", ".credentials.json"}
 )
-NORMAL_LOGIN_NUMBER = 0
+DEFAULT_ACCOUNT_NUMBER = 0
 UNKNOWN = "unknown"
 CLAUDE_AUTH_COMMAND = ("claude", "auth")
 ACCOUNT_LABEL = "{email} ({org_name})"
@@ -129,7 +129,7 @@ def logged_in_account(environment: dict[str, str]) -> Account | None:
     return {"email": email, "org_id": org_id, "org_name": org_name}
 
 
-def normal_login(environment: dict[str, str]) -> Account | None:
+def default_account(environment: dict[str, str]) -> Account | None:
     return logged_in_account(account_environment(environment, None))
 
 
@@ -140,9 +140,9 @@ def extra_accounts(records: AccountRecords) -> list[tuple[int, Account]]:
 def known_accounts(
     records: AccountRecords, environment: dict[str, str]
 ) -> list[tuple[int, Account]]:
-    login = normal_login(environment)
+    default = default_account(environment)
     accounts = extra_accounts(records)
-    return accounts if login is None else [(NORMAL_LOGIN_NUMBER, login), *accounts]
+    return accounts if default is None else [(DEFAULT_ACCOUNT_NUMBER, default), *accounts]
 
 
 def account_lines(accounts: Sequence[tuple[int, Account | None]]) -> list[str]:
@@ -167,7 +167,7 @@ def matching_accounts(
 ) -> list[tuple[int, Account | None]]:
     if value.isdecimal():
         number = int(value)
-        if number == NORMAL_LOGIN_NUMBER:
+        if number == DEFAULT_ACCOUNT_NUMBER:
             return [(number, None)]
         account = records["accounts"].get(str(number))
         return [] if account is None else [(number, account)]
@@ -205,7 +205,7 @@ def task_account_number(value: str | None) -> int | None:
     if value is None:
         return None
     number = resolved_account_number(value)
-    return None if number == NORMAL_LOGIN_NUMBER else number
+    return None if number == DEFAULT_ACCOUNT_NUMBER else number
 
 
 def run_auth_logout(environment: dict[str, str]) -> int:
@@ -251,7 +251,7 @@ def add_account() -> int:
 def list_accounts() -> int:
     records = load_account_records()
     accounts: list[tuple[int, Account | None]] = [
-        (NORMAL_LOGIN_NUMBER, normal_login(os.environ.copy())),
+        (DEFAULT_ACCOUNT_NUMBER, default_account(os.environ.copy())),
         *extra_accounts(records),
     ]
     print("\n".join(account_lines(accounts)))
@@ -260,8 +260,8 @@ def list_accounts() -> int:
 
 def remove_account(value: str) -> tuple[int, Account]:
     number = resolved_account_number(value)
-    if number == NORMAL_LOGIN_NUMBER:
-        raise SystemExit("golem: cannot remove the normal Claude login")
+    if number == DEFAULT_ACCOUNT_NUMBER:
+        raise SystemExit("golem: cannot remove the default Claude account")
     unfinished_task_ids = [
         task_id
         for task_id, task in ledger.load_tasks().items()

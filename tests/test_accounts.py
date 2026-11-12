@@ -50,9 +50,9 @@ def test_add_records_account_and_links_shared_entries(add_account, claude_config
         pytest.param(
             0,
             "0",
-            (support.NORMAL_EMAIL, "org-personal", "Personal"),
+            (support.DEFAULT_EMAIL, "org-personal", "Personal"),
             True,
-            id="normal-login-duplicate",
+            id="default-account-duplicate",
         ),
         pytest.param(
             1, "0", (support.WORK_EMAIL, "org-work", "Work"), True, id="account-duplicate"
@@ -81,7 +81,7 @@ def test_refused_add_removes_directory(
     assert ("logout" in support.auth_calls(fake_commands)) == is_duplicate
 
 
-def test_list_shows_normal_login_and_accounts(add_account, capsys):
+def test_list_shows_default_and_extra_accounts(add_account, capsys):
     add_account()
     add_account(support.WORK_EMAIL, "org-other", "Other")
     capsys.readouterr()
@@ -89,7 +89,7 @@ def test_list_shows_normal_login_and_accounts(add_account, capsys):
     assert cli.main(["account", "list"]) == 0
 
     assert [line.split() for line in capsys.readouterr().out.splitlines()] == [
-        [support.NORMAL_EMAIL, "Personal", "0"],
+        [support.DEFAULT_EMAIL, "Personal", "0"],
         [support.WORK_EMAIL, "Work", "1"],
         [support.WORK_EMAIL, "Other", "2"],
     ]
@@ -122,7 +122,7 @@ def test_remove_refuses_while_unfinished_task_uses_account(add_account, ledger_p
         pytest.param(SOLO_EMAIL.upper(), 3, id="full-email"),
         pytest.param("solo", 3, id="prefix"),
         pytest.param("2", 2, id="number"),
-        pytest.param(support.NORMAL_EMAIL, None, id="normal-login"),
+        pytest.param(support.DEFAULT_EMAIL, None, id="default-account"),
     ],
 )
 def test_run_account_selects_account(
@@ -180,7 +180,7 @@ def test_start_links_new_entries_and_keeps_private_entries(
     ("account_arguments", "expected_environment"),
     [
         pytest.param(["--account", support.WORK_EMAIL], "{shadow}||", id="account"),
-        pytest.param([], "|token|token", id="normal-login-drops-leaked-config"),
+        pytest.param([], "|token|token", id="default-account-drops-leaked-config"),
     ],
 )
 def test_agent_environment_uses_task_account(

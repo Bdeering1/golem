@@ -65,7 +65,7 @@ def resolved_extra_account(
     if len(matches) > 1:
         raise SystemExit(accounts.ambiguous_account_message(entry_message_prefix, matches))
     number, account = matches[0]
-    if number == accounts.NORMAL_LOGIN_NUMBER or account is None:
+    if number == accounts.DEFAULT_ACCOUNT_NUMBER or account is None:
         return None
     return number, account
 

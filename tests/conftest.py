@@ -347,7 +347,7 @@ def claude_config_directory():
     directory = Path.home() / ".claude"
     directory.mkdir(parents=True)
     (directory / support.CREDENTIALS).write_text(
-        support.status_text(support.NORMAL_EMAIL, "org-personal", "Personal"), encoding="utf-8"
+        support.status_text(support.DEFAULT_EMAIL, "org-personal", "Personal"), encoding="utf-8"
     )
     (directory / "settings.json").write_text("{}", encoding="utf-8")
     return directory

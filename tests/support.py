@@ -10,7 +10,7 @@ from typing import cast
 from golem import cli, config, git, ledger, spawn, task_directories
 from golem.backends import claude
 
-NORMAL_EMAIL = "me@example.com"
+DEFAULT_EMAIL = "me@example.com"
 WORK_EMAIL = "work@example.com"
 CREDENTIALS = ".credentials.json"
 TASK_ID = "fix-thing"

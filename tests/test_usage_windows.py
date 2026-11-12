@@ -276,10 +276,11 @@ def test_accounts_with_same_time_each_open_once(add_account, fake_commands):
 
 
 @pytest.mark.parametrize(
-    "key", [pytest.param(f'"{support.NORMAL_EMAIL}"', id="email"), pytest.param('"0"', id="number")]
+    "key",
+    [pytest.param(f'"{support.DEFAULT_EMAIL}"', id="email"), pytest.param('"0"', id="number")],
 )
 @pytest.mark.usefixtures("claude_config_directory")
-def test_normal_login_window_shares_claude_state(fake_commands, key):
+def test_default_account_window_shares_claude_state(fake_commands, key):
     support.write_config_text('[usage_windows]\nclaude = ["6am"]\n')
     open_windows_at(2)
     support.write_config_text(f'[usage_windows]\n{key} = ["6am"]\n')
@@ -343,9 +344,9 @@ def test_unmatched_account_window_is_skipped_with_warning(add_account, fake_comm
             id="ambiguous",
         ),
         pytest.param(
-            f'[usage_windows]\nclaude = ["6am"]\n"{support.NORMAL_EMAIL}" = ["8am"]\n',
-            f"usage_windows.{support.NORMAL_EMAIL} lists the same account as usage_windows.claude",
-            id="normal-login-twice",
+            f'[usage_windows]\nclaude = ["6am"]\n"{support.DEFAULT_EMAIL}" = ["8am"]\n',
+            f"usage_windows.{support.DEFAULT_EMAIL} lists the same account as usage_windows.claude",
+            id="default-account-twice",
         ),
     ],
 )
@@ -385,7 +386,7 @@ def test_remove_warns_when_usage_windows_lists_account(add_account, capsys, conf
     ("keys", "lookup_count"),
     [
         pytest.param(["claude"], 0, id="backend-keys"),
-        pytest.param([f'"{support.NORMAL_EMAIL}"', f'"{support.WORK_EMAIL}"'], 1, id="email-keys"),
+        pytest.param([f'"{support.DEFAULT_EMAIL}"', f'"{support.WORK_EMAIL}"'], 1, id="email-keys"),
     ],
 )
 def test_window_keys_look_up_login_at_most_once(add_account, fake_commands, keys, lookup_count):
@@ -399,11 +400,11 @@ def test_window_keys_look_up_login_at_most_once(add_account, fake_commands, keys
 
 
 @pytest.mark.usefixtures("claude_config_directory")
-def test_agent_opens_normal_login_email_window_with_launchd_path(
+def test_agent_opens_default_account_email_window_with_launchd_path(
     installed_launch_agent, monkeypatch, fake_commands
 ):
     window_time = support.current_minute_window_time()
-    support.write_config_text(f'[usage_windows]\n"{support.NORMAL_EMAIL}" = ["{window_time}"]\n')
+    support.write_config_text(f'[usage_windows]\n"{support.DEFAULT_EMAIL}" = ["{window_time}"]\n')
     monkeypatch.setenv("PATH", support.LAUNCHD_PATH)
 
     assert launch_agent.run_launch_agent() == 0
