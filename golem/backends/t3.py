@@ -67,12 +67,15 @@ def transcript_paths(task: ledger.Task) -> list[Path]:
 
 
 def create_thread(
-    task_id: str, task: ledger.Task, thread_id: str, instance: t3_code.ClaudeInstance | None
+    task_id: str,
+    task: ledger.Task,
+    thread_id: str,
+    origin: str,
+    token: str,
+    instance: t3_code.ClaudeInstance | None,
 ) -> None:
     provider, model = provider_and_model(task["agent_args"])
     driver = t3_code.INSTANCE_IDS[provider]
-    origin = t3_code.server_origin()
-    token = t3_code.issue_token()
     t3_code.dispatch_command(
         origin,
         token,
@@ -337,10 +340,11 @@ def run(
         try:
             t3_code.ensure_app_running()
             origin = t3_code.server_origin()
+            token = t3_code.issue_token()
             if instance is not None:
-                t3_code.upsert_claude_instance(origin, t3_code.issue_token(), instance)
+                t3_code.upsert_claude_instance(origin, token, instance)
             if not common.is_usage_limit_resume(task) and not t3_code.is_thread_present(thread_id):
-                create_thread(task_id, task, thread_id, instance)
+                create_thread(task_id, task, thread_id, origin, token, instance)
         except t3_code.T3_CODE_ERRORS as error:
             return failed_outcome(
                 f"golem: T3 Code {t3_code.version()} could not run thread {thread_id}: {error}"
@@ -352,6 +356,8 @@ def run(
             origin,
             record_progress,
             native_session_id=task.get("native_session_id"),
+            token=token,
+            token_issued_at=time.monotonic(),
         )
         watcher.skip_previous_items()
         returncode, stdout, stderr = send_message(task, thread_id, watcher, lock_file_descriptors)
