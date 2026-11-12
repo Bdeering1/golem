@@ -88,6 +88,8 @@ NODE_ENV = "development"
 [usage_windows]
 # Open a usage window at these times each day
 claude = ["6am", "11am"]
+# Another Claude account, by email or account number
+"work@example.com" = ["8am", "1pm"]
 ```
 
 golem can't wake a sleeping Mac to open a window. Use `sudo pmset repeat` to wake it each day.

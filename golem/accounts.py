@@ -2,6 +2,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict, cast
@@ -9,7 +10,7 @@ from typing import TYPE_CHECKING, TypedDict, cast
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-from golem import ledger, t3_code
+from golem import config, ledger, t3_code
 
 CONFIG_DIRECTORY_VARIABLE = "CLAUDE_CONFIG_DIR"
 TOKEN_VARIABLES = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY")
@@ -129,16 +130,18 @@ def logged_in_account(environment: dict[str, str]) -> Account | None:
     return {"email": email, "org_id": org_id, "org_name": org_name}
 
 
-def normal_login() -> Account | None:
-    return logged_in_account(account_environment(os.environ.copy(), None))
+def normal_login(environment: dict[str, str]) -> Account | None:
+    return logged_in_account(account_environment(environment, None))
 
 
 def extra_accounts(records: AccountRecords) -> list[tuple[int, Account]]:
     return [(int(number), account) for number, account in records["accounts"].items()]
 
 
-def known_accounts(records: AccountRecords) -> list[tuple[int, Account]]:
-    login = normal_login()
+def known_accounts(
+    records: AccountRecords, environment: dict[str, str]
+) -> list[tuple[int, Account]]:
+    login = normal_login(environment)
     accounts = extra_accounts(records)
     return accounts if login is None else [(NORMAL_LOGIN_NUMBER, login), *accounts]
 
@@ -156,24 +159,38 @@ def account_lines(accounts: Sequence[tuple[int, Account | None]]) -> list[str]:
     ]
 
 
-def resolved_account_number(value: str) -> int:
-    records = load_account_records()
-    unknown_error = SystemExit(f"golem: unknown account: {value}")
+def matching_accounts(
+    value: str, records: AccountRecords, environment: dict[str, str], *, is_prefix_allowed: bool
+) -> list[tuple[int, Account | None]]:
     if value.isdigit():
         number = int(value)
-        if number != NORMAL_LOGIN_NUMBER and str(number) not in records["accounts"]:
-            raise unknown_error
-        return number
-    candidates = known_accounts(records)
+        if number == NORMAL_LOGIN_NUMBER:
+            return [(number, None)]
+        account = records["accounts"].get(str(number))
+        return [] if account is None else [(number, account)]
+    candidates = known_accounts(records, environment)
     lowered = value.lower()
-    matches = [item for item in candidates if item[1]["email"].lower() == lowered] or [
-        item for item in candidates if item[1]["email"].lower().startswith(lowered)
+    matches: list[tuple[int, Account | None]] = [
+        item for item in candidates if item[1]["email"].lower() == lowered
     ]
+    if matches or not is_prefix_allowed:
+        return matches
+    return [item for item in candidates if item[1]["email"].lower().startswith(lowered)]
+
+
+def ambiguous_account_message(subject: str, matches: list[tuple[int, Account | None]]) -> str:
+    lines = "\n".join(account_lines(matches))
+    return f"{subject} matches more than one account; use its number:\n{lines}"
+
+
+def resolved_account_number(value: str) -> int:
+    matches = matching_accounts(
+        value, load_account_records(), os.environ.copy(), is_prefix_allowed=True
+    )
     if not matches:
-        raise unknown_error
+        raise SystemExit(f"golem: unknown account: {value}")
     if len(matches) > 1:
-        lines = "\n".join(account_lines(matches))
-        raise SystemExit(f"golem: {value} matches more than one account; use its number:\n{lines}")
+        raise SystemExit(ambiguous_account_message(f"golem: {value}", matches))
     return matches[0][0]
 
 
@@ -199,7 +216,9 @@ def sign_in_new_account(records: AccountRecords, environment: dict[str, str]) ->
     if account is None:
         run_auth_logout(environment)
         raise SystemExit("golem: Claude login failed")
-    if any(is_same_account(account, other) for _, other in known_accounts(records)):
+    if any(
+        is_same_account(account, other) for _, other in known_accounts(records, os.environ.copy())
+    ):
         run_auth_logout(environment)
         raise SystemExit(f"golem: {ACCOUNT_LABEL.format_map(account)} is already signed in")
     return account
@@ -225,17 +244,28 @@ def add_account() -> int:
 def list_accounts() -> int:
     records = load_account_records()
     accounts: list[tuple[int, Account | None]] = [
-        (NORMAL_LOGIN_NUMBER, normal_login()),
+        (NORMAL_LOGIN_NUMBER, normal_login(os.environ.copy())),
         *extra_accounts(records),
     ]
     print("\n".join(account_lines(accounts)))
     return 0
 
 
+def usage_window_keys() -> list[str]:
+    try:
+        table = config.load_config().get("usage_windows")
+    except SystemExit:
+        return []
+    if not isinstance(table, dict):
+        return []
+    return list(cast("dict[str, object]", table))
+
+
 def remove_account(value: str) -> int:
     number = resolved_account_number(value)
     if number == NORMAL_LOGIN_NUMBER:
         raise SystemExit("golem: cannot remove the normal Claude login")
+    window_keys = usage_window_keys()
     unfinished_task_ids = [
         task_id
         for task_id, task in ledger.load_tasks().items()
@@ -258,4 +288,10 @@ def remove_account(value: str) -> int:
     account = records["accounts"].pop(str(number))
     ledger.save_json(account_records_path(), records)
     print(f"golem: removed {ACCOUNT_LABEL.format_map(account)}")
+    if any(key.lower() in {account["email"].lower(), str(number)} for key in window_keys):
+        print(
+            f"golem: warning: [usage_windows] still lists {account['email']}; "
+            f"remove it from {config.config_path()}",
+            file=sys.stderr,
+        )
     return 0

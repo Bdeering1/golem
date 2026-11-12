@@ -1,9 +1,12 @@
 import json
+import os
+import shutil
+from datetime import datetime
 from pathlib import Path
 
 import pytest
 
-from golem import accounts, cli, executor, ledger, t3_code
+from golem import accounts, cli, executor, launch_agent, ledger, t3_code, usage_windows
 from golem.backends import claude
 from tests import support, t3_support
 
@@ -12,6 +15,7 @@ WORK_EMAIL = "work@example.com"
 SOLO_EMAIL = "solo@example.com"
 CREDENTIALS = ".credentials.json"
 T3_INSTANCE_ID = "golem-claude-1"
+WORK_WINDOW_CONFIG = f'[usage_windows]\n"{WORK_EMAIL}" = ["6am"]\n'
 
 
 def status_text(email: str, org_id: str, org_name: str) -> str:
@@ -447,3 +451,161 @@ def test_remove_keeps_account_when_t3_cannot_remove_instance(
     assert "logout" not in auth_calls(fake_commands)
     assert accounts.account_directory(1).is_dir()
     assert accounts.resolved_account_number("1") == 1
+
+
+def open_windows_at(minute: int) -> None:
+    now = datetime(2030, 1, 1, 6, minute).astimezone()
+    usage_windows.open_due_usage_windows(
+        usage_windows.usage_window_entries(dict(os.environ)), dict(os.environ), now
+    )
+
+
+def window_config_directories(fake_commands) -> list[str]:
+    lines = fake_commands["claude-account"].read_text(encoding="utf-8").splitlines()
+    return [line.split("|")[0] for line in lines]
+
+
+def test_account_window_opens_once_a_day_on_account(add_account, fake_commands, capsys):
+    add_account()
+    support.write_config_text(WORK_WINDOW_CONFIG)
+
+    open_windows_at(2)
+    open_windows_at(7)
+
+    assert window_config_directories(fake_commands) == [str(accounts.account_directory(1))]
+    assert f"opened Claude usage window for {WORK_EMAIL} (Work)" in capsys.readouterr().err
+
+
+def test_missed_account_window_is_skipped(add_account, fake_commands, capsys):
+    add_account()
+    support.write_config_text(WORK_WINDOW_CONFIG)
+
+    open_windows_at(30)
+
+    assert window_config_directories(fake_commands) == []
+    assert "skipped" in capsys.readouterr().err
+
+
+def test_failed_account_window_retries_then_notifies_with_account(add_account, fake_commands):
+    add_account()
+    support.write_config_text(WORK_WINDOW_CONFIG)
+    entries = usage_windows.usage_window_entries(dict(os.environ))
+    shutil.rmtree(accounts.account_directory(1))
+
+    for minute in (1, 10, 30, 40):
+        usage_windows.open_due_usage_windows(
+            entries, dict(os.environ), datetime(2030, 1, 1, 6, minute).astimezone()
+        )
+
+    assert window_config_directories(fake_commands) == []
+    notifications = support.logged_osascript_calls(fake_commands)
+    assert len(notifications) == 1
+    assert WORK_EMAIL in notifications[0][-2]
+    assert "removed" in notifications[0][-1]
+
+
+def test_accounts_with_same_time_each_open_once(add_account, fake_commands):
+    add_account()
+    support.write_config_text(f'[usage_windows]\nclaude = ["6am"]\n"{WORK_EMAIL}" = ["6am"]\n')
+
+    open_windows_at(2)
+    open_windows_at(7)
+
+    assert window_config_directories(fake_commands) == ["", str(accounts.account_directory(1))]
+
+
+def test_window_open_uses_account(add_account, fake_commands):
+    add_account()
+
+    assert cli.main(["window", "open", "--account", "work"]) == 0
+
+    assert window_config_directories(fake_commands) == [str(accounts.account_directory(1))]
+
+
+def test_window_open_refuses_account_for_codex(add_account, fake_commands):
+    add_account()
+
+    with pytest.raises(SystemExit, match="only Claude"):
+        cli.main(["window", "open", "--account", WORK_EMAIL, "--backend", "codex"])
+
+    assert support.logged_calls(fake_commands, "codex") == []
+
+
+@pytest.mark.parametrize(
+    ("config_text", "error"),
+    [
+        pytest.param(
+            '[usage_windows]\n"nobody@example.com" = ["6am"]\n',
+            "usage_windows.nobody@example.com matches no Claude account",
+            id="unknown-email",
+        ),
+        pytest.param(
+            '[usage_windows]\nwork = ["6am"]\n',
+            "usage_windows.work matches no Claude account",
+            id="prefix",
+        ),
+        pytest.param(
+            WORK_WINDOW_CONFIG,
+            f"usage_windows.{WORK_EMAIL} matches more than one account",
+            id="ambiguous",
+        ),
+        pytest.param(
+            f'[usage_windows]\nclaude = ["6am"]\n"{NORMAL_EMAIL}" = ["8am"]\n',
+            f"usage_windows.{NORMAL_EMAIL} lists the same account as usage_windows.claude",
+            id="normal-login-twice",
+        ),
+        pytest.param(
+            f'[usage_windows]\n"{NORMAL_EMAIL}" = ["6am"]\n"0" = ["8am"]\n',
+            f"usage_windows.0 lists the same account as usage_windows.{NORMAL_EMAIL}",
+            id="email-and-number",
+        ),
+    ],
+)
+def test_invalid_account_window_entry_fails(add_account, fake_commands, config_text, error):
+    add_account()
+    add_account(WORK_EMAIL, "org-other", "Other")
+    support.write_config_text(config_text)
+
+    with pytest.raises(SystemExit, match=error):
+        cli.main(["window", "open"])
+
+    assert window_config_directories(fake_commands) == []
+
+
+@pytest.mark.parametrize(
+    ("config_text", "is_warned"),
+    [
+        pytest.param(f'[usage_windows]\n"{WORK_EMAIL.upper()}" = ["6am"]\n', True, id="email"),
+        pytest.param('[usage_windows]\n"1" = ["6am"]\n', True, id="number"),
+        pytest.param('[usage_windows]\nclaude = ["6am"]\n', False, id="other-key"),
+        pytest.param("[usage_windows\n", False, id="unparseable"),
+    ],
+)
+def test_remove_warns_when_usage_windows_lists_account(add_account, capsys, config_text, is_warned):
+    add_account()
+    support.write_config_text(config_text)
+
+    assert cli.main(["account", "remove", WORK_EMAIL]) == 0
+
+    assert ("still lists" in capsys.readouterr().err) == is_warned
+    assert not accounts.account_directory(1).exists()
+
+
+def test_backend_window_keys_skip_account_lookup(fake_commands):
+    support.write_config_text('[usage_windows]\nclaude = ["6am"]\n')
+
+    usage_windows.usage_window_entries(dict(os.environ))
+
+    assert auth_calls(fake_commands) == []
+
+
+def test_agent_opens_normal_login_email_window_with_launchd_path(
+    installed_launch_agent, monkeypatch, fake_commands
+):
+    window_time = support.current_minute_window_time()
+    support.write_config_text(f'[usage_windows]\n"{NORMAL_EMAIL}" = ["{window_time}"]\n')
+    monkeypatch.setenv("PATH", support.LAUNCHD_PATH)
+
+    assert launch_agent.run_launch_agent() == 0
+
+    assert window_config_directories(fake_commands) == [""]

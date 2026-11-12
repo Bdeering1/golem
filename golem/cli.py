@@ -162,18 +162,22 @@ def task_id_from_arguments(arguments: ledger.Arguments) -> str:
     return arguments.id
 
 
+def require_claude_account_backend(backend_id: str, agent_args: list[str]) -> None:
+    agent_backend_id = registry.agent_backend_id(backend_id, agent_args)
+    if agent_backend_id != ledger.BACKEND_CLAUDE:
+        raise SystemExit(
+            "golem: --account supports only Claude tasks, "
+            f"not {registry.BACKENDS[agent_backend_id].NAME} tasks"
+        )
+
+
 def run_task_from_arguments(arguments: ledger.Arguments) -> int:
-    usage_windows.usage_window_times()
+    usage_windows.usage_window_entries(os.environ.copy())
     default_backend = load_default_backend()
     arguments.backend = arguments.backend or default_backend
     backend = registry.BACKENDS[arguments.backend]
     if arguments.account is not None:
-        agent_backend_id = registry.agent_backend_id(arguments.backend, list(arguments.agent_args))
-        if agent_backend_id != ledger.BACKEND_CLAUDE:
-            raise SystemExit(
-                "golem: --account supports only Claude tasks, "
-                f"not {registry.BACKENDS[agent_backend_id].NAME} tasks"
-            )
+        require_claude_account_backend(arguments.backend, list(arguments.agent_args))
     account = accounts.task_account_number(arguments.account)
     default_clients = load_default_clients()
     auto_pickup_client = default_clients.get(arguments.backend) if arguments.auto_pickup else None
@@ -251,10 +255,13 @@ def add_worktree_commands(add_parser: Callable[..., argparse.ArgumentParser]) ->
 
 
 def open_usage_window_from_arguments(arguments: ledger.Arguments) -> int:
-    usage_windows.usage_window_times()
-    default_backend = load_default_backend()
-    backend = registry.usage_backend(arguments.backend or default_backend, [])
-    error = backend.open_usage_window(os.environ.copy())
+    usage_windows.usage_window_entries(os.environ.copy())
+    backend_id = arguments.backend or load_default_backend()
+    if arguments.account is not None:
+        require_claude_account_backend(backend_id, [])
+    account = accounts.task_account_number(arguments.account)
+    backend = registry.usage_backend(backend_id, [])
+    error = backend.open_usage_window(accounts.account_environment(os.environ.copy(), account))
     if error is not None:
         raise SystemExit(f"golem: could not open {backend.NAME} usage window: {error}")
     print(f"golem: opened {backend.NAME} usage window")
@@ -266,6 +273,9 @@ def add_window_commands(add_parser: Callable[..., argparse.ArgumentParser]) -> N
     window_commands = window_command.add_subparsers(dest="window_command", required=True)
     open_window_command = window_commands.add_parser("open")
     open_window_command.add_argument("--backend", choices=tuple(registry.USAGE_BACKENDS))
+    open_window_command.add_argument(
+        "--account", metavar="EMAIL", help="open the window on this Claude account"
+    )
     set_command_handler(open_window_command, open_usage_window_from_arguments)
 
 

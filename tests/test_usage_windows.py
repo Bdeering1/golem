@@ -11,10 +11,9 @@ from golem.backends import claude
 from tests import support
 
 WINDOW_ERROR = "rate limited"
-LAUNCHD_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 INVALID_CONFIGS = [
     pytest.param("usage_windows = 1\n", "usage_windows", id="not-a-table"),
-    pytest.param('[usage_windows]\nt3 = ["6am"]\n', "usage_windows.t3", id="unknown-key"),
+    pytest.param('[usage_windows]\nt3 = ["6am"]\n', "usage_windows.t3", id="unknown-account"),
     pytest.param('[usage_windows]\nclaude = "6am"\n', "usage_windows.claude", id="not-a-list"),
     pytest.param('[usage_windows]\nclaude = ["25am"]\n', "usage_windows.claude", id="bad-time"),
     pytest.param(
@@ -45,7 +44,9 @@ def local_now(hour: int, minute: int, *, day: int = 1) -> datetime:
 
 
 def open_windows(now: datetime, window_time: time = time(6)) -> None:
-    usage_windows.open_due_usage_windows({ledger.BACKEND_CLAUDE: [window_time]}, {}, now)
+    usage_windows.open_due_usage_windows(
+        [usage_windows.UsageWindowEntry(ledger.BACKEND_CLAUDE, None, [window_time])], {}, now
+    )
 
 
 @pytest.mark.parametrize(
@@ -171,7 +172,7 @@ def test_agent_logs_invalid_config_and_still_starts_due_tasks(
 
 
 def write_current_minute_window_config() -> None:
-    window_time = f"{datetime.now().astimezone():%I:%M%p}".lstrip("0").lower()
+    window_time = support.current_minute_window_time()
     support.write_config_text(f'[usage_windows]\nclaude = ["{window_time}"]\n')
 
 
@@ -179,7 +180,7 @@ def test_agent_opens_due_window_with_saved_agent_environment(
     installed_launch_agent, monkeypatch, fake_commands
 ):
     write_current_minute_window_config()
-    monkeypatch.setenv("PATH", LAUNCHD_PATH)
+    monkeypatch.setenv("PATH", support.LAUNCHD_PATH)
 
     assert launch_agent.run_launch_agent() == 0
 
