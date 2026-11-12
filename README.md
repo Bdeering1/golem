@@ -41,6 +41,9 @@ golem run fix-signup "Fix the signup redirect" --backend codex --at 9pm
 # Run as a T3 Code thread with Codex. --provider defaults to claude
 golem run fix-logout "Fix the logout redirect" --backend t3 -- --provider codex --model gpt-6-astra
 
+# Run on another Claude account, after signing in with golem account add claude
+golem run fix-billing "Fix the billing page" --account work@example.com
+
 # The script must print {"directory": "<path>"} for the task to run in
 # The review runs if the tests pass (exit code of zero). Arguments after -- go to the agent
 golem run add-auth "Add password reset" \
@@ -50,22 +53,6 @@ golem run add-auth "Add password reset" \
   --then review-auth "Review the password reset changes and fix what you find" \
   -- --permission-mode auto
 ```
-
-## Claude accounts
-
-Tasks run on your normal Claude Code login. To run some on another account:
-
-```bash
-# Sign in to another Claude account
-golem account add claude
-
-# Run on that account. A unique prefix of the email works too
-golem run fix-billing "Fix the billing page" --account work@example.com
-```
-
-Other accounts share your instructions, settings, skills, plugins and transcripts. They don't get settings that Claude keeps only in `.claude.json`, such as user-scope MCP servers and per-project tool approvals.
-
-In T3 Code, each account shows up as its own Claude provider, and `golem account remove` opens T3 Code to remove it.
 
 ## Commands
 
