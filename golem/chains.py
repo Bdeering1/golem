@@ -46,6 +46,13 @@ def has_unreviewed_dependent(tasks: ledger.Tasks, parent_id: str) -> bool:
     )
 
 
+def is_ready_for_review(tasks: ledger.Tasks, task_id: str) -> bool:
+    task = tasks[task_id]
+    return task.get("status") == ledger.STATUS_NEEDS_REVIEW and (
+        "gate_stop_reason" in task or not has_unreviewed_dependent(tasks, task_id)
+    )
+
+
 def mark_ancestors_done(tasks: ledger.Tasks, task: ledger.Task) -> None:
     ancestor = tasks.get(task.get("after", ""))
     while ancestor is not None:

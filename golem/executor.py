@@ -259,7 +259,7 @@ def execute_task(task_id: str, task: ledger.Task, lock_file_descriptors: tuple[i
             notifications.notify_task(task_id, stored_task, notifications.OUTCOME_FAILED)
         elif outcome.stop_reason is not None:
             notifications.notify_task(task_id, stored_task, notifications.OUTCOME_GATE_STOPPED)
-        elif review.is_ready_for_review(tasks, task_id):
+        elif chains.is_ready_for_review(tasks, task_id):
             notifications.notify_task(task_id, stored_task, notifications.OUTCOME_NEEDS_REVIEW)
     return outcome.returncode
 

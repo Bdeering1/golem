@@ -153,7 +153,12 @@ def list_rows(tasks: ledger.Tasks, today: date) -> list[ListRow]:
         listed_ids |= chain_ids
         depths = {chain_id: chains.task_depth(tasks, chain_id) for chain_id in chain_ids}
         shown_id = max(
-            chain_ids,
+            (
+                chain_id
+                for chain_id in chain_ids
+                if tasks[chain_id]["status"] != ledger.STATUS_NEEDS_REVIEW
+                or chains.is_ready_for_review(tasks, chain_id)
+            ),
             key=lambda chain_id: (
                 -ledger.LIST_STATUS_ORDER.index(tasks[chain_id]["status"]),
                 depths[chain_id],
