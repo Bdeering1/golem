@@ -10,6 +10,9 @@ from typing import cast
 from golem import cli, config, git, ledger, spawn, task_directories
 from golem.backends import claude
 
+NORMAL_EMAIL = "me@example.com"
+WORK_EMAIL = "work@example.com"
+CREDENTIALS = ".credentials.json"
 TASK_ID = "fix-thing"
 PROMPT = "fix the thing"
 PARENT_ID = "parent"
@@ -280,3 +283,11 @@ def write_transcript(session_id, idle_days):
 
 def current_minute_window_time() -> str:
     return f"{datetime.now().astimezone():%I:%M%p}".lstrip("0").lower()
+
+
+def status_text(email: str, org_id: str, org_name: str) -> str:
+    return json.dumps({"loggedIn": True, "email": email, "orgId": org_id, "orgName": org_name})
+
+
+def auth_calls(fake_commands):
+    return fake_commands["claude-auth"].read_text(encoding="utf-8").splitlines()

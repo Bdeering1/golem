@@ -340,3 +340,27 @@ def server(monkeypatch, tmp_path):
     monkeypatch.setattr(t3_code, "update_settings_exit", fake_server.update_settings_exit)
     monkeypatch.setattr(t3_code, "thread_projection", fake_server.thread_projection)
     return fake_server
+
+
+@pytest.fixture
+def claude_config_directory():
+    directory = Path.home() / ".claude"
+    directory.mkdir(parents=True)
+    (directory / support.CREDENTIALS).write_text(
+        support.status_text(support.NORMAL_EMAIL, "org-personal", "Personal"), encoding="utf-8"
+    )
+    (directory / "settings.json").write_text("{}", encoding="utf-8")
+    return directory
+
+
+@pytest.fixture
+def add_account(monkeypatch, tmp_path, claude_config_directory):
+    def add(
+        email: str = support.WORK_EMAIL, org_id: str = "org-work", org_name: str = "Work"
+    ) -> int:
+        login_path = tmp_path / "login.json"
+        login_path.write_text(support.status_text(email, org_id, org_name), encoding="utf-8")
+        monkeypatch.setenv("GOLEM_CLAUDE_LOGIN", str(login_path))
+        return cli.main(["account", "add", "claude"])
+
+    return add
