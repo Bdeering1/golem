@@ -2,7 +2,7 @@
 
 golem is an orchestrator for coding agents.
 
-Queue agent sessions, chain them together, run them on different accounts and schedule them around your usage limits. golem runs them in the background, each in its own git worktree, and notifies you when one needs review. Setup scripts, gates and aliases let you build your own workflows on top.
+Queue agent sessions, chain them together, run them on different accounts, and schedule them around your usage limits. golem runs them in the background, each in its own git worktree, and notifies you when one needs review. Setup scripts, gates, and aliases let you build your own workflows on top.
 
 ## Install
 
@@ -65,7 +65,7 @@ golem run add-auth "Add password reset" \
 | `golem show` | Prints a task's final result |
 | `golem pickup` | Opens a task's session and marks the task done |
 | `golem prune` | Cleans up cancelled and finished tasks |
-| `golem account` | Adds, lists and removes Claude accounts |
+| `golem account` | Adds, lists, and removes Claude accounts |
 
 `golem --help` lists the rest.
 
