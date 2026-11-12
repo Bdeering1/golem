@@ -60,6 +60,7 @@ def test_pickup_attaches_claude_session_to_thread_and_opens_it(
     assert fake_commands["open-args"].read_text(encoding="utf-8") == (
         f"{t3_support.thread_link(t3_support.CLAUDE_THREAD_ID)}\n"
     )
+    assert server.settings_mutations == []
     task = support.read_task(ledger_path)
     assert task["status"] == ledger.STATUS_DONE
     assert task["t3_code_thread_id"] == t3_support.CLAUDE_THREAD_ID

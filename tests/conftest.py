@@ -336,5 +336,6 @@ def server(monkeypatch, tmp_path):
     fake_server.mark_running()
     monkeypatch.setattr(t3_code, "fetch_projects", fake_server.fetch_projects)
     monkeypatch.setattr(t3_code, "dispatch_command_exit", fake_server.dispatch_command_exit)
+    monkeypatch.setattr(t3_code, "update_settings_exit", fake_server.update_settings_exit)
     monkeypatch.setattr(t3_code, "thread_projection", fake_server.thread_projection)
     return fake_server

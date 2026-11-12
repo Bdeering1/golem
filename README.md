@@ -65,6 +65,8 @@ golem run fix-billing "Fix the billing page" --account work@example.com
 
 Other accounts share your instructions, settings, skills, plugins and transcripts. They don't get settings that Claude keeps only in `.claude.json`, such as user-scope MCP servers and per-project tool approvals.
 
+In T3 Code, each account shows up as its own Claude provider, and `golem account remove` opens T3 Code to remove it.
+
 ## Commands
 
 | Command | What it does |

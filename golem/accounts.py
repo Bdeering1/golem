@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, TypedDict, cast
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-from golem import ledger
+from golem import ledger, t3_code
 
 CONFIG_DIRECTORY_VARIABLE = "CLAUDE_CONFIG_DIR"
 TOKEN_VARIABLES = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY")
@@ -20,6 +20,7 @@ NORMAL_LOGIN_NUMBER = 0
 UNKNOWN = "unknown"
 CLAUDE_AUTH_COMMAND = ("claude", "auth")
 ACCOUNT_LABEL = "{email} ({org_name})"
+T3_INSTANCE_ID_TEMPLATE = "golem-claude-{number}"
 
 
 class Account(TypedDict):
@@ -84,6 +85,22 @@ def account_environment(environment: dict[str, str], account_number: int | None)
         environment.pop(name, None)
     environment[CONFIG_DIRECTORY_VARIABLE] = str(shadow_directory)
     return environment
+
+
+def t3_instance_id(number: int) -> str:
+    return T3_INSTANCE_ID_TEMPLATE.format(number=number)
+
+
+def t3_claude_instance(account_number: int | None) -> t3_code.ClaudeInstance | None:
+    if account_number is None:
+        return None
+    environment = account_environment(os.environ.copy(), account_number)
+    account = load_account_records()["accounts"][str(account_number)]
+    return t3_code.ClaudeInstance(
+        t3_instance_id(account_number),
+        ACCOUNT_LABEL.format_map(account),
+        environment[CONFIG_DIRECTORY_VARIABLE],
+    )
 
 
 def logged_in_account(environment: dict[str, str]) -> Account | None:
@@ -228,6 +245,12 @@ def remove_account(value: str) -> int:
         raise SystemExit(
             f"golem: account is used by unfinished tasks: {', '.join(unfinished_task_ids)}"
         )
+    try:
+        t3_code.remove_claude_instance(t3_instance_id(number))
+    except t3_code.T3_CODE_ERRORS as error:
+        raise SystemExit(
+            f"golem: T3 Code could not remove the account: {error}; the account was not removed"
+        ) from error
     if run_auth_logout(account_environment(os.environ.copy(), number)) != 0:
         raise SystemExit("golem: Claude logout failed; the account was not removed")
     shutil.rmtree(account_directory(number))

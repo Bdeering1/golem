@@ -5,6 +5,7 @@ import subprocess
 import sys
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from urllib import parse
@@ -27,6 +28,13 @@ DEFAULT_MODELS = {"claudeAgent": "claude-opus-5-5", "codex": "gpt-6-astra"}
 
 class T3CodeError(Exception):
     pass
+
+
+@dataclass(frozen=True)
+class ClaudeInstance:
+    instance_id: str
+    display_name: str
+    home_path: str
 
 
 T3_CODE_ERRORS = (
@@ -164,6 +172,28 @@ def dispatch_command(origin: str, token: str, command: ledger.JsonObject) -> Non
     successful_value(dispatch_command_exit(origin, token, command))
 
 
+def update_settings_exit(origin: str, token: str, mutation: ledger.JsonObject) -> ledger.JsonObject:
+    return rpc_exit(
+        origin,
+        token,
+        "server.updateSettings",
+        {"patch": {}, "providerInstanceMutation": mutation},
+    )
+
+
+def upsert_claude_instance(origin: str, token: str, instance: ClaudeInstance) -> None:
+    mutation: ledger.JsonObject = {
+        "operation": "upsert",
+        "instanceId": instance.instance_id,
+        "instance": {
+            "driver": INSTANCE_IDS[ledger.BACKEND_CLAUDE],
+            "displayName": instance.display_name,
+            "config": {"homePath": instance.home_path},
+        },
+    }
+    successful_value(update_settings_exit(origin, token, mutation))
+
+
 def thread_projection(origin: str, token: str, thread_id: str) -> ledger.JsonObject:
     projection_exit = rpc_exit(
         origin, token, "orchestration.getThreadProjection", {"threadId": thread_id}
@@ -253,21 +283,28 @@ def thread_create_command(
     }
 
 
-def ensure_thread(task: ledger.Task, conversation_id: str, thread_id: str) -> None:
+def ensure_thread(
+    task: ledger.Task, conversation_id: str, thread_id: str, instance: ClaudeInstance | None
+) -> None:
     if not server_runtime_path().exists():
         start_app()
+    origin = server_origin()
+    token = None
+    if instance is not None:
+        token = issue_token()
+        upsert_claude_instance(origin, token, instance)
     if is_thread_present(thread_id):
         return
     if task["backend"] == ledger.BACKEND_T3:
         raise T3CodeError("thread does not exist in T3 Code")
-    origin = server_origin()
-    token = issue_token()
-    instance_id = INSTANCE_IDS[task["backend"]]
+    token = token or issue_token()
+    driver = INSTANCE_IDS[task["backend"]]
+    instance_id = driver if instance is None else instance.instance_id
     command = thread_create_command(
-        origin, token, task, thread_id, instance_id, default_model(instance_id)
+        origin, token, task, thread_id, instance_id, default_model(driver)
     )
     command["importedNativeThread"] = {
-        "ref": {"driver": instance_id, "nativeId": conversation_id, "strength": "strong"}
+        "ref": {"driver": driver, "nativeId": conversation_id, "strength": "strong"}
     }
     dispatch_command(origin, token, command)
     if not is_thread_present(thread_id):
@@ -278,13 +315,15 @@ def version() -> str:
     return run_t3("--version").stdout.strip()
 
 
-def prepare_thread(task: ledger.Task, conversation_id: str) -> None:
+def prepare_thread(
+    task: ledger.Task, conversation_id: str, instance: ClaudeInstance | None
+) -> None:
     cli_path = t3_cli_path()
     if not cli_path.exists():
         raise SystemExit(f"golem: T3 Code is not installed: {cli_path} not found")
     thread_id = task_thread_id(task, conversation_id)
     try:
-        ensure_thread(task, conversation_id, thread_id)
+        ensure_thread(task, conversation_id, thread_id, instance)
     except T3_CODE_ERRORS as error:
         raise SystemExit(
             f"golem: T3 Code {version()} could not open thread {thread_id}: {error}"
@@ -336,3 +375,12 @@ def delete_threads(thread_ids: list[str]) -> None:
             )
         except T3_CODE_ERRORS as error:
             print_delete_failure(thread_id, error)
+
+
+def remove_claude_instance(instance_id: str) -> None:
+    if not t3_cli_path().exists():
+        return
+    if not is_running():
+        start_app()
+    mutation: ledger.JsonObject = {"operation": "remove", "instanceId": instance_id}
+    successful_value(update_settings_exit(server_origin(), issue_token(), mutation))

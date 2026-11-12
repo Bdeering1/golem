@@ -167,8 +167,12 @@ def run_task_from_arguments(arguments: ledger.Arguments) -> int:
     default_backend = load_default_backend()
     arguments.backend = arguments.backend or default_backend
     backend = registry.BACKENDS[arguments.backend]
-    if arguments.account is not None and arguments.backend != ledger.BACKEND_CLAUDE:
-        raise SystemExit(f"golem: --account supports only Claude tasks, not {backend.NAME} tasks")
+    agent_backend_id = registry.agent_backend_id(arguments.backend, list(arguments.agent_args))
+    if arguments.account is not None and agent_backend_id != ledger.BACKEND_CLAUDE:
+        raise SystemExit(
+            "golem: --account supports only Claude tasks, "
+            f"not {registry.BACKENDS[agent_backend_id].NAME} tasks"
+        )
     account = accounts.task_account_number(arguments.account)
     default_clients = load_default_clients()
     auto_pickup_client = default_clients.get(arguments.backend) if arguments.auto_pickup else None
