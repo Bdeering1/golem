@@ -287,10 +287,12 @@ def remove_account(value: str) -> int:
     account = records["accounts"].pop(str(number))
     ledger.save_json(account_records_path(), records)
     print(f"golem: removed {ACCOUNT_LABEL.format_map(account)}")
-    if any(key.lower() in {account["email"].lower(), str(number)} for key in usage_window_keys()):
+    for key in usage_window_keys():
+        if key.lower() != account["email"].lower() and not (key.isdecimal() and int(key) == number):
+            continue
         print(
-            f"golem: warning: [usage_windows] still lists {account['email']}; "
-            f"remove it from {config.config_path()}",
+            f"golem: warning: usage_windows.{key} in {config.config_path()} "
+            "names the removed account. Delete that entry.",
             file=sys.stderr,
         )
     return 0

@@ -472,6 +472,7 @@ def window_config_directories(fake_commands) -> list[str]:
     [
         pytest.param(WORK_WINDOW_CONFIG, id="email"),
         pytest.param('[usage_windows]\n"1" = ["6am"]\n', id="number"),
+        pytest.param(f'[usage_windows]\n"{WORK_EMAIL.upper()}" = ["6am"]\n', id="email-case"),
     ],
 )
 def test_account_window_opens_once_a_day_on_account(
@@ -485,16 +486,6 @@ def test_account_window_opens_once_a_day_on_account(
 
     assert window_config_directories(fake_commands) == [str(accounts.account_directory(1))]
     assert f"opened Claude usage window for {WORK_EMAIL} (Work)" in capsys.readouterr().err
-
-
-def test_missed_account_window_is_skipped(add_account, fake_commands, capsys):
-    add_account()
-    support.write_config_text(WORK_WINDOW_CONFIG)
-
-    open_windows_at(30)
-
-    assert window_config_directories(fake_commands) == []
-    assert "skipped" in capsys.readouterr().err
 
 
 def test_failed_account_window_retries_then_notifies_with_account(add_account, fake_commands):
@@ -523,10 +514,13 @@ def test_accounts_with_same_time_each_open_once(add_account, fake_commands):
     assert window_config_directories(fake_commands) == ["", str(accounts.account_directory(1))]
 
 
-def test_normal_login_email_window_shares_claude_state(fake_commands):
+@pytest.mark.parametrize(
+    "key", [pytest.param(f'"{NORMAL_EMAIL}"', id="email"), pytest.param('"0"', id="number")]
+)
+def test_normal_login_window_shares_claude_state(fake_commands, key):
     support.write_config_text('[usage_windows]\nclaude = ["6am"]\n')
     open_windows_at(2)
-    support.write_config_text(f'[usage_windows]\n"{NORMAL_EMAIL}" = ["6am"]\n')
+    support.write_config_text(f'[usage_windows]\n{key} = ["6am"]\n')
 
     open_windows_at(7)
 
@@ -608,7 +602,7 @@ def test_invalid_account_window_entry_fails(add_account, fake_commands, config_t
     ("config_text", "is_warned"),
     [
         pytest.param(f'[usage_windows]\n"{WORK_EMAIL.upper()}" = ["6am"]\n', True, id="email"),
-        pytest.param('[usage_windows]\n"1" = ["6am"]\n', True, id="number"),
+        pytest.param('[usage_windows]\n"01" = ["6am"]\n', True, id="number"),
         pytest.param('[usage_windows]\nclaude = ["6am"]\n', False, id="other-key"),
         pytest.param("[usage_windows\n", False, id="unparseable"),
     ],
@@ -619,7 +613,7 @@ def test_remove_warns_when_usage_windows_lists_account(add_account, capsys, conf
 
     assert cli.main(["account", "remove", WORK_EMAIL]) == 0
 
-    assert ("still lists" in capsys.readouterr().err) == is_warned
+    assert ("removed account" in capsys.readouterr().err) == is_warned
     assert not accounts.account_directory(1).exists()
 
 

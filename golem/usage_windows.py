@@ -58,7 +58,7 @@ def parsed_time(value: str) -> tuple[time, bool] | None:
     return time_of_day, tomorrow is not None
 
 
-def extra_account(
+def resolved_extra_account(
     matches: list[tuple[int, accounts.Account | None]], entry_message_prefix: str
 ) -> tuple[int, accounts.Account] | None:
     if len(matches) > 1:
@@ -78,22 +78,23 @@ def usage_window_entries(environment: dict[str, str]) -> list[UsageWindowEntry]:
         raise SystemExit(f"{message_prefix} must be a table")
     window_entries: list[UsageWindowEntry] = []
     keys_by_account: dict[tuple[str, int | None], str] = {}
+    account_records = accounts.load_account_records()
     for key, values in cast("dict[str, object]", table).items():
         entry_message_prefix = f"{message_prefix}.{key}"
         backend_id, account = key, None
         if key not in registry.USAGE_BACKENDS:
             matches = accounts.matching_accounts(
-                key, accounts.load_account_records(), environment, is_prefix_allowed=False
+                key, account_records, environment, is_prefix_allowed=False
             )
             if not matches:
                 print(
-                    f"golem: warning: skipped usage_windows.{key} in {config.config_path()} "
-                    "because it matches no Claude account",
+                    f"golem: warning: usage_windows.{key} in {config.config_path()} "
+                    "matches no Claude account, so golem won't open its windows",
                     file=sys.stderr,
                 )
                 continue
             backend_id = ledger.BACKEND_CLAUDE
-            account = extra_account(matches, entry_message_prefix)
+            account = resolved_extra_account(matches, entry_message_prefix)
         account_number = None if account is None else account[0]
         other_key = keys_by_account.get((backend_id, account_number))
         if other_key is not None:
