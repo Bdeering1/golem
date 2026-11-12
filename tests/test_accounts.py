@@ -1,47 +1,13 @@
-import json
-from pathlib import Path
-
 import pytest
 
 from golem import accounts, cli, executor, ledger, t3_code
 from golem.backends import claude
 from tests import support, t3_support
 
-NORMAL_EMAIL = "me@example.com"
-WORK_EMAIL = "work@example.com"
 SOLO_EMAIL = "solo@example.com"
-CREDENTIALS = ".credentials.json"
 T3_INSTANCE_ID = "golem-claude-1"
 
-
-def status_text(email: str, org_id: str, org_name: str) -> str:
-    return json.dumps({"loggedIn": True, "email": email, "orgId": org_id, "orgName": org_name})
-
-
-@pytest.fixture(autouse=True)
-def claude_config_directory():
-    directory = Path.home() / ".claude"
-    directory.mkdir(parents=True)
-    (directory / CREDENTIALS).write_text(
-        status_text(NORMAL_EMAIL, "org-personal", "Personal"), encoding="utf-8"
-    )
-    (directory / "settings.json").write_text("{}", encoding="utf-8")
-    return directory
-
-
-@pytest.fixture
-def add_account(monkeypatch, tmp_path):
-    def add(email: str = WORK_EMAIL, org_id: str = "org-work", org_name: str = "Work") -> int:
-        login_path = tmp_path / "login.json"
-        login_path.write_text(status_text(email, org_id, org_name), encoding="utf-8")
-        monkeypatch.setenv("GOLEM_CLAUDE_LOGIN", str(login_path))
-        return cli.main(["account", "add", "claude"])
-
-    return add
-
-
-def auth_calls(fake_commands):
-    return fake_commands["claude-auth"].read_text(encoding="utf-8").splitlines()
+pytestmark = pytest.mark.usefixtures("claude_config_directory")
 
 
 def last_agent_environment(fake_commands):
@@ -54,7 +20,7 @@ def t3_upsert_mutation():
         "instanceId": T3_INSTANCE_ID,
         "instance": {
             "driver": "claudeAgent",
-            "displayName": f"{WORK_EMAIL} (Work)",
+            "displayName": f"{support.WORK_EMAIL} (Work)",
             "config": {"homePath": str(accounts.account_directory(1))},
         },
     }
@@ -69,22 +35,28 @@ def run_and_execute(ledger_path, *arguments: str):
 def test_add_records_account_and_links_shared_entries(add_account, claude_config_directory):
     assert add_account() == 0
 
-    assert accounts.resolved_account_number(WORK_EMAIL) == 1
+    assert accounts.resolved_account_number(support.WORK_EMAIL) == 1
     shadow_directory = accounts.account_directory(1)
     assert (shadow_directory / "settings.json").resolve() == (
         claude_config_directory / "settings.json"
     ).resolve()
-    assert not (shadow_directory / CREDENTIALS).is_symlink()
+    assert not (shadow_directory / support.CREDENTIALS).is_symlink()
 
 
 @pytest.mark.parametrize(
     ("existing_accounts", "login_exit", "new_account", "is_duplicate"),
     [
-        pytest.param(0, "1", (WORK_EMAIL, "org-work", "Work"), False, id="failed-login"),
+        pytest.param(0, "1", (support.WORK_EMAIL, "org-work", "Work"), False, id="failed-login"),
         pytest.param(
-            0, "0", (NORMAL_EMAIL, "org-personal", "Personal"), True, id="normal-login-duplicate"
+            0,
+            "0",
+            (support.DEFAULT_EMAIL, "org-personal", "Personal"),
+            True,
+            id="default-account-duplicate",
         ),
-        pytest.param(1, "0", (WORK_EMAIL, "org-work", "Work"), True, id="account-duplicate"),
+        pytest.param(
+            1, "0", (support.WORK_EMAIL, "org-work", "Work"), True, id="account-duplicate"
+        ),
     ],
 )
 def test_refused_add_removes_directory(
@@ -106,32 +78,32 @@ def test_refused_add_removes_directory(
     assert not accounts.account_directory(existing_accounts + 1).exists()
     with pytest.raises(SystemExit):
         accounts.resolved_account_number(str(existing_accounts + 1))
-    assert ("logout" in auth_calls(fake_commands)) == is_duplicate
+    assert ("logout" in support.auth_calls(fake_commands)) == is_duplicate
 
 
-def test_list_shows_normal_login_and_accounts(add_account, capsys):
+def test_list_shows_default_and_extra_accounts(add_account, capsys):
     add_account()
-    add_account(WORK_EMAIL, "org-other", "Other")
+    add_account(support.WORK_EMAIL, "org-other", "Other")
     capsys.readouterr()
 
     assert cli.main(["account", "list"]) == 0
 
     assert [line.split() for line in capsys.readouterr().out.splitlines()] == [
-        [NORMAL_EMAIL, "Personal", "0"],
-        [WORK_EMAIL, "Work", "1"],
-        [WORK_EMAIL, "Other", "2"],
+        [support.DEFAULT_EMAIL, "Personal", "0"],
+        [support.WORK_EMAIL, "Work", "1"],
+        [support.WORK_EMAIL, "Other", "2"],
     ]
 
 
 def test_remove_logs_out_and_deletes_account(add_account, fake_commands):
     add_account()
 
-    assert cli.main(["account", "remove", WORK_EMAIL]) == 0
+    assert cli.main(["account", "remove", support.WORK_EMAIL]) == 0
 
     assert not accounts.account_directory(1).exists()
     with pytest.raises(SystemExit):
         accounts.resolved_account_number("1")
-    assert "logout" in auth_calls(fake_commands)
+    assert "logout" in support.auth_calls(fake_commands)
 
 
 def test_remove_refuses_while_unfinished_task_uses_account(add_account, ledger_path):
@@ -139,7 +111,7 @@ def test_remove_refuses_while_unfinished_task_uses_account(add_account, ledger_p
     support.write_task(ledger_path, ledger.STATUS_NEEDS_REVIEW, account=1)
 
     with pytest.raises(SystemExit, match=support.TASK_ID):
-        cli.main(["account", "remove", WORK_EMAIL])
+        cli.main(["account", "remove", support.WORK_EMAIL])
 
     assert accounts.account_directory(1).is_dir()
 
@@ -150,14 +122,14 @@ def test_remove_refuses_while_unfinished_task_uses_account(add_account, ledger_p
         pytest.param(SOLO_EMAIL.upper(), 3, id="full-email"),
         pytest.param("solo", 3, id="prefix"),
         pytest.param("2", 2, id="number"),
-        pytest.param(NORMAL_EMAIL, None, id="normal-login"),
+        pytest.param(support.DEFAULT_EMAIL, None, id="default-account"),
     ],
 )
 def test_run_account_selects_account(
     installed_launch_agent, add_account, ledger_path, value, expected_account
 ):
     add_account()
-    add_account(WORK_EMAIL, "org-other", "Other")
+    add_account(support.WORK_EMAIL, "org-other", "Other")
     add_account(SOLO_EMAIL, "org-solo", "Solo")
 
     assert cli.main(["run", support.TASK_ID, support.PROMPT, "--now", "--account", value]) == 0
@@ -168,7 +140,7 @@ def test_run_account_selects_account(
 @pytest.mark.parametrize(
     ("value", "expected_numbers"),
     [
-        pytest.param(WORK_EMAIL, ["1", "2"], id="ambiguous"),
+        pytest.param(support.WORK_EMAIL, ["1", "2"], id="ambiguous"),
         pytest.param("nobody", [], id="unknown"),
     ],
 )
@@ -176,7 +148,7 @@ def test_run_account_refuses_before_ledger_changes(
     installed_launch_agent, add_account, ledger_path, value, expected_numbers
 ):
     add_account()
-    add_account(WORK_EMAIL, "org-other", "Other")
+    add_account(support.WORK_EMAIL, "org-other", "Other")
     support.write_task(ledger_path, ledger.STATUS_DONE)
     tasks = support.read_tasks(ledger_path)
 
@@ -194,19 +166,21 @@ def test_start_links_new_entries_and_keeps_private_entries(
     (claude_config_directory / "skills").mkdir()
     (claude_config_directory / ".claude.json").write_text("{}", encoding="utf-8")
 
-    run_and_execute(ledger_path, "--account", WORK_EMAIL)
+    run_and_execute(ledger_path, "--account", support.WORK_EMAIL)
 
     shadow_directory = accounts.account_directory(1)
     assert (shadow_directory / "skills").is_symlink()
     assert not (shadow_directory / ".claude.json").exists()
-    assert WORK_EMAIL in (shadow_directory / CREDENTIALS).read_text(encoding="utf-8")
+    assert support.WORK_EMAIL in (shadow_directory / support.CREDENTIALS).read_text(
+        encoding="utf-8"
+    )
 
 
 @pytest.mark.parametrize(
     ("account_arguments", "expected_environment"),
     [
-        pytest.param(["--account", WORK_EMAIL], "{shadow}||", id="account"),
-        pytest.param([], "|token|token", id="normal-login-drops-leaked-config"),
+        pytest.param(["--account", support.WORK_EMAIL], "{shadow}||", id="account"),
+        pytest.param([], "|token|token", id="default-account-drops-leaked-config"),
     ],
 )
 def test_agent_environment_uses_task_account(
@@ -236,14 +210,17 @@ def test_gate_runs_on_task_account(installed_launch_agent, add_account, ledger_p
     output_path = tmp_path / "gate-config"
 
     support.run_gated_chain(
-        ledger_path, f'printf %s "$CLAUDE_CONFIG_DIR" > {output_path}', "--account", WORK_EMAIL
+        ledger_path,
+        f'printf %s "$CLAUDE_CONFIG_DIR" > {output_path}',
+        "--account",
+        support.WORK_EMAIL,
     )
 
     assert output_path.read_text(encoding="utf-8") == str(accounts.account_directory(1))
 
 
 def schedule_account_run(ledger_path) -> None:
-    assert cli.main(["run", support.TASK_ID, support.PROMPT, "--account", WORK_EMAIL]) == 0
+    assert cli.main(["run", support.TASK_ID, support.PROMPT, "--account", support.WORK_EMAIL]) == 0
 
 
 def pause_usage_limited_account_task(ledger_path) -> None:
@@ -257,7 +234,15 @@ def retry_account_task(ledger_path) -> None:
 
 
 def schedule_t3_account_run(ledger_path) -> None:
-    command = ["run", support.TASK_ID, support.PROMPT, "--backend", "t3", "--account", WORK_EMAIL]
+    command = [
+        "run",
+        support.TASK_ID,
+        support.PROMPT,
+        "--backend",
+        "t3",
+        "--account",
+        support.WORK_EMAIL,
+    ]
     assert cli.main(command) == 0
 
 
@@ -298,7 +283,7 @@ def test_usage_lookup_runs_on_task_account(
 def test_then_follow_up_uses_run_account(installed_launch_agent, add_account, ledger_path):
     add_account()
 
-    support.schedule_gated_chain(ledger_path, "true", "--account", WORK_EMAIL)
+    support.schedule_gated_chain(ledger_path, "true", "--account", support.WORK_EMAIL)
 
     assert support.read_task(ledger_path, support.CHILD_ID)["account"] == 1
 
@@ -319,7 +304,7 @@ def test_remove_keeps_account_when_logout_fails(add_account, monkeypatch):
     monkeypatch.setenv("GOLEM_CLAUDE_LOGOUT_EXIT", "1")
 
     with pytest.raises(SystemExit):
-        cli.main(["account", "remove", WORK_EMAIL])
+        cli.main(["account", "remove", support.WORK_EMAIL])
 
     assert accounts.account_directory(1).is_dir()
     assert accounts.resolved_account_number("1") == 1
@@ -384,7 +369,7 @@ def test_t3_run_creates_thread_on_account_instance(
 ):
     add_account()
 
-    run_and_execute(ledger_path, "--backend", "t3", "--account", WORK_EMAIL)
+    run_and_execute(ledger_path, "--backend", "t3", "--account", support.WORK_EMAIL)
 
     assert server.settings_mutations == [t3_upsert_mutation()]
     assert t3_support.created_thread(server)["modelSelection"]["instanceId"] == T3_INSTANCE_ID
@@ -418,10 +403,10 @@ def test_remove_removes_t3_instance_before_logout(
         server.runtime_path.unlink()
         monkeypatch.setattr(t3_code, "wait_for_server", server.mark_running)
 
-    assert cli.main(["account", "remove", WORK_EMAIL]) == 0
+    assert cli.main(["account", "remove", support.WORK_EMAIL]) == 0
 
     assert server.settings_mutations == [{"operation": "remove", "instanceId": T3_INSTANCE_ID}]
-    assert "logout" in auth_calls(fake_commands)
+    assert "logout" in support.auth_calls(fake_commands)
     assert not accounts.account_directory(1).exists()
 
 
@@ -442,8 +427,8 @@ def test_remove_keeps_account_when_t3_cannot_remove_instance(
     break_t3(server, monkeypatch)
 
     with pytest.raises(SystemExit, match="T3 Code could not remove the account"):
-        cli.main(["account", "remove", WORK_EMAIL])
+        cli.main(["account", "remove", support.WORK_EMAIL])
 
-    assert "logout" not in auth_calls(fake_commands)
+    assert "logout" not in support.auth_calls(fake_commands)
     assert accounts.account_directory(1).is_dir()
     assert accounts.resolved_account_number("1") == 1

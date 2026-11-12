@@ -86,8 +86,10 @@ review = 'run review-{1} "Review PR {1} and fix what you find" --now'
 NODE_ENV = "development"
 
 [usage_windows]
-# Open a usage window at these times each day
+# Open a usage window on the default account at these times each day
 claude = ["6am", "11am"]
+# Name another account by its email or number from `golem account list`
+"work@example.com" = ["8am", "1pm"]
 ```
 
 golem can't wake a sleeping Mac to open a window. Use `sudo pmset repeat` to wake it each day.

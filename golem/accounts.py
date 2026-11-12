@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict, cast
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
 from golem import ledger, t3_code
 
@@ -16,7 +16,7 @@ TOKEN_VARIABLES = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY")
 PRIVATE_ENTRY_NAMES = frozenset(
     {".claude.json", ".claude.json.lock", "backups", ".credentials.json"}
 )
-NORMAL_LOGIN_NUMBER = 0
+DEFAULT_ACCOUNT_NUMBER = 0
 UNKNOWN = "unknown"
 CLAUDE_AUTH_COMMAND = ("claude", "auth")
 ACCOUNT_LABEL = "{email} ({org_name})"
@@ -129,18 +129,20 @@ def logged_in_account(environment: dict[str, str]) -> Account | None:
     return {"email": email, "org_id": org_id, "org_name": org_name}
 
 
-def normal_login() -> Account | None:
-    return logged_in_account(account_environment(os.environ.copy(), None))
+def logged_in_default_account(environment: dict[str, str]) -> Account | None:
+    return logged_in_account(account_environment(environment, None))
 
 
 def extra_accounts(records: AccountRecords) -> list[tuple[int, Account]]:
     return [(int(number), account) for number, account in records["accounts"].items()]
 
 
-def known_accounts(records: AccountRecords) -> list[tuple[int, Account]]:
-    login = normal_login()
+def known_accounts(
+    records: AccountRecords, environment: dict[str, str]
+) -> list[tuple[int, Account]]:
+    default = logged_in_default_account(environment)
     accounts = extra_accounts(records)
-    return accounts if login is None else [(NORMAL_LOGIN_NUMBER, login), *accounts]
+    return accounts if default is None else [(DEFAULT_ACCOUNT_NUMBER, default), *accounts]
 
 
 def account_lines(accounts: Sequence[tuple[int, Account | None]]) -> list[str]:
@@ -156,24 +158,46 @@ def account_lines(accounts: Sequence[tuple[int, Account | None]]) -> list[str]:
     ]
 
 
+def matching_accounts(
+    value: str,
+    records: AccountRecords,
+    load_known_accounts: Callable[[], list[tuple[int, Account]]],
+    *,
+    is_prefix_allowed: bool,
+) -> list[tuple[int, Account | None]]:
+    if value.isdecimal():
+        number = int(value)
+        if number == DEFAULT_ACCOUNT_NUMBER:
+            return [(number, None)]
+        account = records["accounts"].get(str(number))
+        return [] if account is None else [(number, account)]
+    candidates = load_known_accounts()
+    lowered = value.lower()
+    matches: list[tuple[int, Account | None]] = [
+        item for item in candidates if item[1]["email"].lower() == lowered
+    ]
+    if matches or not is_prefix_allowed:
+        return matches
+    return [item for item in candidates if item[1]["email"].lower().startswith(lowered)]
+
+
+def ambiguous_account_message(subject: str, matches: list[tuple[int, Account | None]]) -> str:
+    lines = "\n".join(account_lines(matches))
+    return f"{subject} matches more than one account; use its number:\n{lines}"
+
+
 def resolved_account_number(value: str) -> int:
     records = load_account_records()
-    unknown_error = SystemExit(f"golem: unknown account: {value}")
-    if value.isdigit():
-        number = int(value)
-        if number != NORMAL_LOGIN_NUMBER and str(number) not in records["accounts"]:
-            raise unknown_error
-        return number
-    candidates = known_accounts(records)
-    lowered = value.lower()
-    matches = [item for item in candidates if item[1]["email"].lower() == lowered] or [
-        item for item in candidates if item[1]["email"].lower().startswith(lowered)
-    ]
+    matches = matching_accounts(
+        value,
+        records,
+        lambda: known_accounts(records, os.environ.copy()),
+        is_prefix_allowed=True,
+    )
     if not matches:
-        raise unknown_error
+        raise SystemExit(f"golem: unknown account: {value}")
     if len(matches) > 1:
-        lines = "\n".join(account_lines(matches))
-        raise SystemExit(f"golem: {value} matches more than one account; use its number:\n{lines}")
+        raise SystemExit(ambiguous_account_message(f"golem: {value}", matches))
     return matches[0][0]
 
 
@@ -181,7 +205,7 @@ def task_account_number(value: str | None) -> int | None:
     if value is None:
         return None
     number = resolved_account_number(value)
-    return None if number == NORMAL_LOGIN_NUMBER else number
+    return None if number == DEFAULT_ACCOUNT_NUMBER else number
 
 
 def run_auth_logout(environment: dict[str, str]) -> int:
@@ -199,7 +223,9 @@ def sign_in_new_account(records: AccountRecords, environment: dict[str, str]) ->
     if account is None:
         run_auth_logout(environment)
         raise SystemExit("golem: Claude login failed")
-    if any(is_same_account(account, other) for _, other in known_accounts(records)):
+    if any(
+        is_same_account(account, other) for _, other in known_accounts(records, os.environ.copy())
+    ):
         run_auth_logout(environment)
         raise SystemExit(f"golem: {ACCOUNT_LABEL.format_map(account)} is already signed in")
     return account
@@ -225,17 +251,17 @@ def add_account() -> int:
 def list_accounts() -> int:
     records = load_account_records()
     accounts: list[tuple[int, Account | None]] = [
-        (NORMAL_LOGIN_NUMBER, normal_login()),
+        (DEFAULT_ACCOUNT_NUMBER, logged_in_default_account(os.environ.copy())),
         *extra_accounts(records),
     ]
     print("\n".join(account_lines(accounts)))
     return 0
 
 
-def remove_account(value: str) -> int:
+def remove_account(value: str) -> tuple[int, Account]:
     number = resolved_account_number(value)
-    if number == NORMAL_LOGIN_NUMBER:
-        raise SystemExit("golem: cannot remove the normal Claude login")
+    if number == DEFAULT_ACCOUNT_NUMBER:
+        raise SystemExit("golem: cannot remove the default Claude account")
     unfinished_task_ids = [
         task_id
         for task_id, task in ledger.load_tasks().items()
@@ -258,4 +284,4 @@ def remove_account(value: str) -> int:
     account = records["accounts"].pop(str(number))
     ledger.save_json(account_records_path(), records)
     print(f"golem: removed {ACCOUNT_LABEL.format_map(account)}")
-    return 0
+    return number, account

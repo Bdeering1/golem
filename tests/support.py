@@ -10,6 +10,9 @@ from typing import cast
 from golem import cli, config, git, ledger, spawn, task_directories
 from golem.backends import claude
 
+DEFAULT_EMAIL = "me@example.com"
+WORK_EMAIL = "work@example.com"
+CREDENTIALS = ".credentials.json"
 TASK_ID = "fix-thing"
 PROMPT = "fix the thing"
 PARENT_ID = "parent"
@@ -25,6 +28,7 @@ AT_TEXT = "9pm"
 SKIP_PERMISSIONS = "--dangerously-skip-permissions"
 WORKTREE_FLAG = "--worktree"
 SAVED_LANG = "en_CA.UTF-8"
+LAUNCHD_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 CHILD_LANG = "fr_CA.UTF-8"
 CURRENT_LANG = "en_US.UTF-8"
 CLAUDE_RESULT = "completed the task"
@@ -275,3 +279,15 @@ def write_transcript(session_id, idle_days):
     write_idle_file(
         Path.home() / ".claude" / "projects" / "project" / f"{session_id}.jsonl", idle_days
     )
+
+
+def current_minute_window_time() -> str:
+    return f"{datetime.now().astimezone():%I:%M%p}".lstrip("0").lower()
+
+
+def status_text(email: str, org_id: str, org_name: str) -> str:
+    return json.dumps({"loggedIn": True, "email": email, "orgId": org_id, "orgName": org_name})
+
+
+def auth_calls(fake_commands):
+    return fake_commands["claude-auth"].read_text(encoding="utf-8").splitlines()
