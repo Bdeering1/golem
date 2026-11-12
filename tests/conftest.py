@@ -240,6 +240,7 @@ def fake_commands(monkeypatch, tmp_path, fake_bin_path):
     work_path.mkdir()
     monkeypatch.setenv("PATH", f"{fake_bin_path}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.setenv("HOME", str(home_path))
+    monkeypatch.delenv("T3CODE_HOME", raising=False)
     monkeypatch.setenv("XDG_STATE_HOME", str(state_path))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(config_path))
     for name, path in paths.items():
