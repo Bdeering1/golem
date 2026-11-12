@@ -42,6 +42,7 @@ def test_codex_worktree_base_fetches_stale_default_branch(
         "-c",
         "user.name=Test",
         "commit",
+        "--no-gpg-sign",
         "-qam",
         "u",
     )
