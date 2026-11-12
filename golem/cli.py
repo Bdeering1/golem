@@ -279,6 +279,12 @@ def add_window_commands(add_parser: Callable[..., argparse.ArgumentParser]) -> N
     set_command_handler(open_window_command, open_usage_window_from_arguments)
 
 
+def remove_account_from_arguments(arguments: ledger.Arguments) -> int:
+    number, account = accounts.remove_account(arguments.account_value)
+    usage_windows.warn_about_removed_account_windows(number, account)
+    return 0
+
+
 def add_account_commands(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
     account_command = add_parser("account")
     account_commands = account_command.add_subparsers(dest="account_command", required=True)
@@ -288,9 +294,7 @@ def add_account_commands(add_parser: Callable[..., argparse.ArgumentParser]) -> 
     set_command_handler(account_commands.add_parser("list"), lambda _: accounts.list_accounts())
     remove_account_command = account_commands.add_parser("remove")
     remove_account_command.add_argument("account_value", metavar="EMAIL")
-    set_command_handler(
-        remove_account_command, lambda arguments: accounts.remove_account(arguments.account_value)
-    )
+    set_command_handler(remove_account_command, remove_account_from_arguments)
 
 
 def add_prune_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:

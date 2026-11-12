@@ -2,7 +2,6 @@ import json
 import os
 import shutil
 import subprocess
-import sys
 from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict, cast
@@ -10,7 +9,7 @@ from typing import TYPE_CHECKING, TypedDict, cast
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-from golem import config, ledger, t3_code
+from golem import ledger, t3_code
 
 CONFIG_DIRECTORY_VARIABLE = "CLAUDE_CONFIG_DIR"
 TOKEN_VARIABLES = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY")
@@ -251,17 +250,7 @@ def list_accounts() -> int:
     return 0
 
 
-def usage_window_keys() -> list[str]:
-    try:
-        table = config.load_config().get("usage_windows")
-    except SystemExit:
-        return []
-    if not isinstance(table, dict):
-        return []
-    return list(cast("dict[str, object]", table))
-
-
-def remove_account(value: str) -> int:
+def remove_account(value: str) -> tuple[int, Account]:
     number = resolved_account_number(value)
     if number == NORMAL_LOGIN_NUMBER:
         raise SystemExit("golem: cannot remove the normal Claude login")
@@ -287,12 +276,4 @@ def remove_account(value: str) -> int:
     account = records["accounts"].pop(str(number))
     ledger.save_json(account_records_path(), records)
     print(f"golem: removed {ACCOUNT_LABEL.format_map(account)}")
-    for key in usage_window_keys():
-        if key.lower() != account["email"].lower() and not (key.isdecimal() and int(key) == number):
-            continue
-        print(
-            f"golem: warning: usage_windows.{key} in {config.config_path()} "
-            "names the removed account. Delete that entry.",
-            file=sys.stderr,
-        )
-    return 0
+    return number, account

@@ -119,6 +119,23 @@ def usage_window_entries(environment: dict[str, str]) -> list[UsageWindowEntry]:
     return window_entries
 
 
+def warn_about_removed_account_windows(number: int, account: accounts.Account) -> None:
+    try:
+        table = config.load_config().get("usage_windows")
+    except SystemExit:
+        return
+    if not isinstance(table, dict):
+        return
+    for key in cast("dict[str, object]", table):
+        if key.lower() != account["email"].lower() and not (key.isdecimal() and int(key) == number):
+            continue
+        print(
+            f"golem: warning: usage_windows.{key} in {config.config_path()} "
+            "names the removed account. Delete that entry.",
+            file=sys.stderr,
+        )
+
+
 def usage_window_state_path() -> Path:
     return ledger.state_directory() / "usage_windows.json"
 
