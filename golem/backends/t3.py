@@ -154,16 +154,16 @@ class ThreadWatcher:
     thread_id: str
     origin: str
     record_progress: Callable[[str], None]
+    token: str
+    token_issued_at: float
     native_session_id: str | None = None
-    token: str = ""
-    token_issued_at: float | None = None
     previous_item_ids: set[str] = field(default_factory=set)
     run_items: dict[str, ledger.JsonObject] = field(default_factory=dict)
     recorded_item_ids: set[str] = field(default_factory=set)
 
     def current_token(self) -> str:
         now = time.monotonic()
-        if self.token_issued_at is None or now - self.token_issued_at >= TOKEN_REISSUE_SECONDS:
+        if now - self.token_issued_at >= TOKEN_REISSUE_SECONDS:
             self.token = t3_code.issue_token()
             self.token_issued_at = now
         return self.token
