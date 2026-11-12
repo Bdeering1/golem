@@ -467,9 +467,18 @@ def window_config_directories(fake_commands) -> list[str]:
     return [line.split("|")[0] for line in lines]
 
 
-def test_account_window_opens_once_a_day_on_account(add_account, fake_commands, capsys):
+@pytest.mark.parametrize(
+    "config_text",
+    [
+        pytest.param(WORK_WINDOW_CONFIG, id="email"),
+        pytest.param('[usage_windows]\n"1" = ["6am"]\n', id="number"),
+    ],
+)
+def test_account_window_opens_once_a_day_on_account(
+    add_account, fake_commands, capsys, config_text
+):
     add_account()
-    support.write_config_text(WORK_WINDOW_CONFIG)
+    support.write_config_text(config_text)
 
     open_windows_at(2)
     open_windows_at(7)
@@ -514,6 +523,16 @@ def test_accounts_with_same_time_each_open_once(add_account, fake_commands):
     assert window_config_directories(fake_commands) == ["", str(accounts.account_directory(1))]
 
 
+def test_normal_login_email_window_shares_claude_state(fake_commands):
+    support.write_config_text('[usage_windows]\nclaude = ["6am"]\n')
+    open_windows_at(2)
+    support.write_config_text(f'[usage_windows]\n"{NORMAL_EMAIL}" = ["6am"]\n')
+
+    open_windows_at(7)
+
+    assert window_config_directories(fake_commands) == [""]
+
+
 def test_window_open_uses_account(add_account, fake_commands):
     add_account()
 
@@ -522,11 +541,21 @@ def test_window_open_uses_account(add_account, fake_commands):
     assert window_config_directories(fake_commands) == [str(accounts.account_directory(1))]
 
 
-def test_window_open_refuses_account_for_codex(add_account, fake_commands):
+@pytest.mark.parametrize(
+    ("config_text", "backend_args"),
+    [
+        pytest.param("", ["--backend", "codex"], id="backend-flag"),
+        pytest.param('default_backend = "codex"\n', [], id="default-backend"),
+    ],
+)
+def test_window_open_refuses_account_for_codex(
+    add_account, fake_commands, config_text, backend_args
+):
     add_account()
+    support.write_config_text(config_text)
 
     with pytest.raises(SystemExit, match="only Claude"):
-        cli.main(["window", "open", "--account", WORK_EMAIL, "--backend", "codex"])
+        cli.main(["window", "open", "--account", WORK_EMAIL, *backend_args])
 
     assert support.logged_calls(fake_commands, "codex") == []
 
@@ -555,9 +584,9 @@ def test_window_open_refuses_account_for_codex(add_account, fake_commands):
             id="normal-login-twice",
         ),
         pytest.param(
-            f'[usage_windows]\n"{NORMAL_EMAIL}" = ["6am"]\n"0" = ["8am"]\n',
-            f"usage_windows.0 lists the same account as usage_windows.{NORMAL_EMAIL}",
-            id="email-and-number",
+            '[usage_windows]\n"5" = ["6am"]\n',
+            "usage_windows.5 matches no Claude account",
+            id="unknown-number",
         ),
     ],
 )

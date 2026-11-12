@@ -162,7 +162,7 @@ def account_lines(accounts: Sequence[tuple[int, Account | None]]) -> list[str]:
 def matching_accounts(
     value: str, records: AccountRecords, environment: dict[str, str], *, is_prefix_allowed: bool
 ) -> list[tuple[int, Account | None]]:
-    if value.isdigit():
+    if value.isdecimal():
         number = int(value)
         if number == NORMAL_LOGIN_NUMBER:
             return [(number, None)]
@@ -265,7 +265,6 @@ def remove_account(value: str) -> int:
     number = resolved_account_number(value)
     if number == NORMAL_LOGIN_NUMBER:
         raise SystemExit("golem: cannot remove the normal Claude login")
-    window_keys = usage_window_keys()
     unfinished_task_ids = [
         task_id
         for task_id, task in ledger.load_tasks().items()
@@ -288,7 +287,7 @@ def remove_account(value: str) -> int:
     account = records["accounts"].pop(str(number))
     ledger.save_json(account_records_path(), records)
     print(f"golem: removed {ACCOUNT_LABEL.format_map(account)}")
-    if any(key.lower() in {account["email"].lower(), str(number)} for key in window_keys):
+    if any(key.lower() in {account["email"].lower(), str(number)} for key in usage_window_keys()):
         print(
             f"golem: warning: [usage_windows] still lists {account['email']}; "
             f"remove it from {config.config_path()}",

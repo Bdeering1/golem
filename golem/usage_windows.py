@@ -113,7 +113,7 @@ def usage_window_error(
     try:
         account_environment = accounts.account_environment(environment, account_number)
     except SystemExit as error:
-        return str(error)
+        return str(error).removeprefix("golem: ")
     return backend.open_usage_window(account_environment)
 
 
