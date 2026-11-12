@@ -71,14 +71,18 @@ def create_thread(
 ) -> None:
     provider, model = provider_and_model(task["agent_args"])
     driver = t3_code.INSTANCE_IDS[provider]
-    instance_id = driver if instance is None else instance.instance_id
     origin = t3_code.server_origin()
     token = t3_code.issue_token()
     t3_code.dispatch_command(
         origin,
         token,
         t3_code.thread_create_command(
-            origin, token, task, thread_id, instance_id, model or t3_code.default_model(driver)
+            origin,
+            token,
+            task,
+            thread_id,
+            t3_code.thread_instance_id(driver, instance),
+            model or t3_code.default_model(driver),
         ),
     )
     common.record_session_field(task_id, task["session_id"], "t3_code_thread_id", thread_id)

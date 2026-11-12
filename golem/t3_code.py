@@ -194,6 +194,10 @@ def upsert_claude_instance(origin: str, token: str, instance: ClaudeInstance) ->
     successful_value(update_settings_exit(origin, token, mutation))
 
 
+def thread_instance_id(driver: str, instance: ClaudeInstance | None) -> str:
+    return driver if instance is None else instance.instance_id
+
+
 def thread_projection(origin: str, token: str, thread_id: str) -> ledger.JsonObject:
     projection_exit = rpc_exit(
         origin, token, "orchestration.getThreadProjection", {"threadId": thread_id}
@@ -288,20 +292,17 @@ def ensure_thread(
 ) -> None:
     if not server_runtime_path().exists():
         start_app()
-    origin = server_origin()
-    token = None
     if instance is not None:
-        token = issue_token()
-        upsert_claude_instance(origin, token, instance)
+        upsert_claude_instance(server_origin(), issue_token(), instance)
     if is_thread_present(thread_id):
         return
     if task["backend"] == ledger.BACKEND_T3:
         raise T3CodeError("thread does not exist in T3 Code")
-    token = token or issue_token()
+    origin = server_origin()
+    token = issue_token()
     driver = INSTANCE_IDS[task["backend"]]
-    instance_id = driver if instance is None else instance.instance_id
     command = thread_create_command(
-        origin, token, task, thread_id, instance_id, default_model(driver)
+        origin, token, task, thread_id, thread_instance_id(driver, instance), default_model(driver)
     )
     command["importedNativeThread"] = {
         "ref": {"driver": driver, "nativeId": conversation_id, "strength": "strong"}
