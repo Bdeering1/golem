@@ -302,6 +302,7 @@ def git_repository_template(tmp_path_factory):
             "-c",
             "gc.auto=0",
             "commit",
+            "--no-gpg-sign",
             "-qm",
             "test",
         ],
