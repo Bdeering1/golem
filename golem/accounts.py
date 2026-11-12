@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict, cast
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
 from golem import ledger, t3_code
 
@@ -159,7 +159,11 @@ def account_lines(accounts: Sequence[tuple[int, Account | None]]) -> list[str]:
 
 
 def matching_accounts(
-    value: str, records: AccountRecords, environment: dict[str, str], *, is_prefix_allowed: bool
+    value: str,
+    records: AccountRecords,
+    load_known_accounts: Callable[[], list[tuple[int, Account]]],
+    *,
+    is_prefix_allowed: bool,
 ) -> list[tuple[int, Account | None]]:
     if value.isdecimal():
         number = int(value)
@@ -167,7 +171,7 @@ def matching_accounts(
             return [(number, None)]
         account = records["accounts"].get(str(number))
         return [] if account is None else [(number, account)]
-    candidates = known_accounts(records, environment)
+    candidates = load_known_accounts()
     lowered = value.lower()
     matches: list[tuple[int, Account | None]] = [
         item for item in candidates if item[1]["email"].lower() == lowered
@@ -183,8 +187,12 @@ def ambiguous_account_message(subject: str, matches: list[tuple[int, Account | N
 
 
 def resolved_account_number(value: str) -> int:
+    records = load_account_records()
     matches = matching_accounts(
-        value, load_account_records(), os.environ.copy(), is_prefix_allowed=True
+        value,
+        records,
+        lambda: known_accounts(records, os.environ.copy()),
+        is_prefix_allowed=True,
     )
     if not matches:
         raise SystemExit(f"golem: unknown account: {value}")

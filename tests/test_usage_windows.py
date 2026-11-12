@@ -381,12 +381,21 @@ def test_remove_warns_when_usage_windows_lists_account(add_account, capsys, conf
     assert not accounts.account_directory(1).exists()
 
 
-def test_backend_window_keys_skip_account_lookup(fake_commands):
-    support.write_config_text('[usage_windows]\nclaude = ["6am"]\n')
+@pytest.mark.parametrize(
+    ("keys", "lookup_count"),
+    [
+        pytest.param(["claude"], 0, id="backend-keys"),
+        pytest.param([f'"{support.NORMAL_EMAIL}"', f'"{support.WORK_EMAIL}"'], 1, id="email-keys"),
+    ],
+)
+def test_window_keys_look_up_login_at_most_once(add_account, fake_commands, keys, lookup_count):
+    add_account()
+    support.write_config_text("[usage_windows]\n" + "".join(f'{key} = ["6am"]\n' for key in keys))
+    calls_before = len(support.auth_calls(fake_commands))
 
     usage_windows.usage_window_entries(dict(os.environ))
 
-    assert support.auth_calls(fake_commands) == []
+    assert len(support.auth_calls(fake_commands)) - calls_before == lookup_count
 
 
 @pytest.mark.usefixtures("claude_config_directory")

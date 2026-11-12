@@ -1,3 +1,4 @@
+import functools
 import json
 import re
 import sys
@@ -79,12 +80,15 @@ def usage_window_entries(environment: dict[str, str]) -> list[UsageWindowEntry]:
     window_entries: list[UsageWindowEntry] = []
     keys_by_account: dict[tuple[str, int | None], str] = {}
     account_records = accounts.load_account_records()
+    load_known_accounts = functools.cache(
+        lambda: accounts.known_accounts(account_records, environment)
+    )
     for key, values in cast("dict[str, object]", table).items():
         entry_message_prefix = f"{message_prefix}.{key}"
         backend_id, account = key, None
         if key not in registry.USAGE_BACKENDS:
             matches = accounts.matching_accounts(
-                key, account_records, environment, is_prefix_allowed=False
+                key, account_records, load_known_accounts, is_prefix_allowed=False
             )
             if not matches:
                 print(
