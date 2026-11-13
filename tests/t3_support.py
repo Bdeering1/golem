@@ -11,6 +11,7 @@ PROJECT_ID = "project"
 ADDED_PROJECT_ID = "added-project"
 CODEX_THREAD = "codex-thread"
 CACHED_CLAUDE_MODEL = "claude-cached"
+CLAUDE_EFFORT_LEVELS = ["low", "medium", "high"]
 SUCCESS_EXIT = {"_tag": "Success", "value": {"sequence": 3}}
 FINISHED_PULL_REQUESTS = [{"url": "merged", "state": ledger.PULL_REQUEST_STATE_MERGED}]
 CLAUDE_THREAD_ID = f"golem:claude:{support.TASK_ID}-session"
@@ -91,7 +92,20 @@ def write_claude_model_cache(home):
             {
                 "models": [
                     {"slug": "claude-other", "isDefault": False},
-                    {"slug": CACHED_CLAUDE_MODEL, "isDefault": True},
+                    {
+                        "slug": CACHED_CLAUDE_MODEL,
+                        "aliases": ["cached"],
+                        "isDefault": True,
+                        "capabilities": {
+                            "optionDescriptors": [
+                                {
+                                    "id": "effort",
+                                    "type": "select",
+                                    "options": [{"id": level} for level in CLAUDE_EFFORT_LEVELS],
+                                }
+                            ]
+                        },
+                    },
                 ]
             }
         ),
