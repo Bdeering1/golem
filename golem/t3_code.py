@@ -24,6 +24,7 @@ APP_START_POLL_SECONDS = 0.5
 NETWORK_TIMEOUT_SECONDS = 30
 INSTANCE_IDS = {ledger.BACKEND_CLAUDE: "claudeAgent", ledger.BACKEND_CODEX: "codex"}
 DEFAULT_MODELS = {"claudeAgent": "claude-opus-5-5", "codex": "gpt-6-astra"}
+EFFORT_OPTION_IDS = {"claudeAgent": "effort", "codex": "reasoningEffort"}
 
 
 class T3CodeError(Exception):
@@ -253,11 +254,37 @@ def project_id(origin: str, token: str, root: str) -> str:
     return added_id
 
 
-def default_model(instance_id: str) -> str:
-    cache = ledger.load_json(t3_home() / "caches" / f"{instance_id}.json")
-    models = cast("list[ledger.JsonObject]", cache.get("models", []))
-    slug = next((model.get("slug") for model in models if model.get("isDefault")), None)
-    return slug if isinstance(slug, str) else DEFAULT_MODELS[instance_id]
+def cached_models(driver: str) -> list[ledger.JsonObject]:
+    cache = ledger.load_json(t3_home() / "caches" / f"{driver}.json")
+    return cast("list[ledger.JsonObject]", cache.get("models", []))
+
+
+def default_model(driver: str) -> str:
+    slug = next(
+        (model.get("slug") for model in cached_models(driver) if model.get("isDefault")), None
+    )
+    return slug if isinstance(slug, str) else DEFAULT_MODELS[driver]
+
+
+def effort_levels(driver: str, model: str) -> list[str] | None:
+    entry = next(
+        (
+            entry
+            for entry in cached_models(driver)
+            if model == entry.get("slug") or model in cast("list[object]", entry.get("aliases", []))
+        ),
+        None,
+    )
+    if entry is None:
+        return None
+    capabilities = cast("ledger.JsonObject", entry.get("capabilities", {}))
+    descriptors = cast("list[ledger.JsonObject]", capabilities.get("optionDescriptors", []))
+    option_lists = [
+        cast("list[ledger.JsonObject]", descriptor.get("options", []))
+        for descriptor in descriptors
+        if descriptor.get("id") == EFFORT_OPTION_IDS[driver]
+    ]
+    return [cast("str", option["id"]) for options in option_lists for option in options]
 
 
 def worktree_and_branch(task: ledger.Task, root: str) -> tuple[str | None, str | None]:
@@ -269,10 +296,20 @@ def worktree_and_branch(task: ledger.Task, root: str) -> tuple[str | None, str |
 
 
 def thread_create_command(
-    origin: str, token: str, task: ledger.Task, thread_id: str, instance_id: str, model: str
+    origin: str,
+    token: str,
+    task: ledger.Task,
+    thread_id: str,
+    instance_id: str,
+    model: str,
+    *,
+    model_options: list[ledger.JsonObject] | None = None,
 ) -> ledger.JsonObject:
     root = project_root(task)
     worktree, branch = worktree_and_branch(task, root)
+    model_selection: ledger.JsonObject = {"instanceId": instance_id, "model": model}
+    if model_options:
+        model_selection["options"] = model_options
     return {
         "type": "thread.create",
         "createdBy": "user",
@@ -281,7 +318,7 @@ def thread_create_command(
         "threadId": thread_id,
         "projectId": project_id(origin, token, root),
         "title": (task["prompt"].strip().splitlines() or [thread_id])[0],
-        "modelSelection": {"instanceId": instance_id, "model": model},
+        "modelSelection": model_selection,
         "runtimeMode": "full-access",
         "interactionMode": "default",
         "branch": branch,
