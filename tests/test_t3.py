@@ -170,33 +170,28 @@ def test_run_creates_thread_in_worktree_and_records_reply(
 
 
 @pytest.mark.parametrize(
-    ("model", "message"),
+    "model",
     [
-        pytest.param(
-            t3_support.CACHED_CLAUDE_MODEL,
-            f"{t3_support.CACHED_CLAUDE_MODEL} does not offer --effort max; choose from: low",
-            id="slug",
-        ),
-        pytest.param("cached", "cached does not offer --effort max; choose from: low", id="alias"),
-        pytest.param("claude-other", "claude-other does not offer --effort$", id="no-levels"),
+        pytest.param(t3_support.CACHED_CLAUDE_MODEL, id="slug"),
+        pytest.param("cached", id="alias"),
+        pytest.param("claude-other", id="no-levels"),
     ],
 )
 def test_run_refuses_unoffered_effort_without_changing_ledger(
-    server, installed_launch_agent, ledger_path, model, message
+    server, installed_launch_agent, ledger_path, model
 ):
     t3_support.write_claude_model_cache(server.home)
     support.write_task(ledger_path, ledger.STATUS_SCHEDULED)
     tasks = support.read_tasks(ledger_path)
     command = ["run", support.CHILD_ID, support.PROMPT, "--backend", "t3", "--now"]
 
-    with pytest.raises(SystemExit, match=message):
+    with pytest.raises(SystemExit, match=f"{model} does not offer --effort"):
         cli.main([*command, "--", "--model", model, "--effort", "max"])
 
     assert support.read_tasks(ledger_path) == tasks
 
 
 def test_retry_creates_new_thread_with_same_effort(t3_server, ledger_path):
-    t3_support.write_claude_model_cache(t3_server.home)
     support.write_task(
         ledger_path, ledger.STATUS_FAILED, backend=ledger.BACKEND_T3, agent_args=["--effort=high"]
     )

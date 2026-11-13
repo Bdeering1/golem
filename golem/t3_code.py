@@ -279,12 +279,11 @@ def effort_levels(driver: str, model: str) -> list[str] | None:
         return None
     capabilities = cast("ledger.JsonObject", entry.get("capabilities", {}))
     descriptors = cast("list[ledger.JsonObject]", capabilities.get("optionDescriptors", []))
-    option_lists = [
-        cast("list[ledger.JsonObject]", descriptor.get("options", []))
-        for descriptor in descriptors
-        if descriptor.get("id") == EFFORT_OPTION_IDS[driver]
-    ]
-    return [cast("str", option["id"]) for options in option_lists for option in options]
+    for descriptor in descriptors:
+        if descriptor.get("id") == EFFORT_OPTION_IDS[driver]:
+            options = cast("list[ledger.JsonObject]", descriptor.get("options", []))
+            return [cast("str", option["id"]) for option in options]
+    return []
 
 
 def effort_options(driver: str, effort: str | None) -> list[ledger.JsonObject]:
