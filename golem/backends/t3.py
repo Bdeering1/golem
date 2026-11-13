@@ -99,11 +99,6 @@ def create_thread(
 ) -> None:
     arguments = thread_arguments(task["agent_args"])
     driver = t3_code.INSTANCE_IDS[arguments.provider]
-    model_options: list[ledger.JsonObject] = (
-        [{"id": t3_code.EFFORT_OPTION_IDS[driver], "value": arguments.effort}]
-        if arguments.effort
-        else []
-    )
     t3_code.dispatch_command(
         origin,
         token,
@@ -114,7 +109,7 @@ def create_thread(
             thread_id,
             t3_code.thread_instance_id(driver, instance),
             arguments.model or t3_code.default_model(driver),
-            model_options=model_options,
+            model_options=t3_code.effort_options(driver, arguments.effort),
         ),
     )
     common.record_session_field(task_id, task["session_id"], "t3_code_thread_id", thread_id)

@@ -287,6 +287,10 @@ def effort_levels(driver: str, model: str) -> list[str] | None:
     return [cast("str", option["id"]) for options in option_lists for option in options]
 
 
+def effort_options(driver: str, effort: str | None) -> list[ledger.JsonObject]:
+    return [{"id": EFFORT_OPTION_IDS[driver], "value": effort}] if effort else []
+
+
 def worktree_and_branch(task: ledger.Task, root: str) -> tuple[str | None, str | None]:
     directory = ledger.task_directory(task)
     if git.resolved_path(directory) == git.resolved_path(root):
