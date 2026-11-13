@@ -6,7 +6,6 @@ import sys
 import threading
 import time
 from datetime import UTC, datetime
-from datetime import time as datetime_time
 from pathlib import Path
 
 from golem import (
@@ -178,22 +177,24 @@ def has_pending_tasks(tasks: ledger.Tasks) -> bool:
     )
 
 
-def agent_usage_window_times() -> dict[str, list[datetime_time]]:
+def agent_usage_window_entries(
+    environment: dict[str, str],
+) -> list[usage_windows.UsageWindowEntry]:
     try:
-        return usage_windows.usage_window_times()
+        return usage_windows.usage_window_entries(environment)
     except SystemExit as error:
         print(error, file=sys.stderr)
-        return {}
+        return []
 
 
 def run_launch_agent() -> int:
-    window_times = agent_usage_window_times()
     window_environment = {**os.environ, **ledger.load_settings().get("agent_environment", {})}
+    window_entries = agent_usage_window_entries(window_environment)
     pull_request_refresh = threading.Thread(target=branch_pull_requests.refresh_pull_requests)
     pull_request_refresh.start()
     worktree_cleanup.auto_remove_worktrees()
     processes = run_launch_agent_pass()
-    usage_windows.open_due_usage_windows(window_times, window_environment, datetime.now(UTC))
+    usage_windows.open_due_usage_windows(window_entries, window_environment, datetime.now(UTC))
     while True:
         if has_pending_tasks(ledger.load_tasks()):
             time.sleep(LAUNCH_AGENT_POLL_SECONDS)
@@ -204,4 +205,4 @@ def run_launch_agent() -> int:
             return 0
         processes = spawn.reap_finished_executors(processes)
         processes.extend(run_launch_agent_pass())
-        usage_windows.open_due_usage_windows(window_times, window_environment, datetime.now(UTC))
+        usage_windows.open_due_usage_windows(window_entries, window_environment, datetime.now(UTC))

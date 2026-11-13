@@ -16,7 +16,7 @@ BACKGROUND_STOP_LINE = (
 )
 
 
-def raise_usage_lookup_error() -> Never:
+def raise_usage_lookup_error(_environment: dict[str, str]) -> Never:
     raise SystemExit
 
 
@@ -179,7 +179,7 @@ def test_background_work_waits_or_fails_before_starting_dependents(
 def test_usage_limited_task_resumes_at_reset_in_same_session(
     installed_launch_agent, fake_commands, monkeypatch, ledger_path, is_verbose
 ):
-    monkeypatch.setattr(claude, "next_reset_time", lambda: support.RESET_TIME)
+    monkeypatch.setattr(claude, "next_reset_time", lambda _environment: support.RESET_TIME)
     agent_args = (
         [*support.AGENT_ARGS, claude.VERBOSE_ARGUMENT] if is_verbose else support.AGENT_ARGS
     )
@@ -265,7 +265,7 @@ def test_subagent_usage_limit_event_does_not_pause_task(fake_commands, ledger_pa
 def test_usage_limit_pauses_task_when_background_agent_turns_follow(
     installed_launch_agent, fake_commands, monkeypatch, ledger_path, limit_event
 ):
-    monkeypatch.setattr(claude, "next_reset_time", lambda: support.RESET_TIME)
+    monkeypatch.setattr(claude, "next_reset_time", lambda _environment: support.RESET_TIME)
     support.write_claude_output(fake_commands, support.CLAUDE_RESULT)
     cli.main(["run", support.TASK_ID, support.PROMPT, "--now", "--", *support.AGENT_ARGS])
     session_id = support.read_task(ledger_path)["session_id"]
@@ -289,7 +289,7 @@ def test_usage_limit_pauses_task_when_background_agent_turns_follow(
 def test_usage_limited_task_fails_once_resumes_run_out(
     installed_launch_agent, fake_commands, monkeypatch, ledger_path
 ):
-    monkeypatch.setattr(claude, "next_reset_time", lambda: support.RESET_TIME)
+    monkeypatch.setattr(claude, "next_reset_time", lambda _environment: support.RESET_TIME)
     support.write_claude_output(
         fake_commands, support.USAGE_LIMIT_RESULT, api_error_status=claude.USAGE_LIMIT_HTTP_STATUS
     )
@@ -308,7 +308,7 @@ def test_usage_limited_task_fails_once_resumes_run_out(
 @pytest.mark.parametrize(
     "find_reset_time",
     [
-        pytest.param(lambda: None, id="no-reset"),
+        pytest.param(lambda _environment: None, id="no-reset"),
         pytest.param(raise_usage_lookup_error, id="lookup-error"),
     ],
 )

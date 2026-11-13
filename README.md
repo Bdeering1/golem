@@ -2,7 +2,7 @@
 
 golem is an orchestrator for coding agents.
 
-Queue agent sessions, chain them together and schedule them around your usage limits. golem runs them in the background, each in its own git worktree, and notifies you when one needs review. Setup scripts, gates and aliases let you build your own workflows on top.
+Queue agent sessions, chain them together, run them on different accounts, and schedule them around your usage limits. golem runs them in the background, each in its own git worktree, and notifies you when one needs review. Setup scripts, gates, and aliases let you build your own workflows on top.
 
 ## Install
 
@@ -39,7 +39,10 @@ golem pickup fix-login
 golem run fix-signup "Fix the signup redirect" --backend codex --at 9pm
 
 # Run as a T3 Code thread with Codex. --provider defaults to claude
-golem run fix-logout "Fix the logout redirect" --backend t3 -- --provider codex --model gpt-6-astra
+golem run fix-logout "Fix the logout redirect" --backend t3 -- --provider codex --model gpt-6-astra --effort high
+
+# Run on another Claude account, after signing in with `golem account add claude`
+golem run fix-billing "Fix the billing page" --account work@example.com
 
 # The script must print {"directory": "<path>"} for the task to run in
 # The review runs if the tests pass (exit code of zero). Arguments after -- go to the agent
@@ -62,6 +65,7 @@ golem run add-auth "Add password reset" \
 | `golem show` | Prints a task's final result |
 | `golem pickup` | Opens a task's session and marks the task done |
 | `golem prune` | Cleans up cancelled and finished tasks |
+| `golem account` | Adds, lists, and removes Claude accounts |
 
 `golem --help` lists the rest.
 
@@ -82,8 +86,10 @@ review = 'run review-{1} "Review PR {1} and fix what you find" --now'
 NODE_ENV = "development"
 
 [usage_windows]
-# Open a usage window at these times each day
+# Open a usage window on the default account at these times each day
 claude = ["6am", "11am"]
+# Name another account by its email or number from `golem account list`
+"work@example.com" = ["8am", "1pm"]
 ```
 
 golem can't wake a sleeping Mac to open a window. Use `sudo pmset repeat` to wake it each day.

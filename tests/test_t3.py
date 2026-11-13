@@ -85,17 +85,51 @@ def t3_server(server, installed_launch_agent):
 
 
 @pytest.mark.parametrize(
-    ("agent_args", "instance_id", "model"),
+    ("agent_args", "instance_id", "model", "options"),
     [
-        pytest.param([], "claudeAgent", t3_support.CACHED_CLAUDE_MODEL, id="claude-default"),
+        pytest.param([], "claudeAgent", t3_support.CACHED_CLAUDE_MODEL, None, id="claude-default"),
         pytest.param(
-            ["--provider", "codex"], "codex", t3_code.DEFAULT_MODELS["codex"], id="codex-default"
+            ["--provider", "codex"],
+            "codex",
+            t3_code.DEFAULT_MODELS["codex"],
+            None,
+            id="codex-default",
         ),
-        pytest.param(["--provider=codex", "--model=gpt-x"], "codex", "gpt-x", id="codex-model"),
+        pytest.param(
+            ["--provider=codex", "--model=gpt-x"], "codex", "gpt-x", None, id="codex-model"
+        ),
+        pytest.param(
+            ["--effort", "high"],
+            "claudeAgent",
+            t3_support.CACHED_CLAUDE_MODEL,
+            [{"id": "effort", "value": "high"}],
+            id="claude-effort",
+        ),
+        pytest.param(
+            ["--provider", "codex", "--effort=high"],
+            "codex",
+            t3_code.DEFAULT_MODELS["codex"],
+            [{"id": "reasoningEffort", "value": "high"}],
+            id="codex-effort",
+        ),
+        pytest.param(
+            ["--model", "claude-uncached", "--effort", "max"],
+            "claudeAgent",
+            "claude-uncached",
+            [{"id": "effort", "value": "max"}],
+            id="uncached-model-effort",
+        ),
+        pytest.param(
+            ["--permission-mode", "auto"],
+            "claudeAgent",
+            t3_support.CACHED_CLAUDE_MODEL,
+            None,
+            id="permission-mode-ignored",
+        ),
     ],
 )
 def test_run_creates_thread_in_worktree_and_records_reply(
-    t3_server, ledger_path, git_repository, monkeypatch, agent_args, instance_id, model
+    t3_server, ledger_path, git_repository, monkeypatch, agent_args, instance_id, model, options
 ):
     monkeypatch.chdir(git_repository)
     t3_server.project_root = str(git_repository)
@@ -111,12 +145,17 @@ def test_run_creates_thread_in_worktree_and_records_reply(
         "threadId": t3.conversation_id(task),
         "projectId": t3_support.PROJECT_ID,
         "title": support.PROMPT,
-        "modelSelection": {"instanceId": instance_id, "model": model},
+        "modelSelection": {
+            "instanceId": instance_id,
+            "model": model,
+            **({"options": options} if options else {}),
+        },
         "runtimeMode": "full-access",
         "interactionMode": "default",
         "branch": f"worktree-{Path(worktree).name}",
         "worktreePath": worktree,
     }
+    assert t3_server.settings_mutations == []
     assert f"thread send {t3.conversation_id(task)} - --wait --json" in t3_server.t3_calls()
     assert (t3_server.home / "sent-message").read_text(encoding="utf-8") == support.PROMPT
     send_cwd = (t3_server.home / "send-cwd").read_text(encoding="utf-8").strip()
@@ -128,6 +167,41 @@ def test_run_creates_thread_in_worktree_and_records_reply(
     progress = progress_log.progress_path(task["session_id"]).read_text(encoding="utf-8")
     assert common.tool_call_progress("command", "make test") in progress
     assert T3_REPLY in progress
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        pytest.param(t3_support.CACHED_CLAUDE_MODEL, id="slug"),
+        pytest.param("cached", id="alias"),
+        pytest.param("claude-other", id="no-levels"),
+    ],
+)
+def test_run_refuses_unoffered_effort_without_changing_ledger(
+    server, installed_launch_agent, ledger_path, model
+):
+    t3_support.write_claude_model_cache(server.home)
+    support.write_task(ledger_path, ledger.STATUS_SCHEDULED)
+    tasks = support.read_tasks(ledger_path)
+    command = ["run", support.CHILD_ID, support.PROMPT, "--backend", "t3", "--now"]
+
+    with pytest.raises(SystemExit, match=f"{model} does not offer --effort"):
+        cli.main([*command, "--", "--model", model, "--effort", "max"])
+
+    assert support.read_tasks(ledger_path) == tasks
+
+
+def test_retry_creates_new_thread_with_same_effort(t3_server, ledger_path):
+    support.write_task(
+        ledger_path, ledger.STATUS_FAILED, backend=ledger.BACKEND_T3, agent_args=["--effort=high"]
+    )
+
+    assert cli.main(["retry", support.TASK_ID, "--now"]) == 0
+    execute(ledger_path)
+
+    assert t3_support.created_thread(t3_server)["modelSelection"]["options"] == [
+        {"id": "effort", "value": "high"}
+    ]
 
 
 def test_failed_run_fails_task_with_t3_code_error(t3_server, ledger_path):
@@ -168,7 +242,9 @@ def test_run_waiting_for_answer_stops_task_until_continue(
 
 
 def test_usage_limit_resumes_same_thread_at_reported_reset(t3_server, ledger_path, monkeypatch):
-    monkeypatch.setattr(claude, "next_reset_time", lambda: pytest.fail("usage lookup ran"))
+    monkeypatch.setattr(
+        claude, "next_reset_time", lambda _environment: pytest.fail("usage lookup ran")
+    )
     t3_server.projections[1:] = [
         projection(COMMAND_ITEM, USAGE_LIMIT_ITEM),
         projection(COMMAND_ITEM, USAGE_LIMIT_ITEM, MESSAGE_ITEM),

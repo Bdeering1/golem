@@ -13,12 +13,15 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-from golem import ledger, progress_log, t3_code, task_directories
+from golem import accounts, ledger, progress_log, t3_code, task_directories
 from golem.backends import claude, codex, common
 
 NAME: str = "T3 Code"
 PROVIDER_ARGUMENT = "--provider"
 MODEL_ARGUMENT = "--model"
+EFFORT_ARGUMENT = "--effort"
+PERMISSION_MODE_ARGUMENT = "--permission-mode"
+SUPPORTED_ARGUMENTS = {PROVIDER_ARGUMENT, MODEL_ARGUMENT, EFFORT_ARGUMENT, PERMISSION_MODE_ARGUMENT}
 PROJECTION_POLL_SECONDS = 2
 TOKEN_REISSUE_SECONDS = 60 * 60
 EXIT_WAITING_FOR_ANSWER = 2
@@ -27,12 +30,19 @@ TERMINAL_ITEM_STATUSES = {"completed", "failed", "cancelled", "interrupted"}
 USAGE_LIMIT_FAILURE_CLASS = "usage_limit"
 
 
-def provider_and_model(agent_args: list[str]) -> tuple[str, str | None]:
+@dataclass(frozen=True)
+class ThreadArguments:
+    provider: str
+    model: str | None
+    effort: str | None
+
+
+def thread_arguments(agent_args: list[str]) -> ThreadArguments:
     values: dict[str, str] = {}
     remaining_args = iter(agent_args)
     for argument in remaining_args:
         name, separator, value = argument.partition("=")
-        if name not in {PROVIDER_ARGUMENT, MODEL_ARGUMENT}:
+        if name not in SUPPORTED_ARGUMENTS:
             raise SystemExit(f"golem: T3 Code argument is not supported: {argument}")
         if not separator:
             value = next(remaining_args, "")
@@ -42,15 +52,28 @@ def provider_and_model(agent_args: list[str]) -> tuple[str, str | None]:
     provider = values.get(PROVIDER_ARGUMENT, ledger.BACKEND_CLAUDE)
     if provider not in t3_code.INSTANCE_IDS:
         raise SystemExit(f"golem: {PROVIDER_ARGUMENT} must be claude or codex, got: {provider}")
-    return provider, values.get(MODEL_ARGUMENT)
+    return ThreadArguments(provider, values.get(MODEL_ARGUMENT), values.get(EFFORT_ARGUMENT))
 
 
 def provider_id(agent_args: list[str]) -> str:
-    return provider_and_model(agent_args)[0]
+    return thread_arguments(agent_args).provider
 
 
 def validate_run_arguments(agent_args: list[str]) -> None:
-    provider_and_model(agent_args)
+    arguments = thread_arguments(agent_args)
+    if arguments.effort is None:
+        return
+    driver = t3_code.INSTANCE_IDS[arguments.provider]
+    model = arguments.model or t3_code.default_model(driver)
+    levels = t3_code.effort_levels(driver, model)
+    if levels is None or arguments.effort in levels:
+        return
+    if not levels:
+        raise SystemExit(f"golem: {model} does not offer {EFFORT_ARGUMENT}")
+    raise SystemExit(
+        f"golem: {model} does not offer {EFFORT_ARGUMENT} {arguments.effort}; "
+        f"choose from: {', '.join(levels)}"
+    )
 
 
 def conversation_id(task: ledger.Task) -> str | None:
@@ -66,16 +89,27 @@ def transcript_paths(task: ledger.Task) -> list[Path]:
     return codex.session_transcript_paths(task, native_session_id)
 
 
-def create_thread(task_id: str, task: ledger.Task, thread_id: str) -> None:
-    provider, model = provider_and_model(task["agent_args"])
-    instance_id = t3_code.INSTANCE_IDS[provider]
-    origin = t3_code.server_origin()
-    token = t3_code.issue_token()
+def create_thread(
+    task_id: str,
+    task: ledger.Task,
+    thread_id: str,
+    origin: str,
+    token: str,
+    instance: t3_code.ClaudeInstance | None,
+) -> None:
+    arguments = thread_arguments(task["agent_args"])
+    driver = t3_code.INSTANCE_IDS[arguments.provider]
     t3_code.dispatch_command(
         origin,
         token,
         t3_code.thread_create_command(
-            origin, token, task, thread_id, instance_id, model or t3_code.default_model(instance_id)
+            origin,
+            token,
+            task,
+            thread_id,
+            t3_code.thread_instance_id(driver, instance),
+            arguments.model or t3_code.default_model(driver),
+            model_options=t3_code.effort_options(driver, arguments.effort),
         ),
     )
     common.record_session_field(task_id, task["session_id"], "t3_code_thread_id", thread_id)
@@ -144,16 +178,16 @@ class ThreadWatcher:
     thread_id: str
     origin: str
     record_progress: Callable[[str], None]
+    token: str
+    token_issued_at: float
     native_session_id: str | None = None
-    token: str = ""
-    token_issued_at: float | None = None
     previous_item_ids: set[str] = field(default_factory=set)
     run_items: dict[str, ledger.JsonObject] = field(default_factory=dict)
     recorded_item_ids: set[str] = field(default_factory=set)
 
     def current_token(self) -> str:
         now = time.monotonic()
-        if self.token_issued_at is None or now - self.token_issued_at >= TOKEN_REISSUE_SECONDS:
+        if now - self.token_issued_at >= TOKEN_REISSUE_SECONDS:
             self.token = t3_code.issue_token()
             self.token_issued_at = now
         return self.token
@@ -326,12 +360,15 @@ def run(
         cli_path = t3_code.t3_cli_path()
         if not cli_path.exists():
             return failed_outcome(f"golem: T3 Code is not installed: {cli_path} not found")
+        instance = accounts.t3_claude_instance(task.get("account"))
         try:
-            if not t3_code.server_runtime_path().exists():
-                t3_code.start_app()
-            if not common.is_usage_limit_resume(task) and not t3_code.is_thread_present(thread_id):
-                create_thread(task_id, task, thread_id)
+            t3_code.ensure_app_running()
             origin = t3_code.server_origin()
+            token = t3_code.issue_token()
+            if instance is not None:
+                t3_code.upsert_claude_instance(origin, token, instance)
+            if not common.is_usage_limit_resume(task) and not t3_code.is_thread_present(thread_id):
+                create_thread(task_id, task, thread_id, origin, token, instance)
         except t3_code.T3_CODE_ERRORS as error:
             return failed_outcome(
                 f"golem: T3 Code {t3_code.version()} could not run thread {thread_id}: {error}"
@@ -343,6 +380,8 @@ def run(
             origin,
             record_progress,
             native_session_id=task.get("native_session_id"),
+            token=token,
+            token_issued_at=time.monotonic(),
         )
         watcher.skip_previous_items()
         returncode, stdout, stderr = send_message(task, thread_id, watcher, lock_file_descriptors)

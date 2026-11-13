@@ -11,6 +11,7 @@ PROJECT_ID = "project"
 ADDED_PROJECT_ID = "added-project"
 CODEX_THREAD = "codex-thread"
 CACHED_CLAUDE_MODEL = "claude-cached"
+CLAUDE_EFFORT_LEVELS = ["low", "medium", "high"]
 SUCCESS_EXIT = {"_tag": "Success", "value": {"sequence": 3}}
 FINISHED_PULL_REQUESTS = [{"url": "merged", "state": ledger.PULL_REQUEST_STATE_MERGED}]
 CLAUDE_THREAD_ID = f"golem:claude:{support.TASK_ID}-session"
@@ -36,8 +37,10 @@ class FakeServer:
     home: Path
     project_root: str | None = None
     command_exit: dict = field(default_factory=lambda: SUCCESS_EXIT)
+    settings_exit: dict = field(default_factory=lambda: SUCCESS_EXIT)
     is_creating_threads: bool = True
     commands: list = field(default_factory=list)
+    settings_mutations: list = field(default_factory=list)
     projections: list = field(default_factory=lambda: [{"thread": {}, "turnItems": []}])
 
     def fetch_projects(self, _origin, _token):
@@ -56,6 +59,10 @@ class FakeServer:
         if self.is_creating_threads and self.command_exit == SUCCESS_EXIT:
             (self.home / "thread-present").touch()
         return self.command_exit
+
+    def update_settings_exit(self, _origin, _token, mutation):
+        self.settings_mutations.append(mutation)
+        return self.settings_exit
 
     def thread_projection(self, _origin, _token, _thread_id):
         send_count = sum(call.startswith("thread send") for call in self.t3_calls())
@@ -85,7 +92,20 @@ def write_claude_model_cache(home):
             {
                 "models": [
                     {"slug": "claude-other", "isDefault": False},
-                    {"slug": CACHED_CLAUDE_MODEL, "isDefault": True},
+                    {
+                        "slug": CACHED_CLAUDE_MODEL,
+                        "aliases": ["cached"],
+                        "isDefault": True,
+                        "capabilities": {
+                            "optionDescriptors": [
+                                {
+                                    "id": "effort",
+                                    "type": "select",
+                                    "options": [{"id": level} for level in CLAUDE_EFFORT_LEVELS],
+                                }
+                            ]
+                        },
+                    },
                 ]
             }
         ),

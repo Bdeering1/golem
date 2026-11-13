@@ -13,7 +13,9 @@ from tests import support
 
 def test_after_pending_parent_skips_usage_lookup(installed_launch_agent, ledger_path, monkeypatch):
     support.write_task(ledger_path, ledger.STATUS_SCHEDULED, task_id=support.PARENT_ID)
-    monkeypatch.setattr(claude, "next_reset_time", lambda: pytest.fail("usage lookup ran"))
+    monkeypatch.setattr(
+        claude, "next_reset_time", lambda _environment: pytest.fail("usage lookup ran")
+    )
 
     assert (
         cli.main(["run", support.CHILD_ID, support.CHILD_PROMPT, "--after", support.PARENT_ID]) == 0
@@ -34,7 +36,9 @@ def test_after_pending_parent_skips_usage_lookup(installed_launch_agent, ledger_
 def test_retry_refuses_unretryable_task_before_usage_lookup(ledger_path, monkeypatch, status):
     if status is not None:
         support.write_task(ledger_path, status)
-    monkeypatch.setattr(claude, "next_reset_time", lambda: pytest.fail("usage lookup ran"))
+    monkeypatch.setattr(
+        claude, "next_reset_time", lambda _environment: pytest.fail("usage lookup ran")
+    )
 
     with pytest.raises(SystemExit, match=support.TASK_ID):
         cli.main(["retry", support.TASK_ID])
@@ -43,6 +47,12 @@ def test_retry_refuses_unretryable_task_before_usage_lookup(ledger_path, monkeyp
 @pytest.mark.parametrize(
     ("backend_id", "option_arguments", "message"),
     [
+        ("codex", ["--account", "work@example.com"], "--account supports only Claude"),
+        (
+            "t3",
+            ["--account", "work@example.com", "--", "--provider", "codex"],
+            "--account supports only Claude tasks, not Codex tasks",
+        ),
         ("t3", ["--env", "NAME=value"], "--env does not support T3 Code"),
         ("t3", ["--", "--yolo"], "argument is not supported: --yolo"),
         ("t3", ["--", "--provider", "gemini"], "--provider must be claude or codex"),
@@ -204,7 +214,7 @@ def test_run_replaces_finished_task_on_each_reserved_path(
     schedule_arguments,
     existing_tasks,
 ):
-    monkeypatch.setattr(claude, "next_reset_time", lambda: None)
+    monkeypatch.setattr(claude, "next_reset_time", lambda _environment: None)
     support.write_tasks(ledger_path, {**existing_tasks, replaced_id: finished_task(replaced_id)})
     old_session_id = support.read_task(ledger_path, replaced_id)["session_id"]
 
@@ -246,7 +256,7 @@ def test_run_after_refuses_when_parent_is_replaced_during_usage_lookup(
 ):
     support.write_tasks(ledger_path, {support.PARENT_ID: finished_task(support.PARENT_ID)})
 
-    def replace_parent() -> None:
+    def replace_parent(_environment: dict[str, str]) -> None:
         support.write_tasks(
             ledger_path,
             {
@@ -264,7 +274,7 @@ def test_run_after_refuses_when_parent_is_replaced_during_usage_lookup(
     assert support.CHILD_ID not in support.read_tasks(ledger_path)
 
 
-def fail_usage_lookup() -> Never:
+def fail_usage_lookup(_environment: dict[str, str]) -> Never:
     raise SystemExit(common.USAGE_ERROR)
 
 
@@ -284,7 +294,7 @@ def fail_usage_lookup() -> Never:
         pytest.param(
             ledger.STATUS_DONE,
             {"after": support.PARENT_ID},
-            lambda: None,
+            lambda _environment: None,
             f"task already exists: {support.CHILD_ID}",
             id="chain-holds-parent",
         ),
@@ -355,7 +365,7 @@ def test_cancelling_task_cancels_waiting_dependents(
 def test_after_successful_parent_schedules_task_normally(
     installed_launch_agent, ledger_path, monkeypatch
 ):
-    monkeypatch.setattr(claude, "next_reset_time", lambda: support.RESET_TIME)
+    monkeypatch.setattr(claude, "next_reset_time", lambda _environment: support.RESET_TIME)
     cli.main(["run", support.PARENT_ID, support.PARENT_PROMPT, "--now"])
     parent = support.read_task(ledger_path, support.PARENT_ID)
     cli.main(["_execute", support.PARENT_ID, parent["session_id"]])
@@ -422,7 +432,7 @@ def test_retry_runs_failed_task_in_new_session(
     failed = support.read_task(ledger_path)
     cli.main(["_execute", support.TASK_ID, failed["session_id"]])
     monkeypatch.delenv("GOLEM_CLAUDE_EXIT")
-    monkeypatch.setattr(claude, "next_reset_time", lambda: reset_time)
+    monkeypatch.setattr(claude, "next_reset_time", lambda _environment: reset_time)
     monkeypatch.setattr(scheduling, "scheduled_time", lambda _: support.RESET_TIME)
 
     assert cli.main(["retry", support.TASK_ID, *retry_args]) == 0
@@ -444,7 +454,9 @@ def test_retry_runs_failed_task_in_new_session(
 def test_reschedule_refuses_unknown_and_non_scheduled_tasks(ledger_path, monkeypatch, status):
     if status is not None:
         support.write_task(ledger_path, status)
-    monkeypatch.setattr(claude, "next_reset_time", lambda: pytest.fail("usage lookup ran"))
+    monkeypatch.setattr(
+        claude, "next_reset_time", lambda _environment: pytest.fail("usage lookup ran")
+    )
 
     with pytest.raises(SystemExit, match=support.TASK_ID):
         cli.main(["reschedule", support.TASK_ID])

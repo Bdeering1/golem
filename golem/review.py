@@ -2,7 +2,7 @@ import os
 import subprocess
 import sys
 
-from golem import chains, clients, ledger, locks, t3_code, task_directories
+from golem import accounts, chains, clients, ledger, locks, t3_code, task_directories
 from golem.backends import registry
 
 
@@ -29,6 +29,13 @@ def pickup(
         raise SystemExit(f"golem: task not found: {task_id}")
     client = clients.task_client(task_id, preflight_task, client_name)
     client.validate_arguments(list(agent_args))
+    environment = (
+        client.environment(
+            accounts.account_environment(os.environ.copy(), preflight_task.get("account"))
+        )
+        if client.is_terminal
+        else {}
+    )
     with ledger.locked_ledger() as (tasks, worktrees):
         if task_id not in tasks:
             raise SystemExit(f"golem: task not found: {task_id}")
@@ -57,6 +64,10 @@ def pickup(
         cwd = ledger.task_directory(task)
     if not client.is_terminal:
         locks.release_lock(directory_lock_file)
+        if client.name == clients.CLAUDE_DESKTOP_CLIENT and "account" in task:
+            print(
+                f"golem: {task_id} continues on the Claude desktop app's sign-in", file=sys.stderr
+            )
         client.prepare(task, conversation_id)
         return open_app_and_mark_done(
             task_id,
@@ -67,19 +78,12 @@ def pickup(
         return subprocess.run(
             client.command(task, conversation_id, list(agent_args)),
             cwd=cwd,
-            env=client.environment(os.environ.copy()),
+            env=environment,
             pass_fds=(directory_lock_file.fileno(),),
             check=False,
         ).returncode
     finally:
         locks.release_lock(directory_lock_file)
-
-
-def is_ready_for_review(tasks: ledger.Tasks, task_id: str) -> bool:
-    task = tasks[task_id]
-    return task.get("status") == ledger.STATUS_NEEDS_REVIEW and (
-        "gate_stop_reason" in task or not chains.has_unreviewed_dependent(tasks, task_id)
-    )
 
 
 def default_client_name(task_id: str, task: ledger.Task, default_clients: dict[str, str]) -> str:
@@ -92,7 +96,7 @@ def default_client_name(task_id: str, task: ledger.Task, default_clients: dict[s
 
 def pickup_all(client_name: str | None, default_clients: dict[str, str]) -> int:
     tasks = ledger.load_tasks()
-    task_ids = [task_id for task_id in tasks if is_ready_for_review(tasks, task_id)]
+    task_ids = [task_id for task_id in tasks if chains.is_ready_for_review(tasks, task_id)]
     if not task_ids:
         print("golem: no tasks ready for review")
         return 0
@@ -121,7 +125,7 @@ def auto_pickup_task(task_id: str) -> None:
         auto_pickup_task(task.get("after", ""))
         return
     client_name = clients.task_auto_pickup_client(task)
-    if client_name is None or not is_ready_for_review(tasks, task_id):
+    if client_name is None or not chains.is_ready_for_review(tasks, task_id):
         return
     try:
         returncode = pickup(task_id, client_name=client_name, is_review_required=True)

@@ -159,7 +159,7 @@ def test_failed_follow_up_auto_pickup_opens_last_success(
 def test_after_parent_with_pending_gate_waits_for_the_gate(
     installed_launch_agent, ledger_path, monkeypatch
 ):
-    monkeypatch.setattr(claude, "next_reset_time", lambda: support.RESET_TIME)
+    monkeypatch.setattr(claude, "next_reset_time", lambda _environment: support.RESET_TIME)
     support.write_parent_with_waiting_child(ledger_path, gate="true")
 
     assert (
@@ -172,7 +172,7 @@ def test_after_parent_with_pending_gate_waits_for_the_gate(
 def test_after_succeeded_auto_pickup_parent_does_not_pass_to_child(
     installed_launch_agent, ledger_path, monkeypatch
 ):
-    monkeypatch.setattr(claude, "next_reset_time", lambda: support.RESET_TIME)
+    monkeypatch.setattr(claude, "next_reset_time", lambda _environment: support.RESET_TIME)
     support.write_task(
         ledger_path,
         ledger.STATUS_DONE,

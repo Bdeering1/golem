@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-from golem import codex_app, ledger, t3_code
+from golem import accounts, codex_app, ledger, t3_code
 from golem.backends import codex, registry
 
 CLAUDE_DESKTOP_CLIENT = "claude-desktop"
@@ -27,6 +27,10 @@ def accept_arguments(_agent_args: list[str]) -> None:
 
 def skip_preparation(_task: ledger.Task, _conversation_id: str) -> None:
     pass
+
+
+def prepare_t3_code_thread(task: ledger.Task, conversation_id: str) -> None:
+    t3_code.prepare_thread(task, conversation_id, accounts.t3_claude_instance(task.get("account")))
 
 
 @dataclass(frozen=True)
@@ -96,7 +100,7 @@ CLIENTS: dict[str, Client] = {
                 "open",
                 t3_code.thread_link(task, conversation_id),
             ],
-            prepare=t3_code.prepare_thread,
+            prepare=prepare_t3_code_thread,
             has_t3_code_thread=True,
         ),
     )

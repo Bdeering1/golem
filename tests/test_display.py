@@ -50,12 +50,12 @@ def test_list_groups_visible_tasks_by_status_and_id(ledger_path, capsys):
 
     table = output.split("\n\n")[0]
     assert [line.split()[0] for line in table.splitlines()[1:]] == [
-        "parent",
         "review",
         "a-failed",
         "z-failed",
         "running",
         "scheduled",
+        "waiting",
         "done",
         "cancelled",
     ]
@@ -77,6 +77,44 @@ def test_list_rows_show_each_chains_most_actionable_and_latest_task():
     rows = display.list_rows(tasks, TODAY)
 
     assert [(row.task_id, row.step) for row in rows] == [("branch-b", "2/3"), ("lone", "")]
+
+
+@pytest.mark.parametrize(
+    ("dependent_status", "parent_fields", "expected"),
+    [
+        pytest.param(
+            ledger.STATUS_RUNNING, {}, ("dependent", "2/2", ledger.STATUS_RUNNING), id="running"
+        ),
+        pytest.param(
+            ledger.STATUS_SCHEDULED,
+            {},
+            ("dependent", "2/2", ledger.STATUS_SCHEDULED),
+            id="scheduled",
+        ),
+        pytest.param(
+            ledger.STATUS_WAITING, {}, ("dependent", "2/2", ledger.STATUS_WAITING), id="waiting"
+        ),
+        pytest.param(
+            ledger.STATUS_WAITING,
+            {"gate_stop_reason": "tests failed"},
+            ("parent", "1/2", ledger.STATUS_NEEDS_REVIEW),
+            id="gate-stopped",
+        ),
+    ],
+)
+def test_list_rows_skip_needs_review_step_while_later_step_is_unfinished(
+    dependent_status, parent_fields, expected
+):
+    tasks = {
+        "parent": support.task_record(
+            ledger.STATUS_NEEDS_REVIEW, task_id="parent", **parent_fields
+        ),
+        "dependent": support.task_record(dependent_status, task_id="dependent", after="parent"),
+    }
+
+    rows = display.list_rows(tasks, TODAY)
+
+    assert [(row.task_id, row.step, row.status) for row in rows] == [expected]
 
 
 @pytest.mark.parametrize(

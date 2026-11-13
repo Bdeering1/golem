@@ -16,6 +16,25 @@ def fake_bin_path(tmp_path_factory):
     command_path = tmp_path_factory.mktemp("bin")
     for name, script in {
         "claude": """#!/bin/sh
+if [ "$1" = auth ]; then
+    printf '%s\\n' "$2" >> "$GOLEM_CLAUDE_AUTH"
+    credentials="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.credentials.json"
+    case "$2" in
+        status)
+            if [ -f "$credentials" ]; then cat "$credentials"; exit 0; fi
+            printf '{"loggedIn": false}'
+            exit 1 ;;
+        login)
+            if [ -n "${GOLEM_CLAUDE_LOGIN-}" ]; then cp "$GOLEM_CLAUDE_LOGIN" "$credentials"; fi
+            exit "${GOLEM_CLAUDE_LOGIN_EXIT:-0}" ;;
+        logout)
+            if [ "${GOLEM_CLAUDE_LOGOUT_EXIT:-0}" != 0 ]; then exit "$GOLEM_CLAUDE_LOGOUT_EXIT"; fi
+            rm -f "$credentials"
+            exit 0 ;;
+    esac
+fi
+printf '%s|%s|%s\\n' "${CLAUDE_CONFIG_DIR-}" "${CLAUDE_CODE_OAUTH_TOKEN+token}" \\
+    "${ANTHROPIC_API_KEY+token}" >> "$GOLEM_CLAUDE_ACCOUNT"
 printf '\036\\n' >> "$GOLEM_CLAUDE_ARGS"
 printf '%s\\n' "$@" >> "$GOLEM_CLAUDE_ARGS"
 printf '%s\\n' "$PWD" >> "$GOLEM_CLAUDE_CWD"
@@ -192,7 +211,9 @@ def fake_commands(monkeypatch, tmp_path, fake_bin_path):
     paths = {
         name: tmp_path / name
         for name in (
+            "claude-account",
             "claude-args",
+            "claude-auth",
             "claude-cwd",
             "claude-lang",
             "claude-lc-time",
@@ -219,6 +240,7 @@ def fake_commands(monkeypatch, tmp_path, fake_bin_path):
     work_path.mkdir()
     monkeypatch.setenv("PATH", f"{fake_bin_path}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.setenv("HOME", str(home_path))
+    monkeypatch.delenv("T3CODE_HOME", raising=False)
     monkeypatch.setenv("XDG_STATE_HOME", str(state_path))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(config_path))
     for name, path in paths.items():
@@ -282,6 +304,7 @@ def git_repository_template(tmp_path_factory):
             "-c",
             "gc.auto=0",
             "commit",
+            "--no-gpg-sign",
             "-qm",
             "test",
         ],
@@ -315,5 +338,30 @@ def server(monkeypatch, tmp_path):
     fake_server.mark_running()
     monkeypatch.setattr(t3_code, "fetch_projects", fake_server.fetch_projects)
     monkeypatch.setattr(t3_code, "dispatch_command_exit", fake_server.dispatch_command_exit)
+    monkeypatch.setattr(t3_code, "update_settings_exit", fake_server.update_settings_exit)
     monkeypatch.setattr(t3_code, "thread_projection", fake_server.thread_projection)
     return fake_server
+
+
+@pytest.fixture
+def claude_config_directory():
+    directory = Path.home() / ".claude"
+    directory.mkdir(parents=True)
+    (directory / support.CREDENTIALS).write_text(
+        support.status_text(support.DEFAULT_EMAIL, "org-personal", "Personal"), encoding="utf-8"
+    )
+    (directory / "settings.json").write_text("{}", encoding="utf-8")
+    return directory
+
+
+@pytest.fixture
+def add_account(monkeypatch, tmp_path, claude_config_directory):
+    def add(
+        email: str = support.WORK_EMAIL, org_id: str = "org-work", org_name: str = "Work"
+    ) -> int:
+        login_path = tmp_path / "login.json"
+        login_path.write_text(support.status_text(email, org_id, org_name), encoding="utf-8")
+        monkeypatch.setenv("GOLEM_CLAUDE_LOGIN", str(login_path))
+        return cli.main(["account", "add", "claude"])
+
+    return add

@@ -188,7 +188,7 @@ def test_usage_limit_resume_skips_setup(
     installed_launch_agent, fake_commands, ledger_path, tmp_path, monkeypatch
 ):
     directory = create_directory(tmp_path)
-    monkeypatch.setattr(claude, "next_reset_time", lambda: support.RESET_TIME)
+    monkeypatch.setattr(claude, "next_reset_time", lambda _environment: support.RESET_TIME)
     support.write_claude_output(
         fake_commands, support.USAGE_LIMIT_RESULT, api_error_status=claude.USAGE_LIMIT_HTTP_STATUS
     )
