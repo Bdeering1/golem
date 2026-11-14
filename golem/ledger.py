@@ -295,7 +295,9 @@ def root_task_id(tasks: Tasks, task_id: str) -> str:
     return task_id
 
 
+def has_closed_chain(tasks: Tasks, task_id: str) -> bool:
+    return has_field_in_subtree(tasks, root_task_id(tasks, task_id), "closed_at")
+
+
 def is_counted_opened(tasks: Tasks, task_id: str) -> bool:
-    return has_field_in_subtree(tasks, task_id, "opened_at") or has_field_in_subtree(
-        tasks, root_task_id(tasks, task_id), "closed_at"
-    )
+    return has_field_in_subtree(tasks, task_id, "opened_at") or has_closed_chain(tasks, task_id)

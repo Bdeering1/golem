@@ -279,20 +279,31 @@ def fail_usage_lookup(_environment: dict[str, str]) -> Never:
 
 
 @pytest.mark.parametrize(
-    ("parent_status", "child_fields", "next_reset_time", "error"),
+    ("parent", "child_fields", "next_reset_time", "error"),
     [
         pytest.param(
-            ledger.STATUS_CANCELLED, {}, None, "parent task is cancelled", id="cancelled-parent"
+            finished_task(support.PARENT_ID, ledger.STATUS_CANCELLED),
+            {},
+            None,
+            "parent task is cancelled",
+            id="cancelled-parent",
         ),
         pytest.param(
-            ledger.STATUS_FINISHED,
+            finished_task(support.PARENT_ID, closed_at="2030-03-10T12:00:00+00:00"),
+            {},
+            None,
+            "parent chain is closed",
+            id="closed-parent",
+        ),
+        pytest.param(
+            finished_task(support.PARENT_ID),
             {},
             fail_usage_lookup,
             re.escape(common.USAGE_ERROR),
             id="usage-lookup-fails",
         ),
         pytest.param(
-            ledger.STATUS_FINISHED,
+            finished_task(support.PARENT_ID),
             {"after": support.PARENT_ID},
             lambda _environment: None,
             f"task already exists: {support.CHILD_ID}",
@@ -304,7 +315,7 @@ def test_refused_run_after_keeps_finished_task_and_progress(
     installed_launch_agent,
     ledger_path,
     monkeypatch,
-    parent_status,
+    parent,
     child_fields,
     next_reset_time,
     error,
@@ -312,7 +323,7 @@ def test_refused_run_after_keeps_finished_task_and_progress(
     if next_reset_time is not None:
         monkeypatch.setattr(claude, "next_reset_time", next_reset_time)
     tasks = {
-        support.PARENT_ID: finished_task(support.PARENT_ID, parent_status),
+        support.PARENT_ID: parent,
         support.CHILD_ID: finished_task(support.CHILD_ID, **child_fields),
     }
     support.write_tasks(ledger_path, tasks)

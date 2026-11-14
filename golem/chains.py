@@ -62,6 +62,8 @@ def is_dependent_reservable(tasks: ledger.Tasks, parent_id: str) -> bool:
     parent_status = tasks[parent_id]["status"]
     if parent_status == ledger.STATUS_CANCELLED:
         raise SystemExit(f"golem: parent task is cancelled: {parent_id}")
+    if ledger.has_closed_chain(tasks, parent_id):
+        raise SystemExit(f"golem: parent chain is closed: {parent_id}")
     return not can_start_dependents(tasks[parent_id]) or is_gate_pending(tasks, parent_id)
 
 
