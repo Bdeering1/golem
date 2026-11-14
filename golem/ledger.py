@@ -35,10 +35,11 @@ ALL_STATUSES: set[str] = set(LIST_STATUS_ORDER)
 CLEAN_EXIT_STATUSES = {STATUS_BLOCKED, STATUS_FINISHED}
 UNFINISHED_STATUSES = {STATUS_SCHEDULED, STATUS_RUNNING, STATUS_WAITING, STATUS_BLOCKED}
 CHAIN_DONE_AGE_DAYS = 7
-THREAD_STATE_UNSETTLED = "unsettled"
-THREAD_STATE_SETTLED = "settled"
-THREAD_STATE_ARCHIVED = "archived"
-THREAD_STATE_DELETED = "deleted"
+ThreadState = Literal["unsettled", "settled", "archived", "deleted"]
+THREAD_STATE_UNSETTLED: ThreadState = "unsettled"
+THREAD_STATE_SETTLED: ThreadState = "settled"
+THREAD_STATE_ARCHIVED: ThreadState = "archived"
+THREAD_STATE_DELETED: ThreadState = "deleted"
 PullRequestState = Literal["open", "merged", "closed"]
 PULL_REQUEST_STATES: tuple[PullRequestState, ...] = get_args(PullRequestState)
 PULL_REQUEST_STATE_OPEN: PullRequestState = "open"
@@ -70,7 +71,7 @@ class Task(TypedDict):
     worktree_pending: NotRequired[bool]
     thread_id: NotRequired[str]
     t3_code_thread_id: NotRequired[str]
-    t3_code_thread_state: NotRequired[str]
+    t3_code_thread_state: NotRequired[ThreadState]
     native_session_id: NotRequired[str]
     result: NotRequired[str]
     returncode: NotRequired[int]

@@ -238,12 +238,7 @@ def list_row_sort_key(row: ListRow) -> tuple[int, int, str]:
 
 def list_rows(tasks: ledger.Tasks, today: date) -> list[ListRow]:
     rows: list[ListRow] = []
-    listed_ids: set[str] = set()
-    for task_id in tasks:
-        if task_id in listed_ids:
-            continue
-        chain_ids = chains.chain_task_ids(tasks, task_id)
-        listed_ids |= chain_ids
+    for chain_ids in chains.chain_id_sets(tasks):
         shown_id = shown_task_id(tasks, chain_ids)
         shown_task = tasks[shown_id]
         column, chain_reason = chain_column(tasks, chain_ids, today)

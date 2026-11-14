@@ -181,12 +181,7 @@ def has_pending_tasks(tasks: ledger.Tasks) -> bool:
 
 def thread_ids_to_refresh(tasks: ledger.Tasks) -> dict[str, str]:
     thread_ids: dict[str, str] = {}
-    listed_ids: set[str] = set()
-    for task_id in tasks:
-        if task_id in listed_ids:
-            continue
-        chain_ids = chains.chain_task_ids(tasks, task_id)
-        listed_ids |= chain_ids
+    for chain_ids in chains.chain_id_sets(tasks):
         if not chains.is_chain_finished(tasks, chain_ids):
             continue
         step_id = display.thread_deciding_step_id(tasks, chain_ids)
@@ -205,7 +200,7 @@ def refresh_thread_states() -> None:
     thread_ids = thread_ids_to_refresh(tasks)
     if not thread_ids:
         return
-    thread_states: dict[str, str] = {}
+    thread_states: dict[str, ledger.ThreadState] = {}
     try:
         origin = t3_code.server_origin()
         token = t3_code.issue_token()

@@ -207,7 +207,7 @@ def thread_projection(origin: str, token: str, thread_id: str) -> ledger.JsonObj
     return cast("ledger.JsonObject", successful_value(projection_exit))
 
 
-def thread_state(origin: str, token: str, thread_id: str) -> str | None:
+def thread_state(origin: str, token: str, thread_id: str) -> ledger.ThreadState | None:
     try:
         projected_thread = thread_projection(origin, token, thread_id).get("thread")
     except T3_CODE_ERRORS:

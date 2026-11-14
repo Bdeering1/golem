@@ -106,6 +106,18 @@ def chain_task_ids(tasks: ledger.Tasks, task_id: str) -> set[str]:
     return chain_ids
 
 
+def chain_id_sets(tasks: ledger.Tasks) -> list[set[str]]:
+    id_sets: list[set[str]] = []
+    listed_ids: set[str] = set()
+    for task_id in tasks:
+        if task_id in listed_ids:
+            continue
+        chain_ids = chain_task_ids(tasks, task_id)
+        listed_ids |= chain_ids
+        id_sets.append(chain_ids)
+    return id_sets
+
+
 def dependents_first_task_ids(tasks: ledger.Tasks, task_ids: list[str]) -> list[str]:
     ordered_task_ids: list[str] = []
     for task_id in task_ids:
