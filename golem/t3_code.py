@@ -209,9 +209,12 @@ def thread_projection(origin: str, token: str, thread_id: str) -> ledger.JsonObj
 
 def thread_state(origin: str, token: str, thread_id: str) -> str | None:
     try:
-        thread = cast("ledger.JsonObject", thread_projection(origin, token, thread_id)["thread"])
+        projected_thread = thread_projection(origin, token, thread_id).get("thread")
     except T3_CODE_ERRORS:
+        projected_thread = None
+    if not isinstance(projected_thread, dict):
         return ledger.THREAD_STATE_DELETED if is_thread_missing(thread_id) else None
+    thread = cast("ledger.JsonObject", projected_thread)
     if thread.get("deletedAt") is not None:
         return ledger.THREAD_STATE_DELETED
     if thread.get("archivedAt") is not None:

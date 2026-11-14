@@ -38,6 +38,24 @@ def test_close_refuses_unfinished_chain(ledger_path):
     assert "closed_at" not in support.read_task(ledger_path, support.PARENT_ID)
 
 
+def test_pickup_all_skips_closed_chain(fake_commands, ledger_path):
+    support.write_tasks(
+        ledger_path,
+        {
+            support.PARENT_ID: support.task_record(
+                ledger.STATUS_FINISHED, task_id=support.PARENT_ID
+            ),
+            support.CHILD_ID: support.task_record(
+                ledger.STATUS_FINISHED, task_id=support.CHILD_ID, after=support.PARENT_ID
+            ),
+        },
+    )
+
+    assert cli.main(["close", support.PARENT_ID]) == 0
+    assert cli.main(["pickup", "--all", "--client", "claude-desktop"]) == 0
+    assert not fake_commands["open-args"].read_text(encoding="utf-8")
+
+
 @pytest.mark.parametrize(
     "status", [ledger.STATUS_SCHEDULED, ledger.STATUS_WAITING, ledger.STATUS_CANCELLED]
 )

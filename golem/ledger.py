@@ -281,8 +281,20 @@ def has_finished_pull_requests(task: Task) -> bool:
     return are_pull_requests_finished(task.get("pull_requests", []))
 
 
-def is_counted_opened(tasks: Tasks, task_id: str) -> bool:
-    return "opened_at" in tasks[task_id] or any(
-        dependent.get("after") == task_id and is_counted_opened(tasks, dependent_id)
+def has_marked_descendant(tasks: Tasks, task_id: str, field: str) -> bool:
+    return field in tasks[task_id] or any(
+        dependent.get("after") == task_id and has_marked_descendant(tasks, dependent_id, field)
         for dependent_id, dependent in tasks.items()
+    )
+
+
+def root_task_id(tasks: Tasks, task_id: str) -> str:
+    while (parent_id := tasks[task_id].get("after")) is not None and parent_id in tasks:
+        task_id = parent_id
+    return task_id
+
+
+def is_counted_opened(tasks: Tasks, task_id: str) -> bool:
+    return has_marked_descendant(tasks, task_id, "opened_at") or has_marked_descendant(
+        tasks, root_task_id(tasks, task_id), "closed_at"
     )
