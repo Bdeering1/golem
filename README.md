@@ -2,7 +2,7 @@
 
 A CLI-based orchestrator for coding agents.
 
-Queue agent sessions, chain them together, run them on different accounts, and schedule them around your usage limits. golem runs them in the background, each in its own git worktree, and notifies you when one needs review. Setup scripts, gates, and aliases let you build your own workflows on top.
+Queue agent sessions, chain them together, run them on different accounts, and schedule them around your usage limits. Sessions run in the background in isolated worktrees. Setup scripts, gates, and aliases let you build your own workflows on top.
 
 ## Install
 
