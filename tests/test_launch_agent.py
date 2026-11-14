@@ -23,6 +23,7 @@ from golem import (
     progress_log,
     scheduling,
     spawn,
+    t3_code,
 )
 from golem.backends import claude
 from tests import support
@@ -134,7 +135,7 @@ def test_agent_log_under_limit_is_untouched(monkeypatch):
 
 
 def test_agent_pass_removes_stale_state_but_keeps_held_lock(ledger_path):
-    support.write_task(ledger_path, ledger.STATUS_DONE)
+    support.write_task(ledger_path, ledger.STATUS_FINISHED)
     interrupted_write_path = ledger_path.parent / ".tasks.json.interrupted"
     interrupted_write_path.touch()
     orphan_lock_path = locks.run_lock_path("orphan")
@@ -169,7 +170,7 @@ def test_agent_cleanup_waits_for_active_ledger_write(ledger_path, monkeypatch):
 
     def write_done_task() -> None:
         with ledger.locked_tasks() as tasks:
-            tasks[support.TASK_ID] = support.task_record(ledger.STATUS_DONE)
+            tasks[support.TASK_ID] = support.task_record(ledger.STATUS_FINISHED)
 
     writer = context.Process(target=write_done_task)
     writer.start()
@@ -187,7 +188,7 @@ def test_agent_cleanup_waits_for_active_ledger_write(ledger_path, monkeypatch):
         writer.join()
 
         assert writer.exitcode == 0
-        assert support.read_task(ledger_path)["status"] == ledger.STATUS_DONE
+        assert support.read_task(ledger_path)["status"] == ledger.STATUS_FINISHED
     finally:
         finish_write.set()
         if writer.is_alive():
@@ -213,7 +214,7 @@ def test_launch_agent_pass_leaves_running_executor_alone(
     cli.main(["_execute", support.TASK_ID, support.read_task(ledger_path)["session_id"]])
 
     assert statuses_during_run == [ledger.STATUS_RUNNING]
-    assert support.read_task(ledger_path)["status"] == ledger.STATUS_NEEDS_REVIEW
+    assert support.read_task(ledger_path)["status"] == ledger.STATUS_FINISHED
 
 
 @pytest.mark.parametrize(
@@ -382,7 +383,7 @@ def test_agent_does_not_recover_draining_while_a_dependent_is_running(
         ledger_path,
         {
             support.PARENT_ID: support.task_record(
-                ledger.STATUS_NEEDS_REVIEW, task_id=support.PARENT_ID
+                ledger.STATUS_FINISHED, task_id=support.PARENT_ID
             ),
             support.CHILD_ID: support.task_record(
                 ledger.STATUS_RUNNING, task_id=support.CHILD_ID, after=support.PARENT_ID
@@ -415,7 +416,7 @@ def test_agent_waits_to_start_tasks_until_their_known_directory_is_free(
         ledger_path,
         {
             support.PARENT_ID: support.task_record(
-                ledger.STATUS_NEEDS_REVIEW, task_id=support.PARENT_ID, worktree=str(worktree)
+                ledger.STATUS_FINISHED, task_id=support.PARENT_ID, worktree=str(worktree)
             ),
             support.CHILD_ID: support.task_record(
                 ledger.STATUS_WAITING, task_id=support.CHILD_ID, after=support.PARENT_ID
@@ -502,7 +503,7 @@ def test_launch_agent_starts_due_tasks_while_pull_requests_refresh(ledger_path, 
 
     def start_executor_that_finishes(task_id: str, _: ledger.Task) -> subprocess.Popen[bytes]:
         with ledger.locked_tasks() as tasks:
-            tasks[task_id]["status"] = ledger.STATUS_DONE
+            tasks[task_id]["status"] = ledger.STATUS_FINISHED
         task_started.set()
         processes.append(subprocess.Popen([sys.executable, "-c", ""]))
         return processes[0]
@@ -518,17 +519,17 @@ def test_launch_agent_starts_due_tasks_while_pull_requests_refresh(ledger_path, 
 
 def test_waiting_dependent_of_succeeded_parent_keeps_launch_agent_running():
     tasks: ledger.Tasks = {
-        support.PARENT_ID: support.task_record(ledger.STATUS_DONE, task_id=support.PARENT_ID),
+        support.PARENT_ID: support.task_record(ledger.STATUS_FINISHED, task_id=support.PARENT_ID),
         support.TASK_ID: support.task_record(ledger.STATUS_WAITING, after=support.PARENT_ID),
     }
 
     assert launch_agent.has_pending_tasks(tasks)
 
 
-def test_launch_agent_stores_pull_requests_of_done_tasks(write_pull_requests, ledger_path):
+def test_launch_agent_stores_pull_requests_of_finished_tasks(write_pull_requests, ledger_path):
     support.write_task(
         ledger_path,
-        ledger.STATUS_DONE,
+        ledger.STATUS_FINISHED,
         repository_branches=[{"repository": "owner/repository", "branch": support.WORKTREE_BRANCH}],
     )
     write_pull_requests(support.WORKTREE_BRANCH, [{"url": PULL_REQUEST_URL, "state": "MERGED"}])
@@ -538,3 +539,71 @@ def test_launch_agent_stores_pull_requests_of_done_tasks(write_pull_requests, le
     assert support.read_task(ledger_path)["pull_requests"] == [
         {"url": PULL_REQUEST_URL, "state": ledger.PULL_REQUEST_STATE_MERGED}
     ]
+
+
+def unreachable_projection(*_arguments: object) -> Never:
+    raise t3_code.T3CodeError("no projection")
+
+
+@pytest.mark.parametrize(
+    ("thread", "is_thread_present", "expected_state"),
+    [
+        pytest.param({}, True, ledger.THREAD_STATE_UNSETTLED, id="unsettled"),
+        pytest.param({"settledAt": "2030-03-01"}, True, ledger.THREAD_STATE_SETTLED, id="settled"),
+        pytest.param(
+            {"settledOverride": "settled"}, True, ledger.THREAD_STATE_SETTLED, id="override"
+        ),
+        pytest.param(
+            {"archivedAt": "2030-03-01"}, True, ledger.THREAD_STATE_ARCHIVED, id="archived"
+        ),
+        pytest.param({"deletedAt": "2030-03-01"}, True, ledger.THREAD_STATE_DELETED, id="deleted"),
+        pytest.param(None, False, ledger.THREAD_STATE_DELETED, id="missing"),
+        pytest.param(None, True, ledger.THREAD_STATE_SETTLED, id="unreadable"),
+    ],
+)
+def test_launch_agent_records_thread_state_of_finished_chain(
+    server, ledger_path, monkeypatch, thread, is_thread_present, expected_state
+):
+    support.write_task(
+        ledger_path,
+        ledger.STATUS_FINISHED,
+        t3_code_thread_id="thread",
+        t3_code_thread_state=ledger.THREAD_STATE_SETTLED,
+    )
+    if thread is None:
+        monkeypatch.setattr(t3_code, "thread_projection", unreachable_projection)
+    server.projections[0] = {"thread": thread}
+    if is_thread_present:
+        (server.home / "thread-present").touch()
+
+    assert launch_agent.run_launch_agent() == 0
+
+    assert support.read_task(ledger_path)["t3_code_thread_state"] == expected_state
+
+
+@pytest.mark.parametrize(
+    ("fields", "is_running"),
+    [
+        pytest.param({}, False, id="t3-code-closed"),
+        pytest.param(
+            {"pull_requests": [{"url": PULL_REQUEST_URL, "state": "open"}]}, True, id="pr"
+        ),
+    ],
+)
+def test_launch_agent_keeps_last_thread_state_without_reading(
+    server, ledger_path, monkeypatch, fields, is_running
+):
+    support.write_task(
+        ledger_path,
+        ledger.STATUS_FINISHED,
+        t3_code_thread_id="thread",
+        t3_code_thread_state=ledger.THREAD_STATE_SETTLED,
+        **fields,
+    )
+    if not is_running:
+        server.runtime_path.unlink()
+    monkeypatch.setattr(t3_code, "thread_projection", lambda *_: pytest.fail("thread read"))
+
+    assert launch_agent.run_launch_agent() == 0
+
+    assert support.read_task(ledger_path)["t3_code_thread_state"] == ledger.THREAD_STATE_SETTLED

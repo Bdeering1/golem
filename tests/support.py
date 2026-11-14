@@ -259,7 +259,7 @@ def run_gated_chain(ledger_path, gate, *extra_arguments: str):
 
 
 def write_parent_with_waiting_child(
-    ledger_path, parent_status: str = ledger.STATUS_NEEDS_REVIEW, **parent_fields: object
+    ledger_path, parent_status: str = ledger.STATUS_FINISHED, **parent_fields: object
 ):
     tasks = {
         PARENT_ID: task_record(parent_status, task_id=PARENT_ID, **parent_fields),

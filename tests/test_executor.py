@@ -85,16 +85,16 @@ def test_finished_task_records_its_branch(
 @pytest.mark.parametrize(
     ("exit_code", "output", "expected_result", "expected_status"),
     [
-        pytest.param(0, '{"result": "done"}', "done", ledger.STATUS_NEEDS_REVIEW, id="success"),
+        pytest.param(0, '{"result": "done"}', "done", ledger.STATUS_FINISHED, id="success"),
         pytest.param(1, '{"result": "done"}', "done", ledger.STATUS_FAILED, id="failure"),
         pytest.param(
             0,
             '[{"type": "system"}, {"type": "result", "result": "done"}]',
             "done",
-            ledger.STATUS_NEEDS_REVIEW,
+            ledger.STATUS_FINISHED,
             id="verbose",
         ),
-        pytest.param(0, "plain output", "plain output", ledger.STATUS_NEEDS_REVIEW, id="plain"),
+        pytest.param(0, "plain output", "plain output", ledger.STATUS_FINISHED, id="plain"),
     ],
 )
 def test_run_now_records_claude_result(
@@ -129,9 +129,9 @@ def test_run_now_records_claude_result(
     [
         pytest.param(
             None,
-            ledger.STATUS_DONE,
+            ledger.STATUS_FINISHED,
             support.CLAUDE_RESULT,
-            ledger.STATUS_NEEDS_REVIEW,
+            ledger.STATUS_FINISHED,
             2,
             id="background-work-completes",
         ),
@@ -205,7 +205,7 @@ def test_usage_limited_task_resumes_at_reset_in_same_session(
     assert cli.main(["_execute", support.TASK_ID, session_id]) == 0
 
     task = support.read_task(ledger_path)
-    assert task["status"] == ledger.STATUS_NEEDS_REVIEW
+    assert task["status"] == ledger.STATUS_FINISHED
     assert task["result"] == support.CLAUDE_RESULT
     assert task["session_id"] == session_id
     assert support.logged_claude_args(fake_commands) == [
@@ -245,7 +245,7 @@ def test_subagent_usage_limit_event_does_not_pause_task(fake_commands, ledger_pa
     executor.execute_task(support.TASK_ID, support.read_task(ledger_path), ())
 
     task = support.read_task(ledger_path)
-    assert task["status"] == ledger.STATUS_NEEDS_REVIEW
+    assert task["status"] == ledger.STATUS_FINISHED
     assert task["result"] == support.CLAUDE_RESULT
 
 
@@ -337,7 +337,7 @@ def test_scheduled_task_runs_when_executed(
     support.set_task_due_now(ledger_path)
 
     assert cli.main(["_execute", support.TASK_ID, task["session_id"]]) == 0
-    assert support.read_task(ledger_path)["status"] == ledger.STATUS_NEEDS_REVIEW
+    assert support.read_task(ledger_path)["status"] == ledger.STATUS_FINISHED
 
 
 def test_leftover_executor_does_not_run_retried_task(
@@ -419,7 +419,7 @@ def test_dependent_drain_stops_for_busy_worktrees_and_skips_missing_worktrees(
         ledger_path,
         {
             support.PARENT_ID: support.task_record(
-                ledger.STATUS_NEEDS_REVIEW, task_id=support.PARENT_ID, worktree=str(first_worktree)
+                ledger.STATUS_FINISHED, task_id=support.PARENT_ID, worktree=str(first_worktree)
             ),
             support.CHILD_ID: support.task_record(
                 ledger.STATUS_WAITING, task_id=support.CHILD_ID, after=support.PARENT_ID
@@ -462,10 +462,8 @@ def test_dependent_drain_stops_for_busy_worktrees_and_skips_missing_worktrees(
     assert support.read_task(ledger_path, support.CHILD_ID)["result"] == (
         f"golem: worktree is missing: {first_worktree}"
     )
-    assert (
-        support.read_task(ledger_path, support.SIBLING_ID)["status"] == ledger.STATUS_NEEDS_REVIEW
-    )
+    assert support.read_task(ledger_path, support.SIBLING_ID)["status"] == ledger.STATUS_FINISHED
     assert [notification[-2] for notification in support.logged_osascript_calls(fake_commands)] == [
         f"golem: {support.CHILD_ID} failed",
-        f"golem: {support.SIBLING_ID} needs review",
+        f"golem: {support.SIBLING_ID} finished",
     ]

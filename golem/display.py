@@ -9,18 +9,35 @@ from typing import NamedTuple
 from golem import chains, ledger
 
 STATUS_COLORS = {
-    ledger.STATUS_NEEDS_REVIEW: 33,
+    ledger.STATUS_BLOCKED: 33,
     ledger.STATUS_FAILED: 196,
     ledger.STATUS_RUNNING: 39,
     ledger.STATUS_SCHEDULED: 208,
     ledger.STATUS_WAITING: 141,
-    ledger.STATUS_DONE: 34,
+    ledger.STATUS_FINISHED: 34,
     ledger.STATUS_CANCELLED: 244,
 }
 DETAIL_LINE_COLOR = 245
 ANSI_RESET = "\033[0m"
 LIST_HEADERS = ("ID", "STEP", "STATUS", "DIRECTORY", "DETAIL")
 DETAIL_LINE_INDENT = "    "
+COLUMN_QUEUED = "Queued"
+COLUMN_RUNNING = "Running"
+COLUMN_REVIEW = "Review"
+COLUMN_DONE = "Done"
+LIST_COLUMN_ORDER = (COLUMN_REVIEW, COLUMN_RUNNING, COLUMN_QUEUED, COLUMN_DONE)
+STATUS_COLUMNS = {
+    ledger.STATUS_BLOCKED: COLUMN_REVIEW,
+    ledger.STATUS_FAILED: COLUMN_REVIEW,
+    ledger.STATUS_RUNNING: COLUMN_RUNNING,
+    ledger.STATUS_SCHEDULED: COLUMN_QUEUED,
+    ledger.STATUS_WAITING: COLUMN_QUEUED,
+}
+DONE_THREAD_STATES = {
+    ledger.THREAD_STATE_SETTLED,
+    ledger.THREAD_STATE_ARCHIVED,
+    ledger.THREAD_STATE_DELETED,
+}
 
 
 class ListRow(NamedTuple):
@@ -29,7 +46,7 @@ class ListRow(NamedTuple):
     status: str
     directory: str
     detail: str
-    is_hidden: bool
+    column: str | None
 
     def cells(self) -> tuple[str, str, str, str, str]:
         return (self.task_id, self.step, self.status, self.directory, self.detail)
@@ -133,14 +150,76 @@ def pull_request_summary(pull_requests: list[ledger.PullRequest]) -> str:
     return f"PR {state}" if len(pull_requests) == 1 else f"{len(pull_requests)} PRs {state}"
 
 
-def list_detail(task: ledger.Task, today: date) -> str:
+def list_detail(task: ledger.Task, today: date, chain_reason: str) -> str:
     timestamp = detail_timestamp(task)
-    status_detail = display_time(timestamp, today) if timestamp is not None else ""
+    status_detail = display_time(timestamp, today) if timestamp is not None else chain_reason
     if task["status"] == ledger.STATUS_WAITING:
         status_detail = task.get("after", "")
-    if task["status"] == ledger.STATUS_DONE and "pull_requests" in task:
-        status_detail = pull_request_summary(task["pull_requests"])
     return "; ".join(text for text in (status_detail, list_reason(task)) if text)
+
+
+def chain_pull_requests(tasks: ledger.Tasks, chain_ids: set[str]) -> list[ledger.PullRequest]:
+    return [
+        pull_request
+        for chain_id in sorted(chain_ids)
+        for pull_request in tasks[chain_id].get("pull_requests", [])
+    ]
+
+
+def last_step_id(tasks: ledger.Tasks, chain_ids: set[str]) -> str:
+    return max(
+        (
+            chain_id
+            for chain_id in chain_ids
+            if tasks[chain_id]["status"] != ledger.STATUS_CANCELLED
+        ),
+        key=lambda chain_id: (chains.task_depth(tasks, chain_id), chain_id),
+    )
+
+
+def finished_chain_column(tasks: ledger.Tasks, chain_ids: set[str], today: date) -> tuple[str, str]:
+    if any("closed_at" in tasks[chain_id] for chain_id in chain_ids):
+        return COLUMN_DONE, "closed"
+    pull_requests = chain_pull_requests(tasks, chain_ids)
+    if pull_requests:
+        column = COLUMN_DONE if ledger.are_pull_requests_finished(pull_requests) else COLUMN_REVIEW
+        return column, pull_request_summary(pull_requests)
+    last_step = tasks[last_step_id(tasks, chain_ids)]
+    if "t3_code_thread_id" in last_step:
+        thread_state = last_step.get("t3_code_thread_state", ledger.THREAD_STATE_UNSETTLED)
+        column = COLUMN_DONE if thread_state in DONE_THREAD_STATES else COLUMN_REVIEW
+        return column, f"thread {thread_state}"
+    finished_at = max(tasks[chain_id].get("finished_at", "") for chain_id in chain_ids)
+    if not finished_at:
+        return COLUMN_REVIEW, "no PR"
+    age_days = (today - datetime.fromisoformat(finished_at).astimezone().date()).days
+    column = COLUMN_DONE if age_days >= ledger.CHAIN_DONE_AGE_DAYS else COLUMN_REVIEW
+    return column, f"no PR; finished {age_days}d ago"
+
+
+def chain_column(tasks: ledger.Tasks, chain_ids: set[str], today: date) -> tuple[str | None, str]:
+    shown_status = tasks[shown_task_id(tasks, chain_ids)]["status"]
+    if shown_status == ledger.STATUS_FINISHED:
+        return finished_chain_column(tasks, chain_ids, today)
+    return STATUS_COLUMNS.get(shown_status), ""
+
+
+def shown_task_id(tasks: ledger.Tasks, chain_ids: set[str]) -> str:
+    return max(
+        chain_ids,
+        key=lambda chain_id: (
+            -ledger.LIST_STATUS_ORDER.index(tasks[chain_id]["status"]),
+            chains.task_depth(tasks, chain_id),
+            chain_id,
+        ),
+    )
+
+
+def list_row_sort_key(row: ListRow) -> tuple[int, int, str]:
+    column_index = (
+        LIST_COLUMN_ORDER.index(row.column) if row.column is not None else len(LIST_COLUMN_ORDER)
+    )
+    return column_index, ledger.LIST_STATUS_ORDER.index(row.status), row.task_id
 
 
 def list_rows(tasks: ledger.Tasks, today: date) -> list[ListRow]:
@@ -151,36 +230,21 @@ def list_rows(tasks: ledger.Tasks, today: date) -> list[ListRow]:
             continue
         chain_ids = chains.chain_task_ids(tasks, task_id)
         listed_ids |= chain_ids
-        depths = {chain_id: chains.task_depth(tasks, chain_id) for chain_id in chain_ids}
-        shown_id = max(
-            (
-                chain_id
-                for chain_id in chain_ids
-                if tasks[chain_id]["status"] != ledger.STATUS_NEEDS_REVIEW
-                or chains.is_ready_for_review(tasks, chain_id)
-            ),
-            key=lambda chain_id: (
-                -ledger.LIST_STATUS_ORDER.index(tasks[chain_id]["status"]),
-                depths[chain_id],
-                chain_id,
-            ),
-        )
+        shown_id = shown_task_id(tasks, chain_ids)
         shown_task = tasks[shown_id]
+        column, chain_reason = chain_column(tasks, chain_ids, today)
+        step_count = max(chains.task_depth(tasks, chain_id) for chain_id in chain_ids)
         rows.append(
             ListRow(
                 shown_id,
-                f"{depths[shown_id]}/{max(depths.values())}" if len(chain_ids) > 1 else "",
+                f"{chains.task_depth(tasks, shown_id)}/{step_count}" if len(chain_ids) > 1 else "",
                 shown_task["status"],
                 shown_task["cwd"],
-                list_detail(shown_task, today),
-                all(
-                    tasks[chain_id]["status"] == ledger.STATUS_DONE
-                    and ledger.has_finished_pull_requests(tasks[chain_id])
-                    for chain_id in chain_ids
-                ),
+                list_detail(shown_task, today, chain_reason),
+                column,
             )
         )
-    rows.sort(key=lambda row: (ledger.LIST_STATUS_ORDER.index(row.status), row.task_id))
+    rows.sort(key=list_row_sort_key)
     return rows
 
 
@@ -224,8 +288,8 @@ def list_tasks(*, is_showing_all: bool) -> int:
         print("golem: no tasks")
         return 0
     all_rows = list_rows(tasks, datetime.now().astimezone().date())
-    rows = [row for row in all_rows if is_showing_all or not row.is_hidden]
-    hidden_footnote = f"{len(all_rows) - len(rows)} hidden; --all shows them"
+    rows = [row for row in all_rows if is_showing_all or row.column != COLUMN_DONE]
+    hidden_footnote = f"{len(all_rows) - len(rows)} done hidden; --all shows them"
     if not rows:
         print(hidden_footnote)
         return 0

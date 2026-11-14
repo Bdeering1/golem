@@ -43,7 +43,7 @@ def pop_tasks_and_release_worktrees(
 
 
 def is_replaceable_task(task: ledger.Task) -> bool:
-    return task["status"] == ledger.STATUS_DONE and ledger.has_finished_pull_requests(task)
+    return task["status"] == ledger.STATUS_FINISHED and ledger.has_finished_pull_requests(task)
 
 
 def replaceable_chain_ids(

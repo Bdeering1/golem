@@ -14,26 +14,31 @@ if TYPE_CHECKING:
 STATUS_SCHEDULED = "scheduled"
 STATUS_RUNNING = "running"
 STATUS_WAITING = "waiting"
-STATUS_NEEDS_REVIEW = "needs_review"
+STATUS_BLOCKED = "blocked"
 STATUS_FAILED = "failed"
-STATUS_DONE = "done"
+STATUS_FINISHED = "finished"
 STATUS_CANCELLED = "cancelled"
 NOT_STARTED_STATUSES = {STATUS_SCHEDULED, STATUS_WAITING, STATUS_CANCELLED}
 BACKEND_CLAUDE = "claude"
 BACKEND_CODEX = "codex"
 BACKEND_T3 = "t3"
 LIST_STATUS_ORDER = (
-    STATUS_NEEDS_REVIEW,
+    STATUS_BLOCKED,
     STATUS_FAILED,
     STATUS_RUNNING,
     STATUS_SCHEDULED,
     STATUS_WAITING,
-    STATUS_DONE,
+    STATUS_FINISHED,
     STATUS_CANCELLED,
 )
 ALL_STATUSES: set[str] = set(LIST_STATUS_ORDER)
-SUCCEEDED_STATUSES = {STATUS_NEEDS_REVIEW, STATUS_DONE}
-UNREVIEWED_STATUSES = {STATUS_SCHEDULED, STATUS_RUNNING, STATUS_WAITING, STATUS_NEEDS_REVIEW}
+CLEAN_EXIT_STATUSES = {STATUS_BLOCKED, STATUS_FINISHED}
+UNFINISHED_STATUSES = {STATUS_SCHEDULED, STATUS_RUNNING, STATUS_WAITING, STATUS_BLOCKED}
+CHAIN_DONE_AGE_DAYS = 7
+THREAD_STATE_UNSETTLED = "unsettled"
+THREAD_STATE_SETTLED = "settled"
+THREAD_STATE_ARCHIVED = "archived"
+THREAD_STATE_DELETED = "deleted"
 PullRequestState = Literal["open", "merged", "closed"]
 PULL_REQUEST_STATES: tuple[PullRequestState, ...] = get_args(PullRequestState)
 PULL_REQUEST_STATE_OPEN: PullRequestState = "open"
@@ -65,16 +70,21 @@ class Task(TypedDict):
     worktree_pending: NotRequired[bool]
     thread_id: NotRequired[str]
     t3_code_thread_id: NotRequired[str]
+    t3_code_thread_state: NotRequired[str]
     native_session_id: NotRequired[str]
     result: NotRequired[str]
     returncode: NotRequired[int]
     usage_limit_resume_count: NotRequired[int]
     started_at: NotRequired[str]
+    finished_at: NotRequired[str]
+    opened_at: NotRequired[str]
+    closed_at: NotRequired[str]
     auto_pickup: NotRequired[bool]
     auto_pickup_client: NotRequired[str]
     no_worktree: NotRequired[bool]
     gate: NotRequired[str]
     gate_stop_reason: NotRequired[str]
+    gate_released: NotRequired[bool]
     setup: NotRequired[str]
     setup_complete: NotRequired[bool]
     setup_failure_reason: NotRequired[str]
@@ -261,8 +271,18 @@ def existing_task(tasks: Tasks, task_id: str) -> Task:
     return tasks[task_id]
 
 
-def has_finished_pull_requests(task: Task) -> bool:
-    pull_requests = task.get("pull_requests", [])
+def are_pull_requests_finished(pull_requests: list[PullRequest]) -> bool:
     return bool(pull_requests) and all(
         pull_request["state"] != PULL_REQUEST_STATE_OPEN for pull_request in pull_requests
+    )
+
+
+def has_finished_pull_requests(task: Task) -> bool:
+    return are_pull_requests_finished(task.get("pull_requests", []))
+
+
+def is_counted_opened(tasks: Tasks, task_id: str) -> bool:
+    return "opened_at" in tasks[task_id] or any(
+        dependent.get("after") == task_id and is_counted_opened(tasks, dependent_id)
+        for dependent_id, dependent in tasks.items()
     )

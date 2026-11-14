@@ -100,20 +100,15 @@ def finish_task(
         if repository_branches is not None:
             task_record["repository_branches"] = repository_branches
         is_succeeded = returncode == 0 and not is_usage_limit and not is_background_work_stopped
-        task_record["status"] = (
-            ledger.STATUS_NEEDS_REVIEW
-            if is_succeeded or stop_reason is not None
-            else ledger.STATUS_FAILED
-        )
         task_record["returncode"] = returncode
         if stop_reason is not None:
+            task_record["status"] = ledger.STATUS_BLOCKED
             task_record["gate_stop_reason"] = stop_reason
-        stored_parent = tasks.get(task_record.get("after", ""))
-        if task_record["status"] != ledger.STATUS_NEEDS_REVIEW or stored_parent is None:
-            return
-        parent = stored_parent
-        if parent.get("status") == ledger.STATUS_NEEDS_REVIEW:
-            parent["status"] = ledger.STATUS_DONE
+        elif is_succeeded:
+            task_record["status"] = ledger.STATUS_FINISHED
+            task_record["finished_at"] = datetime.now(UTC).isoformat()
+        else:
+            task_record["status"] = ledger.STATUS_FAILED
 
 
 def claim_task(
@@ -257,10 +252,10 @@ def execute_task(task_id: str, task: ledger.Task, lock_file_descriptors: tuple[i
     if stored_task is not None:
         if stored_task.get("status") == ledger.STATUS_FAILED:
             notifications.notify_task(task_id, stored_task, notifications.OUTCOME_FAILED)
-        elif outcome.stop_reason is not None:
-            notifications.notify_task(task_id, stored_task, notifications.OUTCOME_GATE_STOPPED)
-        elif chains.is_ready_for_review(tasks, task_id):
-            notifications.notify_task(task_id, stored_task, notifications.OUTCOME_NEEDS_REVIEW)
+        elif stored_task.get("status") == ledger.STATUS_BLOCKED:
+            notifications.notify_task(task_id, stored_task, notifications.OUTCOME_BLOCKED)
+        elif chains.is_ready_to_open(tasks, task_id):
+            notifications.notify_task(task_id, stored_task, notifications.OUTCOME_FINISHED)
     return outcome.returncode
 
 
@@ -321,7 +316,7 @@ def execute_or_drain_task(task_id: str, session_id: str) -> int:
     if (
         task is None
         or task["session_id"] != session_id
-        or task["status"] not in ledger.SUCCEEDED_STATUSES
+        or task["status"] not in ledger.CLEAN_EXIT_STATUSES
     ):
         return execute_scheduled_task(task_id, session_id)
     drain_succeeded_task(task_id, session_id)

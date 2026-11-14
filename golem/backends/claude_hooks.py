@@ -175,7 +175,7 @@ def is_hook_needed(tasks: ledger.Tasks, directory: str) -> bool:
     return any(
         "gate" in task
         and registry.agent_backend_id(task["backend"], task["agent_args"]) == ledger.BACKEND_CLAUDE
-        and task["status"] in ledger.SUCCEEDED_STATUSES
+        and task["status"] in ledger.CLEAN_EXIT_STATUSES
         and ledger.task_directory(task) == directory
         and has_pending_follow_up(tasks, task_id)
         for task_id, task in tasks.items()

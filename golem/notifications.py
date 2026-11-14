@@ -5,9 +5,9 @@ from golem import display, ledger
 
 NOTIFY_TIMEOUT_SECONDS = 5
 NOTIFICATION_MESSAGE_MAX_LENGTH = 200
-OUTCOME_NEEDS_REVIEW = "needs review"
+OUTCOME_FINISHED = "finished"
 OUTCOME_FAILED = "failed"
-OUTCOME_GATE_STOPPED = "stopped at gate"
+OUTCOME_BLOCKED = "blocked"
 
 
 def notify(title: str, message: str) -> None:
@@ -35,7 +35,7 @@ def notify(title: str, message: str) -> None:
 def notify_task(task_id: str, task: ledger.Task, outcome: str) -> None:
     summary = (
         task.get("gate_stop_reason", "")
-        if outcome == OUTCOME_GATE_STOPPED
+        if outcome == OUTCOME_BLOCKED
         else task.get("result") or task.get("setup_failure_reason", "")
     )
     message = display.first_line(summary) or display.first_line(task["prompt"])

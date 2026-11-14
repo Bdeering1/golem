@@ -157,7 +157,7 @@ def test_agent_logs_invalid_config_and_still_starts_due_tasks(
 
     def start_executor_that_finishes(task_id: str, _: ledger.Task) -> subprocess.Popen[bytes]:
         with ledger.locked_tasks() as tasks:
-            tasks[task_id]["status"] = ledger.STATUS_DONE
+            tasks[task_id]["status"] = ledger.STATUS_FINISHED
         started_task_ids.append(task_id)
         processes.append(subprocess.Popen([sys.executable, "-c", ""]))
         return processes[-1]

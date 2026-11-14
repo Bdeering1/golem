@@ -19,7 +19,7 @@ def test_shared_worktree_blocks_contenders_and_allows_other_worktrees(
     shared_worktree.mkdir()
     other_worktree.mkdir()
     contender_status = (
-        ledger.STATUS_SCHEDULED if contender == "scheduled" else ledger.STATUS_NEEDS_REVIEW
+        ledger.STATUS_SCHEDULED if contender == "scheduled" else ledger.STATUS_FINISHED
     )
     support.write_tasks(
         ledger_path,
@@ -59,15 +59,11 @@ def test_shared_worktree_blocks_contenders_and_allows_other_worktrees(
     first = support.read_task(ledger_path)
     cli.main(["_execute", support.TASK_ID, first["session_id"]])
 
-    assert (
-        support.read_task(ledger_path, support.SIBLING_ID)["status"] == ledger.STATUS_NEEDS_REVIEW
-    )
+    assert support.read_task(ledger_path, support.SIBLING_ID)["status"] == ledger.STATUS_FINISHED
     if contender == "pickup":
-        assert (
-            support.read_task(ledger_path, support.CHILD_ID)["status"] == ledger.STATUS_NEEDS_REVIEW
-        )
+        assert support.read_task(ledger_path, support.CHILD_ID)["status"] == ledger.STATUS_FINISHED
         assert cli.main(["pickup", support.CHILD_ID]) == 0
-        assert support.read_task(ledger_path, support.CHILD_ID)["status"] == ledger.STATUS_DONE
+        assert support.read_task(ledger_path, support.CHILD_ID)["status"] == ledger.STATUS_FINISHED
         assert run_task_ids == [support.TASK_ID, support.SIBLING_ID]
         return
     assert support.read_task(ledger_path, support.CHILD_ID)["status"] == ledger.STATUS_SCHEDULED
@@ -95,7 +91,7 @@ def test_pickup_holds_worktree_until_its_claude_process_exits(
         ledger_path,
         {
             "pickup": support.task_record(
-                ledger.STATUS_NEEDS_REVIEW, task_id="pickup", worktree=str(worktree)
+                ledger.STATUS_FINISHED, task_id="pickup", worktree=str(worktree)
             ),
             support.TASK_ID: headless_task,
         },
@@ -119,7 +115,7 @@ def test_pickup_holds_worktree_until_its_claude_process_exits(
         support.wait_until(
             lambda: (
                 cli.main(["_execute", support.TASK_ID, headless_session_id]) == 0
-                and support.read_task(ledger_path)["status"] == ledger.STATUS_NEEDS_REVIEW
+                and support.read_task(ledger_path)["status"] == ledger.STATUS_FINISHED
             )
         )
     finally:

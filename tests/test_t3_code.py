@@ -8,7 +8,7 @@ from tests import support, t3_support
 
 @pytest.fixture
 def claude_task(ledger_path):
-    support.write_task(ledger_path, ledger.STATUS_NEEDS_REVIEW)
+    support.write_task(ledger_path, ledger.STATUS_FINISHED)
 
 
 @pytest.mark.parametrize("task_location", ["worktree", "repository", "subdirectory"])
@@ -29,7 +29,7 @@ def test_pickup_attaches_claude_session_to_thread_and_opens_it(
     }.get(task_location)
     support.write_task(
         ledger_path,
-        ledger.STATUS_NEEDS_REVIEW,
+        ledger.STATUS_FINISHED,
         cwd=str(cwd),
         prompt=f"{support.PROMPT}\nmore detail",
         **fields,
@@ -62,14 +62,14 @@ def test_pickup_attaches_claude_session_to_thread_and_opens_it(
     )
     assert server.settings_mutations == []
     task = support.read_task(ledger_path)
-    assert task["status"] == ledger.STATUS_DONE
+    assert task["status"] == ledger.STATUS_FINISHED
     assert task["t3_code_thread_id"] == t3_support.CLAUDE_THREAD_ID
 
 
 def test_pickup_all_attaches_codex_thread_with_default_model(server, ledger_path, fake_commands):
     support.write_task(
         ledger_path,
-        ledger.STATUS_NEEDS_REVIEW,
+        ledger.STATUS_FINISHED,
         backend=ledger.BACKEND_CODEX,
         thread_id=t3_support.CODEX_THREAD,
     )
@@ -87,7 +87,7 @@ def test_pickup_all_attaches_codex_thread_with_default_model(server, ledger_path
     assert fake_commands["open-args"].read_text(encoding="utf-8") == (
         f"{t3_support.thread_link(t3_support.CODEX_THREAD_ID)}\n"
     )
-    assert support.read_task(ledger_path)["status"] == ledger.STATUS_DONE
+    assert support.read_task(ledger_path)["status"] == ledger.STATUS_FINISHED
 
 
 @pytest.mark.parametrize(
@@ -106,7 +106,7 @@ def test_pickup_all_opens_task_in_t3_code_default_client(
     server, ledger_path, fake_commands, backend_id, fields, thread_id
 ):
     support.write_config_table("default_clients", {backend_id: "t3-code"})
-    support.write_task(ledger_path, ledger.STATUS_NEEDS_REVIEW, backend=backend_id, **fields)
+    support.write_task(ledger_path, ledger.STATUS_FINISHED, backend=backend_id, **fields)
 
     assert cli.main(["pickup", "--all"]) == 0
 
@@ -114,7 +114,7 @@ def test_pickup_all_opens_task_in_t3_code_default_client(
         fake_commands["open-args"].read_text(encoding="utf-8")
         == f"{t3_support.thread_link(thread_id)}\n"
     )
-    assert support.read_task(ledger_path)["status"] == ledger.STATUS_DONE
+    assert support.read_task(ledger_path)["status"] == ledger.STATUS_FINISHED
 
 
 def test_repeat_pickup_opens_existing_thread(server, claude_task, ledger_path, fake_commands):
@@ -126,7 +126,7 @@ def test_repeat_pickup_opens_existing_thread(server, claude_task, ledger_path, f
     assert fake_commands["open-args"].read_text(encoding="utf-8") == (
         f"{t3_support.thread_link(t3_support.CLAUDE_THREAD_ID)}\n"
     )
-    assert support.read_task(ledger_path)["status"] == ledger.STATUS_DONE
+    assert support.read_task(ledger_path)["status"] == ledger.STATUS_FINISHED
 
 
 def test_pickup_adds_missing_project(server, claude_task):
@@ -150,7 +150,7 @@ def test_pickup_starts_t3_code_when_it_is_not_running(
         f"-b {t3_code.APP_BUNDLE_ID}",
         t3_support.thread_link(t3_support.CLAUDE_THREAD_ID),
     ]
-    assert support.read_task(ledger_path)["status"] == ledger.STATUS_DONE
+    assert support.read_task(ledger_path)["status"] == ledger.STATUS_FINISHED
 
 
 def remove_cli(server, _monkeypatch):
@@ -205,11 +205,11 @@ def test_failed_pickup_leaves_task_needing_review(
     with pytest.raises(SystemExit, match=message):
         cli.main(["pickup", support.TASK_ID, "--client", "t3-code"])
 
-    assert support.read_task(ledger_path)["status"] == ledger.STATUS_NEEDS_REVIEW
+    assert support.read_task(ledger_path)["status"] == ledger.STATUS_FINISHED
     assert "t3code://" not in fake_commands["open-args"].read_text(encoding="utf-8")
 
 
-def write_task_with_thread(ledger_path, status=ledger.STATUS_DONE):
+def write_task_with_thread(ledger_path, status=ledger.STATUS_FINISHED):
     support.write_task(
         ledger_path,
         status,
@@ -249,7 +249,7 @@ def test_delete_refuses_while_t3_code_is_not_running(server, ledger_path):
 
 STARTING_COMMANDS = [
     pytest.param(
-        ["run", support.TASK_ID, support.PROMPT, "--now"], ledger.STATUS_DONE, id="replacement"
+        ["run", support.TASK_ID, support.PROMPT, "--now"], ledger.STATUS_FINISHED, id="replacement"
     ),
     pytest.param(["retry", support.TASK_ID, "--now"], ledger.STATUS_FAILED, id="retry"),
 ]
@@ -299,7 +299,7 @@ def test_prune_keeps_task_with_thread_while_t3_code_is_not_running(server, ledge
 
 def test_rejected_thread_delete_warns_without_failing(server, ledger_path, capsys, monkeypatch):
     support.write_task(
-        ledger_path, ledger.STATUS_DONE, t3_code_thread_id=t3_support.CLAUDE_THREAD_ID
+        ledger_path, ledger.STATUS_FINISHED, t3_code_thread_id=t3_support.CLAUDE_THREAD_ID
     )
     reject_commands(server, monkeypatch)
 

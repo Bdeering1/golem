@@ -123,8 +123,8 @@ def test_no_worktree_chain_runs_in_directory_without_worktree(
 
     tasks = support.read_tasks(ledger_path)
     assert [tasks[task_id]["status"] for task_id in (support.PARENT_ID, support.CHILD_ID)] == [
-        ledger.STATUS_DONE,
-        ledger.STATUS_NEEDS_REVIEW,
+        ledger.STATUS_FINISHED,
+        ledger.STATUS_FINISHED,
     ]
     assert support.logged_claude_cwds(fake_commands) == [str(git_repository)] * 2
     assert not (git_repository / ".claude").exists()
@@ -208,7 +208,7 @@ def test_usage_limit_resume_and_pickup_use_task_worktree(
 @pytest.mark.parametrize(
     ("status", "command_args"),
     [
-        pytest.param(ledger.STATUS_NEEDS_REVIEW, ["pickup", support.TASK_ID], id="pickup"),
+        pytest.param(ledger.STATUS_FINISHED, ["pickup", support.TASK_ID], id="pickup"),
         pytest.param(ledger.STATUS_FAILED, ["retry", support.TASK_ID, "--now"], id="retry"),
     ],
 )

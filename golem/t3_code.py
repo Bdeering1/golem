@@ -206,6 +206,20 @@ def thread_projection(origin: str, token: str, thread_id: str) -> ledger.JsonObj
     return cast("ledger.JsonObject", successful_value(projection_exit))
 
 
+def thread_state(origin: str, token: str, thread_id: str) -> str | None:
+    try:
+        thread = cast("ledger.JsonObject", thread_projection(origin, token, thread_id)["thread"])
+    except T3_CODE_ERRORS:
+        return None if is_thread_present(thread_id) else ledger.THREAD_STATE_DELETED
+    if thread.get("deletedAt") is not None:
+        return ledger.THREAD_STATE_DELETED
+    if thread.get("archivedAt") is not None:
+        return ledger.THREAD_STATE_ARCHIVED
+    if thread.get("settledOverride") == "settled" or thread.get("settledAt") is not None:
+        return ledger.THREAD_STATE_SETTLED
+    return ledger.THREAD_STATE_UNSETTLED
+
+
 def wait_for_server() -> None:
     deadline = time.monotonic() + APP_START_TIMEOUT_SECONDS
     while not server_runtime_path().exists():

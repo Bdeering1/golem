@@ -4,23 +4,38 @@ from golem import cli, ledger, locks
 from golem.backends import claude
 from tests import support
 
+OPENED_AT = "2030-03-10T12:00:00+00:00"
+
 
 @pytest.mark.parametrize(
-    "command",
+    ("command", "recorded_field"),
     [
-        pytest.param(["pickup"], id="pickup"),
-        pytest.param(["pickup", "--client", "claude-code"], id="pickup-claude-code"),
-        pytest.param(["pickup", "--client", "claude-desktop"], id="pickup-app"),
-        pytest.param(["close"], id="close"),
+        pytest.param(["pickup"], "opened_at", id="pickup"),
+        pytest.param(["pickup", "--client", "claude-code"], "opened_at", id="pickup-claude-code"),
+        pytest.param(["pickup", "--client", "claude-desktop"], "opened_at", id="pickup-app"),
+        pytest.param(["close"], "closed_at", id="close"),
     ],
 )
-def test_review_commands_complete_review_task(installed_launch_agent, ledger_path, command):
+def test_review_commands_record_time_and_leave_status_alone(
+    installed_launch_agent, ledger_path, command, recorded_field
+):
     cli.main(["run", support.TASK_ID, support.PROMPT, "--now"])
     task = support.read_task(ledger_path)
     cli.main(["_execute", support.TASK_ID, task["session_id"]])
 
     assert cli.main([*command, support.TASK_ID]) == 0
-    assert support.read_task(ledger_path)["status"] == ledger.STATUS_DONE
+    task = support.read_task(ledger_path)
+    assert task["status"] == ledger.STATUS_FINISHED
+    assert recorded_field in task
+
+
+def test_close_refuses_unfinished_chain(ledger_path):
+    support.write_parent_with_waiting_child(ledger_path)
+
+    with pytest.raises(SystemExit, match="not finished"):
+        cli.main(["close", support.PARENT_ID])
+
+    assert "closed_at" not in support.read_task(ledger_path, support.PARENT_ID)
 
 
 @pytest.mark.parametrize(
@@ -38,7 +53,7 @@ def test_pickup_refuses_tasks_that_never_started(ledger_path, status, pickup_arg
 
 
 def test_pickup_app_opens_task_session_in_desktop_app(fake_commands, ledger_path):
-    support.write_task(ledger_path, ledger.STATUS_NEEDS_REVIEW)
+    support.write_task(ledger_path, ledger.STATUS_FINISHED)
 
     assert cli.main(["pickup", support.TASK_ID, "--client", "claude-desktop"]) == 0
     assert (
@@ -55,21 +70,21 @@ def test_pickup_app_opens_task_session_in_desktop_app(fake_commands, ledger_path
         pytest.param(["pickup", "--all", "--client", "claude-desktop"], id="all"),
     ],
 )
-def test_failed_app_pickup_leaves_task_needing_review(
+def test_failed_app_pickup_does_not_record_opening(
     fake_commands, ledger_path, monkeypatch, command
 ):
-    support.write_task(ledger_path, ledger.STATUS_NEEDS_REVIEW)
+    support.write_task(ledger_path, ledger.STATUS_FINISHED)
     monkeypatch.setenv("GOLEM_OPEN_EXIT", "1")
 
     assert cli.main(command) == 1
-    assert support.read_task(ledger_path)["status"] == ledger.STATUS_NEEDS_REVIEW
+    assert "opened_at" not in support.read_task(ledger_path)
     assert fake_commands["open-args"].read_text(encoding="utf-8") == (
         f"claude://resume?session={support.read_task(ledger_path)['session_id']}\n"
     )
 
 
 def test_pickup_app_rejects_agent_arguments(fake_commands, ledger_path):
-    support.write_task(ledger_path, ledger.STATUS_NEEDS_REVIEW)
+    support.write_task(ledger_path, ledger.STATUS_FINISHED)
 
     with pytest.raises(SystemExit) as exit_info:
         cli.main(
@@ -77,7 +92,7 @@ def test_pickup_app_rejects_agent_arguments(fake_commands, ledger_path):
         )
 
     assert exit_info.value.code == 2
-    assert support.read_task(ledger_path)["status"] == ledger.STATUS_NEEDS_REVIEW
+    assert support.read_task(ledger_path)["status"] == ledger.STATUS_FINISHED
     assert fake_commands["open-args"].read_text(encoding="utf-8") == ""
 
 
@@ -101,42 +116,50 @@ def test_pickup_all_and_reschedule_validate_arguments(command):
     assert exit_info.value.code == 2
 
 
-def test_pickup_marks_ancestors_that_need_review_done(fake_commands, ledger_path):
+def test_pickup_counts_earlier_steps_as_opened(fake_commands, ledger_path):
     support.write_tasks(
         ledger_path,
         {
             support.PARENT_ID: support.task_record(
-                ledger.STATUS_NEEDS_REVIEW, task_id=support.PARENT_ID
+                ledger.STATUS_FINISHED, task_id=support.PARENT_ID
             ),
             support.CHILD_ID: support.task_record(
-                ledger.STATUS_NEEDS_REVIEW, task_id=support.CHILD_ID, after=support.PARENT_ID
+                ledger.STATUS_FINISHED, task_id=support.CHILD_ID, after=support.PARENT_ID
             ),
             support.GRANDCHILD_ID: support.task_record(
-                ledger.STATUS_NEEDS_REVIEW, task_id=support.GRANDCHILD_ID, after=support.CHILD_ID
+                ledger.STATUS_FINISHED, task_id=support.GRANDCHILD_ID, after=support.CHILD_ID
             ),
         },
     )
 
     assert cli.main(["pickup", support.GRANDCHILD_ID, "--client", "claude-desktop"]) == 0
-    assert {task["status"] for task in support.read_tasks(ledger_path).values()} == {
-        ledger.STATUS_DONE
-    }
+    assert cli.main(["pickup", "--all", "--client", "claude-desktop"]) == 0
+
+    tasks = support.read_tasks(ledger_path)
+    assert {task["status"] for task in tasks.values()} == {ledger.STATUS_FINISHED}
+    assert [task_id for task_id, task in tasks.items() if "opened_at" in task] == [
+        support.GRANDCHILD_ID
+    ]
+    assert len(fake_commands["open-args"].read_text(encoding="utf-8").splitlines()) == 1
 
 
 @pytest.mark.parametrize(
     ("parent_fields", "child_status", "opened_ids"),
     [
-        pytest.param({}, ledger.STATUS_NEEDS_REVIEW, [support.CHILD_ID], id="child-needs-review"),
+        pytest.param({}, ledger.STATUS_FINISHED, [support.CHILD_ID], id="child-needs-review"),
         pytest.param({}, ledger.STATUS_RUNNING, [], id="child-running"),
         pytest.param({}, ledger.STATUS_FAILED, [support.PARENT_ID], id="child-failed"),
         pytest.param(
-            {"gate_stop_reason": support.GATE_STOP_REASON},
-            ledger.STATUS_WAITING,
-            [support.PARENT_ID],
-            id="parent-stopped",
+            {"opened_at": OPENED_AT}, ledger.STATUS_FAILED, [], id="parent-already-opened"
         ),
         pytest.param(
-            {"gate_reason": support.GATE_STOP_REASON},
+            {"status": ledger.STATUS_BLOCKED, "gate_stop_reason": support.GATE_STOP_REASON},
+            ledger.STATUS_WAITING,
+            [support.PARENT_ID],
+            id="parent-blocked",
+        ),
+        pytest.param(
+            {"status": ledger.STATUS_BLOCKED, "gate_reason": support.GATE_STOP_REASON},
             ledger.STATUS_WAITING,
             [support.PARENT_ID],
             id="parent-stopped-in-old-ledger",
@@ -147,9 +170,8 @@ def test_pickup_all_opens_only_latest_reviewable_task_in_chain(
     fake_commands, ledger_path, parent_fields, child_status, opened_ids
 ):
     tasks = {
-        support.PARENT_ID: support.task_record(
-            ledger.STATUS_NEEDS_REVIEW, task_id=support.PARENT_ID, **parent_fields
-        ),
+        support.PARENT_ID: support.task_record(ledger.STATUS_FINISHED, task_id=support.PARENT_ID)
+        | parent_fields,
         support.CHILD_ID: support.task_record(
             child_status, task_id=support.CHILD_ID, after=support.PARENT_ID
         ),
@@ -169,10 +191,10 @@ def test_pickup_all_continues_after_busy_directory(fake_commands, ledger_path, c
     other_directory.mkdir()
     tasks = {
         "busy": support.task_record(
-            ledger.STATUS_NEEDS_REVIEW, task_id="busy", cwd=str(busy_directory)
+            ledger.STATUS_FINISHED, task_id="busy", cwd=str(busy_directory)
         ),
         "other": support.task_record(
-            ledger.STATUS_NEEDS_REVIEW, task_id="other", cwd=str(other_directory)
+            ledger.STATUS_FINISHED, task_id="other", cwd=str(other_directory)
         ),
     }
     support.write_tasks(ledger_path, tasks)
@@ -185,8 +207,8 @@ def test_pickup_all_continues_after_busy_directory(fake_commands, ledger_path, c
         locks.release_lock(directory_lock_file)
 
     assert f"golem: directory is busy: {busy_directory}" in capsys.readouterr().err
-    assert support.read_task(ledger_path, "busy")["status"] == ledger.STATUS_NEEDS_REVIEW
-    assert support.read_task(ledger_path, "other")["status"] == ledger.STATUS_DONE
+    assert support.read_task(ledger_path, "busy")["status"] == ledger.STATUS_FINISHED
+    assert support.read_task(ledger_path, "other")["status"] == ledger.STATUS_FINISHED
     assert fake_commands["open-args"].read_text(encoding="utf-8") == (
         f"claude://resume?session={tasks['other']['session_id']}\n"
     )
@@ -210,32 +232,30 @@ def test_auto_pickup_waits_for_usage_limit_resume(
     support.set_task_due_now(ledger_path)
     support.write_claude_output(fake_commands, support.PROMPT)
     assert cli.main(["_execute", support.TASK_ID, task["session_id"]]) == 0
-    assert support.read_task(ledger_path)["status"] == ledger.STATUS_DONE
+    assert support.read_task(ledger_path)["status"] == ledger.STATUS_FINISHED
     assert fake_commands["open-args"].read_text(encoding="utf-8") == (
         f"claude://resume?session={task['session_id']}\n"
     )
 
 
 @pytest.mark.parametrize(
-    ("parent_status", "expected_open_args"),
+    ("parent_fields", "expected_open_args"),
     [
         pytest.param(
-            ledger.STATUS_NEEDS_REVIEW,
-            f"claude://resume?session={support.PARENT_ID}-session\n",
-            id="unreviewed-parent",
+            {}, f"claude://resume?session={support.PARENT_ID}-session\n", id="unopened-parent"
         ),
-        pytest.param(ledger.STATUS_DONE, "", id="reviewed-parent"),
+        pytest.param({"opened_at": OPENED_AT}, "", id="opened-parent"),
     ],
 )
 def test_auto_pickup_opens_parent_when_resumed_follow_up_fails(
-    fake_commands, ledger_path, monkeypatch, parent_status, expected_open_args
+    fake_commands, ledger_path, monkeypatch, parent_fields, expected_open_args
 ):
     monkeypatch.setenv("GOLEM_CLAUDE_EXIT", "1")
     support.write_tasks(
         ledger_path,
         {
             support.PARENT_ID: support.task_record(
-                parent_status, task_id=support.PARENT_ID, auto_pickup=True
+                ledger.STATUS_FINISHED, task_id=support.PARENT_ID, auto_pickup=True, **parent_fields
             ),
             support.TASK_ID: support.task_record(
                 ledger.STATUS_SCHEDULED, after=support.PARENT_ID, auto_pickup=True
@@ -246,5 +266,5 @@ def test_auto_pickup_opens_parent_when_resumed_follow_up_fails(
     assert cli.main(["_execute", support.TASK_ID, f"{support.TASK_ID}-session"]) == 1
     tasks = support.read_tasks(ledger_path)
     assert tasks[support.TASK_ID]["status"] == ledger.STATUS_FAILED
-    assert tasks[support.PARENT_ID]["status"] == ledger.STATUS_DONE
+    assert tasks[support.PARENT_ID]["status"] == ledger.STATUS_FINISHED
     assert fake_commands["open-args"].read_text(encoding="utf-8") == expected_open_args

@@ -20,7 +20,7 @@ def test_worktree_list_retains_non_golem_worktrees(
     capsys, git_repository, ledger_path, owner, expected_reason
 ):
     worktree = support.git_worktree(git_repository)
-    support.write_task(ledger_path, ledger.STATUS_DONE, worktree=str(worktree))
+    support.write_task(ledger_path, ledger.STATUS_FINISHED, worktree=str(worktree))
     if owner is not None:
         support.write_worktrees(
             {
@@ -48,7 +48,7 @@ def test_removed_worktree_is_reported_by_pickup_and_retry(
 ):
     worktree = owned_worktree()
     assert cli.main(["delete", support.TASK_ID, "--remove-worktree"]) == 0
-    support.write_task(ledger_path, ledger.STATUS_NEEDS_REVIEW, worktree=str(worktree))
+    support.write_task(ledger_path, ledger.STATUS_FINISHED, worktree=str(worktree))
 
     with pytest.raises(SystemExit, match="worktree was removed"):
         cli.main(["pickup", support.TASK_ID])
@@ -90,8 +90,18 @@ def test_launch_agent_removes_worktree_released_by_delete(owned_worktree):
     assert not worktree.exists()
 
 
-def test_worktree_list_retains_unreleased_retryable_task(capsys, owned_worktree):
-    owned_worktree(ledger.STATUS_FAILED)
+@pytest.mark.parametrize(
+    ("status", "is_opened"),
+    [
+        pytest.param(ledger.STATUS_FAILED, True, id="retryable"),
+        pytest.param(ledger.STATUS_BLOCKED, True, id="blocked"),
+        pytest.param(ledger.STATUS_FINISHED, False, id="finished-not-opened"),
+    ],
+)
+def test_worktree_list_retains_worktree_needing_attention(
+    capsys, owned_worktree, status, is_opened
+):
+    owned_worktree(status, is_opened=is_opened)
 
     assert cli.main(["worktree", "list"]) == 0
 
@@ -101,9 +111,9 @@ def test_worktree_list_retains_unreleased_retryable_task(capsys, owned_worktree)
 @pytest.mark.parametrize(
     ("status", "command", "is_nested"),
     [
-        pytest.param(ledger.STATUS_NEEDS_REVIEW, ["pickup", support.TASK_ID], False, id="pickup"),
+        pytest.param(ledger.STATUS_FINISHED, ["pickup", support.TASK_ID], False, id="pickup"),
         pytest.param(ledger.STATUS_FAILED, ["retry", support.TASK_ID, "--now"], False, id="retry"),
-        pytest.param(ledger.STATUS_DONE, ["pickup", support.TASK_ID], True, id="nested-pickup"),
+        pytest.param(ledger.STATUS_FINISHED, ["pickup", support.TASK_ID], True, id="nested-pickup"),
         pytest.param(
             ledger.STATUS_FAILED, ["retry", support.TASK_ID, "--now"], True, id="nested-retry"
         ),
@@ -181,7 +191,7 @@ printf '%s' '{"result":"done"}'
 
 
 def test_close_does_not_release_worktree(owned_worktree):
-    worktree = owned_worktree(ledger.STATUS_NEEDS_REVIEW)
+    worktree = owned_worktree(ledger.STATUS_FINISHED)
 
     assert cli.main(["close", support.TASK_ID]) == 0
 

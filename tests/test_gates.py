@@ -3,7 +3,6 @@ import io
 import json
 import os
 import select
-import shlex
 import sys
 import time
 from pathlib import Path
@@ -41,9 +40,9 @@ def test_passing_gate_continues_chain_and_receives_task_as_json(
         tasks[task_id]["status"]
         for task_id in (support.PARENT_ID, support.CHILD_ID, support.GRANDCHILD_ID)
     ] == [
-        ledger.STATUS_DONE,
-        ledger.STATUS_DONE,
-        ledger.STATUS_NEEDS_REVIEW,
+        ledger.STATUS_FINISHED,
+        ledger.STATUS_FINISHED,
+        ledger.STATUS_FINISHED,
     ]
     parent_input, child_input = gate_inputs(tmp_path)
     assert child_input["task_id"] == support.CHILD_ID
@@ -84,7 +83,7 @@ def test_gate_of_task_resumed_after_usage_limit_sees_first_run_start(
 
     [parent_input] = gate_inputs(tmp_path)
     assert parent_input["started_at"] == first_started_at
-    assert support.read_task(ledger_path, support.CHILD_ID)["status"] == ledger.STATUS_NEEDS_REVIEW
+    assert support.read_task(ledger_path, support.CHILD_ID)["status"] == ledger.STATUS_FINISHED
 
 
 def test_failing_gate_stops_chain_with_its_stderr_as_reason(
@@ -97,12 +96,12 @@ def test_failing_gate_stops_chain_with_its_stderr_as_reason(
     )
 
     tasks = support.read_tasks(ledger_path)
-    assert tasks[support.PARENT_ID]["status"] == ledger.STATUS_NEEDS_REVIEW
+    assert tasks[support.PARENT_ID]["status"] == ledger.STATUS_BLOCKED
     assert tasks[support.PARENT_ID]["gate_stop_reason"] == support.GATE_STOP_REASON
     assert tasks[support.CHILD_ID]["status"] == ledger.STATUS_WAITING
     assert len(support.logged_claude_calls(fake_commands)) == 1
     assert [call[-2:] for call in support.logged_osascript_calls(fake_commands)] == [
-        [f"golem: {support.PARENT_ID} stopped at gate", support.GATE_STOP_REASON]
+        [f"golem: {support.PARENT_ID} blocked", support.GATE_STOP_REASON]
     ]
     assert launch_agent.run_launch_agent_pass() == []
     assert not launch_agent.has_pending_tasks(tasks)
@@ -115,7 +114,7 @@ def test_executor_resuming_gated_task_runs_gate_before_follow_up(
 
     assert cli.main(["_execute", support.PARENT_ID, f"{support.PARENT_ID}-session"]) == 0
     assert len(gate_inputs(tmp_path)) == 1
-    assert support.read_task(ledger_path, support.CHILD_ID)["status"] == ledger.STATUS_NEEDS_REVIEW
+    assert support.read_task(ledger_path, support.CHILD_ID)["status"] == ledger.STATUS_FINISHED
 
 
 def test_gate_that_cannot_run_stops_chain_with_error_as_reason(
@@ -133,7 +132,7 @@ def test_gate_that_cannot_run_stops_chain_with_error_as_reason(
 
 def test_passing_gate_does_not_wait_for_its_background_processes(ledger_path, monkeypatch):
     monkeypatch.setattr(gates, "GATE_TIMEOUT_SECONDS", 0.5)
-    support.write_task(ledger_path, ledger.STATUS_NEEDS_REVIEW, gate="sleep 2 & exit 0")
+    support.write_task(ledger_path, ledger.STATUS_FINISHED, gate="sleep 2 & exit 0")
 
     assert gates.gate_stop_reason(support.TASK_ID, support.read_task(ledger_path)) is None
 
@@ -144,7 +143,7 @@ def test_timed_out_gate_stops_chain_and_kills_processes_it_started(
     monkeypatch.setattr(gates, "GATE_TIMEOUT_SECONDS", 0.2)
     pid_path = tmp_path / "gate-child-pid"
     support.write_task(
-        ledger_path, ledger.STATUS_NEEDS_REVIEW, gate=f"sleep 30 & echo $! > {pid_path}; wait"
+        ledger_path, ledger.STATUS_FINISHED, gate=f"sleep 30 & echo $! > {pid_path}; wait"
     )
 
     assert (
@@ -174,22 +173,6 @@ def test_executor_resuming_gated_task_skips_gate_while_directory_is_busy(
 
     assert gate_inputs(tmp_path) == []
     assert support.read_task(ledger_path, support.CHILD_ID)["status"] == ledger.STATUS_WAITING
-
-
-def test_failing_gate_keeps_chain_stopped_when_task_is_closed_meanwhile(
-    installed_launch_agent, fake_commands, ledger_path, tmp_path
-):
-    close_parent = shlex.join([*spawn.golem_command(), "close", support.PARENT_ID])
-    support.write_parent_with_waiting_child(
-        ledger_path, gate=f"{close_parent}; echo {support.GATE_STOP_REASON} >&2; exit 1"
-    )
-
-    assert cli.main(["_execute", support.PARENT_ID, f"{support.PARENT_ID}-session"]) == 0
-
-    tasks = support.read_tasks(ledger_path)
-    assert tasks[support.PARENT_ID]["status"] == ledger.STATUS_DONE
-    assert tasks[support.PARENT_ID]["gate_stop_reason"] == support.GATE_STOP_REASON
-    assert tasks[support.CHILD_ID]["status"] == ledger.STATUS_WAITING
 
 
 @pytest.mark.parametrize(
@@ -233,7 +216,7 @@ def test_task_without_waiting_follow_up_never_runs_its_gate(
     parent = support.read_task(ledger_path, support.PARENT_ID)
 
     assert cli.main(["_execute", support.PARENT_ID, parent["session_id"]]) == 0
-    assert support.read_task(ledger_path, support.PARENT_ID)["status"] == ledger.STATUS_NEEDS_REVIEW
+    assert support.read_task(ledger_path, support.PARENT_ID)["status"] == ledger.STATUS_FINISHED
     assert "gate_stop_reason" not in support.read_task(ledger_path, support.PARENT_ID)
     assert gate_inputs(tmp_path) == []
 
@@ -284,6 +267,7 @@ def test_continue_releases_stopped_task(
 ):
     support.write_parent_with_waiting_child(
         ledger_path,
+        ledger.STATUS_BLOCKED,
         gate=support.gate_command(tmp_path, exit_code=gate_exit_code),
         gate_stop_reason=support.GATE_STOP_REASON,
     )
@@ -291,7 +275,8 @@ def test_continue_releases_stopped_task(
     assert cli.main(["continue", support.PARENT_ID, *continue_arguments]) == 0
 
     parent = support.read_task(ledger_path, support.PARENT_ID)
-    assert parent["status"] == ledger.STATUS_DONE
+    assert parent["status"] == ledger.STATUS_FINISHED
+    assert "finished_at" in parent
     assert "gate_stop_reason" not in parent
     assert len(gate_inputs(tmp_path)) == expected_gate_run_count
     assert started_executors == [support.PARENT_ID]
@@ -302,6 +287,7 @@ def test_continue_with_failing_gate_keeps_task_stopped(
 ):
     support.write_parent_with_waiting_child(
         ledger_path,
+        ledger.STATUS_BLOCKED,
         gate=support.gate_command(tmp_path, exit_code=1, stderr="still missing"),
         gate_stop_reason=support.GATE_STOP_REASON,
     )
@@ -309,14 +295,14 @@ def test_continue_with_failing_gate_keeps_task_stopped(
     assert cli.main(["continue", support.PARENT_ID]) == 1
 
     parent = support.read_task(ledger_path, support.PARENT_ID)
-    assert parent["status"] == ledger.STATUS_NEEDS_REVIEW
+    assert parent["status"] == ledger.STATUS_BLOCKED
     assert parent["gate_stop_reason"] == "still missing"
     assert "still missing" in capsys.readouterr().err
     assert started_executors == []
 
 
 def test_continue_refuses_task_not_stopped_at_a_gate(ledger_path, started_executors):
-    support.write_task(ledger_path, ledger.STATUS_NEEDS_REVIEW)
+    support.write_task(ledger_path, ledger.STATUS_FINISHED)
 
     with pytest.raises(SystemExit, match="not stopped at a gate"):
         cli.main(["continue", support.TASK_ID])
@@ -333,9 +319,8 @@ def run_hook(monkeypatch, capsys, event, session_id):
 @pytest.mark.parametrize(
     ("parent_status", "hook_session_id"),
     [
-        pytest.param(ledger.STATUS_NEEDS_REVIEW, support.PARENT_SESSION, id="needs-review"),
-        pytest.param(ledger.STATUS_DONE, support.PARENT_SESSION, id="opened-in-app"),
-        pytest.param(ledger.STATUS_NEEDS_REVIEW, NATIVE_SESSION_ID, id="native-session"),
+        pytest.param(ledger.STATUS_BLOCKED, support.PARENT_SESSION, id="session"),
+        pytest.param(ledger.STATUS_BLOCKED, NATIVE_SESSION_ID, id="native-session"),
     ],
 )
 def test_stop_hook_continues_stopped_chain_when_gate_passes(
@@ -352,7 +337,7 @@ def test_stop_hook_continues_stopped_chain_when_gate_passes(
     output = run_hook(monkeypatch, capsys, claude_hooks.HOOK_ARGUMENT_STOP, hook_session_id)
 
     assert json.loads(output)["systemMessage"].endswith(support.CHILD_ID)
-    assert support.read_task(ledger_path, support.PARENT_ID)["status"] == ledger.STATUS_DONE
+    assert support.read_task(ledger_path, support.PARENT_ID)["status"] == ledger.STATUS_FINISHED
     assert started_executors == [support.PARENT_ID]
 
 
@@ -371,7 +356,7 @@ def test_stop_hook_does_nothing(
 ):
     monkeypatch.setattr(gates, "HOOK_GATE_TIMEOUT_SECONDS", 0.2)
     support.write_parent_with_waiting_child(
-        ledger_path, gate=gate, gate_stop_reason=support.GATE_STOP_REASON
+        ledger_path, ledger.STATUS_BLOCKED, gate=gate, gate_stop_reason=support.GATE_STOP_REASON
     )
     directory_lock_file = (
         locks.acquire_lock(locks.directory_lock_path(str(Path.cwd())))
@@ -395,7 +380,7 @@ def test_stop_hook_does_nothing(
     ("child_status", "session_id", "is_denied"),
     [
         (ledger.STATUS_RUNNING, support.PARENT_SESSION, True),
-        (ledger.STATUS_NEEDS_REVIEW, support.PARENT_SESSION, False),
+        (ledger.STATUS_FINISHED, support.PARENT_SESSION, False),
         (ledger.STATUS_RUNNING, "unknown-session", False),
     ],
     ids=["follow-up-running", "follow-up-finished", "unknown-session"],
@@ -407,7 +392,7 @@ def test_pre_tool_use_hook_denies_while_follow_up_runs(
         ledger_path,
         {
             support.PARENT_ID: support.task_record(
-                ledger.STATUS_DONE, task_id=support.PARENT_ID, gate="true"
+                ledger.STATUS_FINISHED, task_id=support.PARENT_ID, gate="true"
             ),
             support.CHILD_ID: support.task_record(
                 child_status, task_id=support.CHILD_ID, after=support.PARENT_ID
@@ -430,10 +415,10 @@ def test_pre_tool_use_hook_denies_while_grandchild_runs(ledger_path, monkeypatch
         ledger_path,
         {
             support.PARENT_ID: support.task_record(
-                ledger.STATUS_DONE, task_id=support.PARENT_ID, gate="true"
+                ledger.STATUS_FINISHED, task_id=support.PARENT_ID, gate="true"
             ),
             support.CHILD_ID: support.task_record(
-                ledger.STATUS_DONE, task_id=support.CHILD_ID, after=support.PARENT_ID
+                ledger.STATUS_FINISHED, task_id=support.CHILD_ID, after=support.PARENT_ID
             ),
             support.GRANDCHILD_ID: support.task_record(
                 ledger.STATUS_RUNNING, task_id=support.GRANDCHILD_ID, after=support.CHILD_ID
@@ -458,7 +443,10 @@ def test_stop_hook_returns_while_follow_up_runs(ledger_path, tmp_path, monkeypat
     monkeypatch.setenv("GOLEM_CLAUDE_HOLD", str(hold_path))
     monkeypatch.setenv("GOLEM_CLAUDE_STARTED", str(started_path))
     support.write_parent_with_waiting_child(
-        ledger_path, gate=support.gate_command(tmp_path), gate_stop_reason=support.GATE_STOP_REASON
+        ledger_path,
+        ledger.STATUS_BLOCKED,
+        gate=support.gate_command(tmp_path),
+        gate_stop_reason=support.GATE_STOP_REASON,
     )
 
     result = spawn.subprocess.run(

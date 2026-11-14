@@ -17,10 +17,10 @@ def test_scheduled_task_runs_waiting_chain(installed_launch_agent, fake_commands
 
     tasks = json.loads(ledger_path.read_text(encoding="utf-8"))
     assert {task_id: task["status"] for task_id, task in tasks.items()} == {
-        support.PARENT_ID: ledger.STATUS_DONE,
-        support.CHILD_ID: ledger.STATUS_DONE,
-        support.GRANDCHILD_ID: ledger.STATUS_NEEDS_REVIEW,
-        support.SIBLING_ID: ledger.STATUS_NEEDS_REVIEW,
+        support.PARENT_ID: ledger.STATUS_FINISHED,
+        support.CHILD_ID: ledger.STATUS_FINISHED,
+        support.GRANDCHILD_ID: ledger.STATUS_FINISHED,
+        support.SIBLING_ID: ledger.STATUS_FINISHED,
     }
     assert support.logged_claude_calls(fake_commands) == [
         support.expected_claude_args(
@@ -81,8 +81,8 @@ def test_run_then_chain_runs_in_order_with_shared_agent_arguments(
 
     assert cli.main(["_execute", first_id, tasks[first_id]["session_id"]]) == 0
     assert [support.read_tasks(ledger_path)[task_id]["status"] for task_id, _ in chain] == [
-        *[ledger.STATUS_DONE] * (len(chain) - 1),
-        ledger.STATUS_NEEDS_REVIEW,
+        *[ledger.STATUS_FINISHED] * (len(chain) - 1),
+        ledger.STATUS_FINISHED,
     ]
     assert support.logged_claude_calls(fake_commands) == [
         support.expected_claude_args(tasks[task_id], prompt, task_id=task_id)
@@ -115,7 +115,7 @@ def test_run_then_auto_pickup_opens_only_last_task(
 
     assert cli.main(["_execute", support.TASK_ID, tasks[support.TASK_ID]["session_id"]]) == 0
     assert {task["status"] for task in support.read_tasks(ledger_path).values()} == {
-        ledger.STATUS_DONE
+        ledger.STATUS_FINISHED
     }
     assert fake_commands["open-args"].read_text(encoding="utf-8") == (
         f"claude://resume?session={tasks[support.GRANDCHILD_ID]['session_id']}\n"
@@ -147,8 +147,8 @@ def test_failed_follow_up_auto_pickup_opens_last_success(
     assert {
         task_id: task["status"] for task_id, task in support.read_tasks(ledger_path).items()
     } == {
-        support.TASK_ID: ledger.STATUS_DONE,
-        support.CHILD_ID: ledger.STATUS_DONE,
+        support.TASK_ID: ledger.STATUS_FINISHED,
+        support.CHILD_ID: ledger.STATUS_FINISHED,
         support.GRANDCHILD_ID: ledger.STATUS_FAILED,
     }
     assert fake_commands["open-args"].read_text(encoding="utf-8") == (
@@ -175,7 +175,7 @@ def test_after_succeeded_auto_pickup_parent_does_not_pass_to_child(
     monkeypatch.setattr(claude, "next_reset_time", lambda _environment: support.RESET_TIME)
     support.write_task(
         ledger_path,
-        ledger.STATUS_DONE,
+        ledger.STATUS_FINISHED,
         task_id=support.PARENT_ID,
         auto_pickup=True,
     )
@@ -200,8 +200,8 @@ def test_retrying_failed_parent_runs_waiting_dependent(
     retry = support.read_task(ledger_path, support.PARENT_ID)
     cli.main(["_execute", support.PARENT_ID, retry["session_id"]])
     tasks = json.loads(ledger_path.read_text(encoding="utf-8"))
-    assert tasks[support.PARENT_ID]["status"] == ledger.STATUS_DONE
-    assert tasks[support.CHILD_ID]["status"] == ledger.STATUS_DONE
+    assert tasks[support.PARENT_ID]["status"] == ledger.STATUS_FINISHED
+    assert tasks[support.CHILD_ID]["status"] == ledger.STATUS_FINISHED
 
 
 def test_failed_dependent_does_not_block_later_sibling(
@@ -228,4 +228,4 @@ def test_failed_dependent_does_not_block_later_sibling(
     tasks = json.loads(ledger_path.read_text(encoding="utf-8"))
     assert prompts == [support.PARENT_PROMPT, support.CHILD_PROMPT, support.SIBLING_PROMPT]
     assert tasks[support.CHILD_ID]["status"] == ledger.STATUS_FAILED
-    assert tasks[support.SIBLING_ID]["status"] == ledger.STATUS_NEEDS_REVIEW
+    assert tasks[support.SIBLING_ID]["status"] == ledger.STATUS_FINISHED

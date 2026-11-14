@@ -39,12 +39,12 @@ def test_delete_refuses_and_lists_dependents(ledger_path):
     support.write_tasks(
         ledger_path,
         {
-            support.TASK_ID: support.task_record(ledger.STATUS_DONE),
+            support.TASK_ID: support.task_record(ledger.STATUS_FINISHED),
             "first": support.task_record(
                 ledger.STATUS_CANCELLED, task_id="first", after=support.TASK_ID
             ),
             "second": support.task_record(
-                ledger.STATUS_DONE, task_id="second", after=support.TASK_ID
+                ledger.STATUS_FINISHED, task_id="second", after=support.TASK_ID
             ),
         },
     )
@@ -59,11 +59,15 @@ def test_delete_removes_several_tasks_including_parent_and_child(ledger_path):
     support.write_tasks(
         ledger_path,
         {
-            support.PARENT_ID: support.task_record(ledger.STATUS_DONE, task_id=support.PARENT_ID),
+            support.PARENT_ID: support.task_record(
+                ledger.STATUS_FINISHED, task_id=support.PARENT_ID
+            ),
             support.CHILD_ID: support.task_record(
                 ledger.STATUS_WAITING, task_id=support.CHILD_ID, after=support.PARENT_ID
             ),
-            support.SIBLING_ID: support.task_record(ledger.STATUS_DONE, task_id=support.SIBLING_ID),
+            support.SIBLING_ID: support.task_record(
+                ledger.STATUS_FINISHED, task_id=support.SIBLING_ID
+            ),
         },
     )
 
@@ -74,8 +78,8 @@ def test_delete_removes_several_tasks_including_parent_and_child(ledger_path):
 
 def test_delete_keeps_ledger_when_one_task_is_unknown(ledger_path):
     tasks = {
-        support.TASK_ID: support.task_record(ledger.STATUS_DONE),
-        support.SIBLING_ID: support.task_record(ledger.STATUS_DONE, task_id=support.SIBLING_ID),
+        support.TASK_ID: support.task_record(ledger.STATUS_FINISHED),
+        support.SIBLING_ID: support.task_record(ledger.STATUS_FINISHED, task_id=support.SIBLING_ID),
     }
     support.write_tasks(ledger_path, tasks)
 
@@ -89,17 +93,19 @@ def test_delete_chain_removes_ancestors_dependents_and_branches(ledger_path):
     support.write_tasks(
         ledger_path,
         {
-            support.PARENT_ID: support.task_record(ledger.STATUS_DONE, task_id=support.PARENT_ID),
+            support.PARENT_ID: support.task_record(
+                ledger.STATUS_FINISHED, task_id=support.PARENT_ID
+            ),
             support.CHILD_ID: support.task_record(
-                ledger.STATUS_DONE, task_id=support.CHILD_ID, after=support.PARENT_ID
+                ledger.STATUS_FINISHED, task_id=support.CHILD_ID, after=support.PARENT_ID
             ),
             support.GRANDCHILD_ID: support.task_record(
-                ledger.STATUS_DONE, task_id=support.GRANDCHILD_ID, after=support.CHILD_ID
+                ledger.STATUS_FINISHED, task_id=support.GRANDCHILD_ID, after=support.CHILD_ID
             ),
             support.SIBLING_ID: support.task_record(
-                ledger.STATUS_DONE, task_id=support.SIBLING_ID, after=support.PARENT_ID
+                ledger.STATUS_FINISHED, task_id=support.SIBLING_ID, after=support.PARENT_ID
             ),
-            support.TASK_ID: support.task_record(ledger.STATUS_DONE),
+            support.TASK_ID: support.task_record(ledger.STATUS_FINISHED),
         },
     )
 
@@ -110,9 +116,9 @@ def test_delete_chain_removes_ancestors_dependents_and_branches(ledger_path):
 
 def test_delete_chain_keeps_ledger_when_any_task_is_running(ledger_path):
     tasks = {
-        support.PARENT_ID: support.task_record(ledger.STATUS_DONE, task_id=support.PARENT_ID),
+        support.PARENT_ID: support.task_record(ledger.STATUS_FINISHED, task_id=support.PARENT_ID),
         support.CHILD_ID: support.task_record(
-            ledger.STATUS_DONE, task_id=support.CHILD_ID, after=support.PARENT_ID
+            ledger.STATUS_FINISHED, task_id=support.CHILD_ID, after=support.PARENT_ID
         ),
         support.SIBLING_ID: support.task_record(
             ledger.STATUS_RUNNING, task_id=support.SIBLING_ID, after=support.PARENT_ID
@@ -143,7 +149,7 @@ def test_deleted_task_id_reuse_ignores_earlier_executor(
 
 
 def test_reused_parent_id_does_not_claim_waiting_dependent(ledger_path):
-    parent = support.task_record(ledger.STATUS_DONE, task_id=support.PARENT_ID)
+    parent = support.task_record(ledger.STATUS_FINISHED, task_id=support.PARENT_ID)
     tasks = {
         support.PARENT_ID: parent,
         support.CHILD_ID: support.task_record(
@@ -153,7 +159,7 @@ def test_reused_parent_id_does_not_claim_waiting_dependent(ledger_path):
     old_session_id = parent["session_id"]
     assert isinstance(old_session_id, str)
     tasks[support.PARENT_ID] = support.task_record(
-        ledger.STATUS_DONE, task_id=support.PARENT_ID, session_id="replacement-session"
+        ledger.STATUS_FINISHED, task_id=support.PARENT_ID, session_id="replacement-session"
     )
     support.write_tasks(ledger_path, tasks)
 
@@ -166,7 +172,7 @@ def test_delete_releases_worktree_only_after_its_last_task(owned_worktree, ledge
     support.write_tasks(
         ledger_path,
         {
-            support.TASK_ID: support.task_record(ledger.STATUS_DONE, worktree=str(worktree)),
+            support.TASK_ID: support.task_record(ledger.STATUS_FINISHED, worktree=str(worktree)),
             "other": support.task_record(
                 ledger.STATUS_FAILED, task_id="other", worktree=str(worktree)
             ),
@@ -187,7 +193,7 @@ def test_delete_parent_and_waiting_child_releases_shared_worktree(owned_worktree
         ledger_path,
         {
             support.PARENT_ID: support.task_record(
-                ledger.STATUS_DONE, task_id=support.PARENT_ID, worktree=str(worktree)
+                ledger.STATUS_FINISHED, task_id=support.PARENT_ID, worktree=str(worktree)
             ),
             support.CHILD_ID: support.task_record(
                 ledger.STATUS_WAITING, task_id=support.CHILD_ID, after=support.PARENT_ID
@@ -206,7 +212,7 @@ def test_delete_chain_removes_shared_worktree_with_waiting_dependents(owned_work
         ledger_path,
         {
             support.PARENT_ID: support.task_record(
-                ledger.STATUS_DONE, task_id=support.PARENT_ID, worktree=str(worktree)
+                ledger.STATUS_FINISHED, task_id=support.PARENT_ID, worktree=str(worktree)
             ),
             support.CHILD_ID: support.task_record(
                 ledger.STATUS_WAITING, task_id=support.CHILD_ID, after=support.PARENT_ID
@@ -229,7 +235,7 @@ def test_delete_chain_removes_worktree_holding_golem_hooks(owned_worktree, ledge
         ledger_path,
         {
             support.PARENT_ID: support.task_record(
-                ledger.STATUS_DONE,
+                ledger.STATUS_BLOCKED,
                 task_id=support.PARENT_ID,
                 worktree=str(worktree),
                 gate="false",
@@ -254,9 +260,9 @@ def test_delete_checks_every_worktree_before_removing_any(git_repository, ledger
     changed_worktree = git_repository / "other"
     (changed_worktree / "changed").write_text("keep", encoding="utf-8")
     tasks = {
-        support.TASK_ID: support.task_record(ledger.STATUS_DONE, worktree=str(clean_worktree)),
+        support.TASK_ID: support.task_record(ledger.STATUS_FINISHED, worktree=str(clean_worktree)),
         support.SIBLING_ID: support.task_record(
-            ledger.STATUS_DONE, task_id=support.SIBLING_ID, worktree=str(changed_worktree)
+            ledger.STATUS_FINISHED, task_id=support.SIBLING_ID, worktree=str(changed_worktree)
         ),
     }
     support.write_tasks(ledger_path, tasks)
@@ -278,9 +284,9 @@ def test_delete_keeps_tasks_when_later_worktree_removal_fails(
     support.git_output(git_repository, "worktree", "add", "-qb", "other-branch", "other")
     second_worktree = git_repository / "other"
     tasks = {
-        support.TASK_ID: support.task_record(ledger.STATUS_DONE, worktree=str(first_worktree)),
+        support.TASK_ID: support.task_record(ledger.STATUS_FINISHED, worktree=str(first_worktree)),
         support.SIBLING_ID: support.task_record(
-            ledger.STATUS_DONE, task_id=support.SIBLING_ID, worktree=str(second_worktree)
+            ledger.STATUS_FINISHED, task_id=support.SIBLING_ID, worktree=str(second_worktree)
         ),
     }
     support.write_tasks(ledger_path, tasks)
@@ -314,7 +320,7 @@ def test_delete_retains_worktree_shared_with_retryable_task(owned_worktree, ledg
     support.write_tasks(
         ledger_path,
         {
-            support.TASK_ID: support.task_record(ledger.STATUS_DONE, worktree=str(worktree)),
+            support.TASK_ID: support.task_record(ledger.STATUS_FINISHED, worktree=str(worktree)),
             "other": support.task_record(
                 ledger.STATUS_FAILED, task_id="other", worktree=str(worktree)
             ),
@@ -340,7 +346,7 @@ def test_delete_prints_session_and_worktree(capsys, owned_worktree, ledger_path)
 @pytest.mark.parametrize("owner", [None, task_directories.WORKTREE_OWNER_EXTERNAL])
 def test_delete_does_not_remove_unknown_or_external_worktree(git_repository, ledger_path, owner):
     worktree = support.git_worktree(git_repository)
-    support.write_task(ledger_path, ledger.STATUS_DONE, worktree=str(worktree))
+    support.write_task(ledger_path, ledger.STATUS_FINISHED, worktree=str(worktree))
     if owner is not None:
         support.write_worktrees(
             {
@@ -363,7 +369,7 @@ def test_delete_does_not_remove_unknown_or_external_worktree(git_repository, led
 
 
 def test_delete_with_no_worktree_keeps_task(ledger_path):
-    support.write_task(ledger_path, ledger.STATUS_DONE)
+    support.write_task(ledger_path, ledger.STATUS_FINISHED)
 
     with pytest.raises(SystemExit, match=support.TASK_ID):
         cli.main(["delete", support.TASK_ID, "--remove-worktree"])
@@ -373,7 +379,7 @@ def test_delete_with_no_worktree_keeps_task(ledger_path):
 
 @pytest.mark.parametrize(
     "status",
-    [ledger.STATUS_NEEDS_REVIEW, ledger.STATUS_DONE, ledger.STATUS_FAILED],
+    [ledger.STATUS_BLOCKED, ledger.STATUS_FINISHED, ledger.STATUS_FAILED],
 )
 def test_delete_removes_task_and_worktree_and_preserves_branch(owned_worktree, status):
     worktree = owned_worktree(status)
@@ -445,7 +451,7 @@ def test_delete_retains_worktree_used_by_nested_task(owned_worktree, ledger_path
     support.write_tasks(
         ledger_path,
         {
-            support.TASK_ID: support.task_record(ledger.STATUS_DONE, worktree=str(worktree)),
+            support.TASK_ID: support.task_record(ledger.STATUS_FINISHED, worktree=str(worktree)),
             "scheduled": support.task_record(
                 ledger.STATUS_SCHEDULED,
                 task_id="scheduled",
@@ -480,13 +486,13 @@ def test_delete_retains_worktree_in_use(
     owned_worktree, ledger_path, monkeypatch, tmp_path, is_nested_pickup
 ):
     worktree = owned_worktree()
-    tasks = {support.TASK_ID: support.task_record(ledger.STATUS_DONE, worktree=str(worktree))}
+    tasks = {support.TASK_ID: support.task_record(ledger.STATUS_FINISHED, worktree=str(worktree))}
     pickup_id = support.TASK_ID
     if is_nested_pickup:
         nested = worktree / "nested"
         nested.mkdir()
         tasks[support.CHILD_ID] = support.task_record(
-            ledger.STATUS_DONE, task_id=support.CHILD_ID, cwd=str(nested)
+            ledger.STATUS_FINISHED, task_id=support.CHILD_ID, cwd=str(nested)
         )
         pickup_id = support.CHILD_ID
     support.write_tasks(ledger_path, tasks)

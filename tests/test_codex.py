@@ -44,7 +44,7 @@ def write_codex_rate_limits(monkeypatch, tmp_path, primary, secondary):
             ],
             0,
             "Codex completed",
-            ledger.STATUS_NEEDS_REVIEW,
+            ledger.STATUS_FINISHED,
             id="success",
         ),
         pytest.param(
@@ -102,7 +102,7 @@ def test_codex_run_records_result_and_thread(
     assert (
         fake_commands["codex-stdin"].read_text(encoding="utf-8").endswith(f"{support.PROMPT}\x1e\n")
     )
-    if status == ledger.STATUS_NEEDS_REVIEW:
+    if status == ledger.STATUS_FINISHED:
         assert cli.main(["show", support.TASK_ID]) == 0
         assert capsys.readouterr().out.endswith(f"{result}\n")
 
@@ -425,7 +425,7 @@ def test_codex_pickup_resumes_thread_in_task_worktree(
     worktree.mkdir()
     support.write_task(
         ledger_path,
-        ledger.STATUS_NEEDS_REVIEW,
+        ledger.STATUS_FINISHED,
         backend=ledger.BACKEND_CODEX,
         thread_id="codex-thread",
         worktree=str(worktree),
@@ -441,7 +441,7 @@ def test_codex_pickup_resumes_thread_in_task_worktree(
         codex.CODEX_PROVIDER_OVERRIDE,
     ]
     assert fake_commands["codex-cwd"].read_text(encoding="utf-8").splitlines()[-1] == str(worktree)
-    support.write_task(ledger_path, ledger.STATUS_NEEDS_REVIEW, backend=ledger.BACKEND_CODEX)
+    support.write_task(ledger_path, ledger.STATUS_FINISHED, backend=ledger.BACKEND_CODEX)
 
     with pytest.raises(SystemExit, match="--oss"):
         cli.main(["pickup", support.TASK_ID, "--", "--oss"])
@@ -538,9 +538,9 @@ def test_mixed_backend_chain_shares_worktree_and_uses_fresh_conversations(
     assert {task["worktree"] for task in tasks.values()} == {worktree}
     assert len({task["session_id"] for task in tasks.values()}) == 3
     assert [tasks[task_id]["status"] for task_id in ("parent", "child", "grandchild")] == [
-        ledger.STATUS_DONE,
-        ledger.STATUS_DONE,
-        ledger.STATUS_NEEDS_REVIEW,
+        ledger.STATUS_FINISHED,
+        ledger.STATUS_FINISHED,
+        ledger.STATUS_FINISHED,
     ]
     codex_cwds = fake_commands["codex-cwd"].read_text(encoding="utf-8").splitlines()
     codex_executions = [
