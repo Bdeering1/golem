@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from golem import cli, ledger, t3_code
+from golem import cli, codex_app, ledger, t3_code
 from tests import support, t3_support
 
 
@@ -246,6 +246,7 @@ def fake_commands(monkeypatch, tmp_path, fake_bin_path):
     for name, path in paths.items():
         monkeypatch.setenv(f"GOLEM_{name.upper().replace('-', '_')}", str(path))
     monkeypatch.setenv("GOLEM_CODEX_", str(tmp_path / "codex-"))
+    monkeypatch.setattr(codex_app, "application_directories", lambda: (tmp_path / "Applications",))
     monkeypatch.chdir(work_path)
     return paths
 

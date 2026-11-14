@@ -4,13 +4,15 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-from golem import accounts, ledger, t3_code
+from golem import accounts, codex_app, ledger, t3_code
 from golem.backends import codex, registry
 
 CLAUDE_DESKTOP_CLIENT = "claude-desktop"
+CODEX_APP_CLIENT = "codex-app"
 T3_CODE_CLIENT = "t3-code"
 BUILT_IN_DEFAULT_CLIENTS = {
     ledger.BACKEND_CLAUDE: CLAUDE_DESKTOP_CLIENT,
+    ledger.BACKEND_CODEX: CODEX_APP_CLIENT,
     ledger.BACKEND_T3: T3_CODE_CLIENT,
 }
 
@@ -79,6 +81,16 @@ CLIENTS: dict[str, Client] = {
                 "open",
                 f"claude://resume?session={conversation_id}",
             ],
+        ),
+        Client(
+            name=CODEX_APP_CLIENT,
+            backend_ids=frozenset({ledger.BACKEND_CODEX}),
+            is_terminal=False,
+            command=lambda _task, conversation_id, _agent_args: [
+                "open",
+                codex_app.thread_link(conversation_id),
+            ],
+            prepare=codex_app.prepare_thread,
         ),
         Client(
             name=T3_CODE_CLIENT,

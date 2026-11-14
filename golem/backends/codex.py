@@ -282,9 +282,12 @@ def conversation_id(task: ledger.Task) -> str | None:
     return thread_id if isinstance(thread_id, str) else None
 
 
+def codex_home(task: ledger.Task) -> Path:
+    return Path(task.get("environment", {}).get("CODEX_HOME", Path.home() / ".codex"))
+
+
 def session_transcript_paths(task: ledger.Task, thread_id: str) -> list[Path]:
-    codex_home = Path(task.get("environment", {}).get("CODEX_HOME", Path.home() / ".codex"))
-    return list((codex_home / "sessions").glob(f"**/rollout-*-{thread_id}.jsonl"))
+    return list((codex_home(task) / "sessions").glob(f"**/rollout-*-{thread_id}.jsonl"))
 
 
 def transcript_paths(task: ledger.Task) -> list[Path]:

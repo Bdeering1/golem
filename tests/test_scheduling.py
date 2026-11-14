@@ -47,7 +47,6 @@ def test_retry_refuses_unretryable_task_before_usage_lookup(ledger_path, monkeyp
 @pytest.mark.parametrize(
     ("backend_id", "option_arguments", "message"),
     [
-        ("codex", ["--auto-pickup"], "--auto-pickup requires a default app client for Codex"),
         ("codex", ["--account", "work@example.com"], "--account supports only Claude"),
         (
             "t3",
