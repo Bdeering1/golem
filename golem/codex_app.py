@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 APP_BUNDLE_ID = "com.openai.codex"
 APP_NAMES = ("ChatGPT.app", "Codex.app")
 LINK_INTERVAL_SECONDS = 2
-OPEN_TIMEOUT_SECONDS = 90
+OPEN_TIMEOUT_SECONDS = 120
 
 
 class CodexAppError(Exception):
