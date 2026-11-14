@@ -20,7 +20,11 @@ FAKE_T3 = """#!/bin/sh
 printf '%s\\n' "$*" >> "$T3CODE_HOME/t3-args"
 case "$1 $2" in
     "--version "*) echo 't3 v0.1.7' ;;
-    "thread show") [ -e "$T3CODE_HOME/thread-present" ] ;;
+    "thread show")
+        [ -e "$T3CODE_HOME/thread-present" ] && exit 0
+        [ -e "$T3CODE_HOME/thread-show-error" ] && exit 1
+        echo "Thread $3 is no longer available." >&2
+        exit 1 ;;
     "auth session") echo token ;;
     "project add") printf '%s' "$3" > "$T3CODE_HOME/added-project" ;;
     "thread send")

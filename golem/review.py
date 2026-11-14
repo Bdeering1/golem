@@ -23,7 +23,10 @@ def open_app_and_record_opening(
 
 
 def pickup(
-    task_id: str, *agent_args: str, client_name: str | None = None, is_review_required: bool = False
+    task_id: str,
+    *agent_args: str,
+    client_name: str | None = None,
+    is_unopened_required: bool = False,
 ) -> int:
     preflight_task = ledger.load_tasks().get(task_id)
     if preflight_task is None:
@@ -41,7 +44,7 @@ def pickup(
         if task_id not in tasks:
             raise SystemExit(f"golem: task not found: {task_id}")
         task = tasks[task_id]
-        if is_review_required and not chains.is_ready_to_open(tasks, task_id):
+        if is_unopened_required and not chains.is_ready_to_open(tasks, task_id):
             return 0
         if task.get("status") in ledger.NOT_STARTED_STATUSES:
             raise SystemExit(f"golem: task has not started: {task_id}")
@@ -109,7 +112,7 @@ def pickup_all(client_name: str | None, default_clients: dict[str, str]) -> int:
                 task_id, tasks[task_id], default_clients
             )
             has_failure |= (
-                pickup(task_id, client_name=task_client_name, is_review_required=True) != 0
+                pickup(task_id, client_name=task_client_name, is_unopened_required=True) != 0
             )
         except SystemExit as error:
             print(error, file=sys.stderr)
@@ -129,7 +132,7 @@ def auto_pickup_task(task_id: str) -> None:
     if client_name is None or not chains.is_ready_to_open(tasks, task_id):
         return
     try:
-        returncode = pickup(task_id, client_name=client_name, is_review_required=True)
+        returncode = pickup(task_id, client_name=client_name, is_unopened_required=True)
     except SystemExit as error:
         print(error, file=sys.stderr)
         return

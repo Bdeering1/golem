@@ -443,7 +443,7 @@ def add_pickup_command(add_parser: Callable[..., argparse.ArgumentParser]) -> No
     pickup_command.add_argument(
         "--all",
         action="store_true",
-        help="open every blocked or finished task golem has not opened",
+        help="open blocked tasks and finished chains golem has not opened",
     )
     pickup_command.add_argument(
         "-c",

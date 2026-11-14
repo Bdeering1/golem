@@ -273,6 +273,7 @@ def test_continue_releases_stopped_task(
     )
 
     assert cli.main(["continue", support.PARENT_ID, *continue_arguments]) == 0
+    assert gates.run_pending_gate_under_directory_lock(support.PARENT_ID)
 
     parent = support.read_task(ledger_path, support.PARENT_ID)
     assert parent["status"] == ledger.STATUS_FINISHED

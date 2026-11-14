@@ -24,6 +24,7 @@ APP_START_POLL_SECONDS = 0.5
 NETWORK_TIMEOUT_SECONDS = 30
 INSTANCE_IDS = {ledger.BACKEND_CLAUDE: "claudeAgent", ledger.BACKEND_CODEX: "codex"}
 DEFAULT_MODELS = {"claudeAgent": "claude-opus-5-5", "codex": "gpt-6-astra"}
+THREAD_MISSING_MESSAGE = "is no longer available"
 EFFORT_OPTION_IDS = {"claudeAgent": "effort", "codex": "reasoningEffort"}
 
 
@@ -210,7 +211,7 @@ def thread_state(origin: str, token: str, thread_id: str) -> str | None:
     try:
         thread = cast("ledger.JsonObject", thread_projection(origin, token, thread_id)["thread"])
     except T3_CODE_ERRORS:
-        return None if is_thread_present(thread_id) else ledger.THREAD_STATE_DELETED
+        return ledger.THREAD_STATE_DELETED if is_thread_missing(thread_id) else None
     if thread.get("deletedAt") is not None:
         return ledger.THREAD_STATE_DELETED
     if thread.get("archivedAt") is not None:
@@ -236,8 +237,17 @@ def ensure_app_running() -> None:
     wait_for_server()
 
 
+def thread_show_result(thread_id: str) -> subprocess.CompletedProcess[str]:
+    return run_t3("thread", "show", thread_id, "--json")
+
+
 def is_thread_present(thread_id: str) -> bool:
-    return run_t3("thread", "show", thread_id, "--json").returncode == 0
+    return thread_show_result(thread_id).returncode == 0
+
+
+def is_thread_missing(thread_id: str) -> bool:
+    result = thread_show_result(thread_id)
+    return result.returncode != 0 and THREAD_MISSING_MESSAGE in result.stderr
 
 
 def project_root(task: ledger.Task) -> str:

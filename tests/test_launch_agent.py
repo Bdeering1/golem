@@ -30,6 +30,8 @@ from tests import support
 
 LAUNCH_AGENT_ERROR_PATTERN = re.escape(launch_agent.LAUNCH_AGENT_ERROR)
 PULL_REQUEST_URL = "https://github.com/owner/repository/pull/1"
+THREAD_PRESENT_MARKER = "thread-present"
+THREAD_SHOW_ERROR_MARKER = "thread-show-error"
 
 
 @pytest.mark.parametrize(
@@ -546,23 +548,40 @@ def unreachable_projection(*_arguments: object) -> Never:
 
 
 @pytest.mark.parametrize(
-    ("thread", "is_thread_present", "expected_state"),
+    ("thread", "thread_show_marker", "expected_state"),
     [
-        pytest.param({}, True, ledger.THREAD_STATE_UNSETTLED, id="unsettled"),
-        pytest.param({"settledAt": "2030-03-01"}, True, ledger.THREAD_STATE_SETTLED, id="settled"),
+        pytest.param({}, THREAD_PRESENT_MARKER, ledger.THREAD_STATE_UNSETTLED, id="unsettled"),
         pytest.param(
-            {"settledOverride": "settled"}, True, ledger.THREAD_STATE_SETTLED, id="override"
+            {"settledAt": "2030-03-01"},
+            THREAD_PRESENT_MARKER,
+            ledger.THREAD_STATE_SETTLED,
+            id="settled",
         ),
         pytest.param(
-            {"archivedAt": "2030-03-01"}, True, ledger.THREAD_STATE_ARCHIVED, id="archived"
+            {"settledOverride": "settled"},
+            THREAD_PRESENT_MARKER,
+            ledger.THREAD_STATE_SETTLED,
+            id="override",
         ),
-        pytest.param({"deletedAt": "2030-03-01"}, True, ledger.THREAD_STATE_DELETED, id="deleted"),
-        pytest.param(None, False, ledger.THREAD_STATE_DELETED, id="missing"),
-        pytest.param(None, True, ledger.THREAD_STATE_SETTLED, id="unreadable"),
+        pytest.param(
+            {"archivedAt": "2030-03-01"},
+            THREAD_PRESENT_MARKER,
+            ledger.THREAD_STATE_ARCHIVED,
+            id="archived",
+        ),
+        pytest.param(
+            {"deletedAt": "2030-03-01"},
+            THREAD_PRESENT_MARKER,
+            ledger.THREAD_STATE_DELETED,
+            id="deleted",
+        ),
+        pytest.param(None, None, ledger.THREAD_STATE_DELETED, id="missing"),
+        pytest.param(None, THREAD_PRESENT_MARKER, ledger.THREAD_STATE_SETTLED, id="unreadable"),
+        pytest.param(None, THREAD_SHOW_ERROR_MARKER, ledger.THREAD_STATE_SETTLED, id="show-error"),
     ],
 )
 def test_launch_agent_records_thread_state_of_finished_chain(
-    server, ledger_path, monkeypatch, thread, is_thread_present, expected_state
+    server, ledger_path, monkeypatch, thread, thread_show_marker, expected_state
 ):
     support.write_task(
         ledger_path,
@@ -573,8 +592,8 @@ def test_launch_agent_records_thread_state_of_finished_chain(
     if thread is None:
         monkeypatch.setattr(t3_code, "thread_projection", unreachable_projection)
     server.projections[0] = {"thread": thread}
-    if is_thread_present:
-        (server.home / "thread-present").touch()
+    if thread_show_marker is not None:
+        (server.home / thread_show_marker).touch()
 
     assert launch_agent.run_launch_agent() == 0
 

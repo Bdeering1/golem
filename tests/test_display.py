@@ -145,7 +145,7 @@ def test_list_rows_show_the_step_earliest_in_status_order(
         ),
         pytest.param(
             ledger.STATUS_FINISHED,
-            {"pull_requests": [MERGED_PULL_REQUEST, MERGED_PULL_REQUEST]},
+            {"pull_requests": [MERGED_PULL_REQUEST, CLOSED_PULL_REQUEST | {"state": "merged"}]},
             "2 PRs merged",
             id="prs-same-state",
         ),
@@ -440,3 +440,12 @@ def test_finished_chain_column_and_reason(child_fields, column, reason):
     row = display.list_rows(tasks, TODAY)[0]
 
     assert (row.status, row.column, row.detail) == (ledger.STATUS_FINISHED, column, reason)
+
+
+def test_finished_chain_counts_pull_request_shared_by_steps_once():
+    tasks = {
+        "parent": finished_step("parent", pull_requests=[OPEN_PULL_REQUEST]),
+        "child": finished_step("child", after="parent", pull_requests=[OPEN_PULL_REQUEST]),
+    }
+
+    assert display.list_rows(tasks, TODAY)[0].detail == "PR open"

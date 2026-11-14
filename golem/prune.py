@@ -57,23 +57,26 @@ def prune_selection(
         chain_ids = chains.dependents_first_task_ids(tasks, [root_task_id])
         chain_id_set = set(chain_ids)
         column, reason = display.chain_column(tasks, chain_id_set, today)
-        is_done = column == display.COLUMN_DONE and not any(
+        is_prunable_done_chain = column == display.COLUMN_DONE and not any(
             is_task_directory_busy(tasks[chain_id]) for chain_id in chain_ids
         )
-        is_asked = is_done and not ledger.are_pull_requests_finished(
+        is_asked = is_prunable_done_chain and not ledger.are_pull_requests_finished(
             display.chain_pull_requests(tasks, chain_id_set)
         )
-        has_candidates = has_candidates or is_done
+        has_candidates = has_candidates or is_prunable_done_chain
+        is_chain_selected = is_prunable_done_chain
         if is_asked and is_keeping_asked_chains:
             has_kept_asked_chains = True
-            is_done = False
+            is_chain_selected = False
         elif is_asked and answer != PRUNE_ANSWER_ALL:
             if answer != PRUNE_ANSWER_QUIT:
                 answer = prune_answer(
                     [task_id for task_id in tasks if task_id in chain_id_set], reason
                 )
-            is_done = answer in {PRUNE_ANSWER_YES, PRUNE_ANSWER_ALL}
-        chain_selected_tasks = chain_prune_selection(tasks, chain_ids, is_chain_selected=is_done)
+            is_chain_selected = answer in {PRUNE_ANSWER_YES, PRUNE_ANSWER_ALL}
+        chain_selected_tasks = chain_prune_selection(
+            tasks, chain_ids, is_chain_selected=is_chain_selected
+        )
         has_candidates = has_candidates or bool(chain_selected_tasks)
         selected_tasks |= chain_selected_tasks
     return selected_tasks, has_candidates, has_kept_asked_chains

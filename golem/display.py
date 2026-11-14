@@ -159,11 +159,12 @@ def list_detail(task: ledger.Task, today: date, chain_reason: str) -> str:
 
 
 def chain_pull_requests(tasks: ledger.Tasks, chain_ids: set[str]) -> list[ledger.PullRequest]:
-    return [
-        pull_request
+    pull_requests_by_url = {
+        pull_request["url"]: pull_request
         for chain_id in sorted(chain_ids)
         for pull_request in tasks[chain_id].get("pull_requests", [])
-    ]
+    }
+    return list(pull_requests_by_url.values())
 
 
 def last_step_id(tasks: ledger.Tasks, chain_ids: set[str]) -> str:
@@ -177,16 +178,29 @@ def last_step_id(tasks: ledger.Tasks, chain_ids: set[str]) -> str:
     )
 
 
+def is_chain_closed(tasks: ledger.Tasks, chain_ids: set[str]) -> bool:
+    return any("closed_at" in tasks[chain_id] for chain_id in chain_ids)
+
+
+def thread_deciding_step_id(tasks: ledger.Tasks, chain_ids: set[str]) -> str | None:
+    if is_chain_closed(tasks, chain_ids) or chain_pull_requests(tasks, chain_ids):
+        return None
+    step_id = last_step_id(tasks, chain_ids)
+    return step_id if "t3_code_thread_id" in tasks[step_id] else None
+
+
 def finished_chain_column(tasks: ledger.Tasks, chain_ids: set[str], today: date) -> tuple[str, str]:
-    if any("closed_at" in tasks[chain_id] for chain_id in chain_ids):
+    if is_chain_closed(tasks, chain_ids):
         return COLUMN_DONE, "closed"
     pull_requests = chain_pull_requests(tasks, chain_ids)
     if pull_requests:
         column = COLUMN_DONE if ledger.are_pull_requests_finished(pull_requests) else COLUMN_REVIEW
         return column, pull_request_summary(pull_requests)
-    last_step = tasks[last_step_id(tasks, chain_ids)]
-    if "t3_code_thread_id" in last_step:
-        thread_state = last_step.get("t3_code_thread_state", ledger.THREAD_STATE_UNSETTLED)
+    thread_step_id = thread_deciding_step_id(tasks, chain_ids)
+    if thread_step_id is not None:
+        thread_state = tasks[thread_step_id].get(
+            "t3_code_thread_state", ledger.THREAD_STATE_UNSETTLED
+        )
         column = COLUMN_DONE if thread_state in DONE_THREAD_STATES else COLUMN_REVIEW
         return column, f"thread {thread_state}"
     finished_at = max(tasks[chain_id].get("finished_at", "") for chain_id in chain_ids)

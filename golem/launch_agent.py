@@ -187,16 +187,14 @@ def thread_ids_to_refresh(tasks: ledger.Tasks) -> dict[str, str]:
             continue
         chain_ids = chains.chain_task_ids(tasks, task_id)
         listed_ids |= chain_ids
-        if (
-            not chains.is_chain_finished(tasks, chain_ids)
-            or any("closed_at" in tasks[chain_id] for chain_id in chain_ids)
-            or display.chain_pull_requests(tasks, chain_ids)
-        ):
+        if not chains.is_chain_finished(tasks, chain_ids):
             continue
-        last_step_id = display.last_step_id(tasks, chain_ids)
-        thread_id = tasks[last_step_id].get("t3_code_thread_id")
+        step_id = display.thread_deciding_step_id(tasks, chain_ids)
+        if step_id is None:
+            continue
+        thread_id = tasks[step_id].get("t3_code_thread_id")
         if thread_id is not None:
-            thread_ids[last_step_id] = thread_id
+            thread_ids[step_id] = thread_id
     return thread_ids
 
 
