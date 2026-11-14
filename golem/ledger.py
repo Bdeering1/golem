@@ -282,9 +282,9 @@ def has_finished_pull_requests(task: Task) -> bool:
     return are_pull_requests_finished(task.get("pull_requests", []))
 
 
-def has_marked_descendant(tasks: Tasks, task_id: str, field: str) -> bool:
+def has_field_in_subtree(tasks: Tasks, task_id: str, field: str) -> bool:
     return field in tasks[task_id] or any(
-        dependent.get("after") == task_id and has_marked_descendant(tasks, dependent_id, field)
+        dependent.get("after") == task_id and has_field_in_subtree(tasks, dependent_id, field)
         for dependent_id, dependent in tasks.items()
     )
 
@@ -296,6 +296,6 @@ def root_task_id(tasks: Tasks, task_id: str) -> str:
 
 
 def is_counted_opened(tasks: Tasks, task_id: str) -> bool:
-    return has_marked_descendant(tasks, task_id, "opened_at") or has_marked_descendant(
+    return has_field_in_subtree(tasks, task_id, "opened_at") or has_field_in_subtree(
         tasks, root_task_id(tasks, task_id), "closed_at"
     )

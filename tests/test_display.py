@@ -17,6 +17,10 @@ TODAY = date(2030, 3, 10)
 OPEN_PULL_REQUEST = {"url": "https://github.com/owner/repository/pull/1", "state": "open"}
 MERGED_PULL_REQUEST = {"url": "https://github.com/owner/repository/pull/2", "state": "merged"}
 CLOSED_PULL_REQUEST = {"url": "https://github.com/owner/repository/pull/3", "state": "closed"}
+SECOND_MERGED_PULL_REQUEST = {
+    "url": "https://github.com/owner/repository/pull/4",
+    "state": "merged",
+}
 CLOSED_AT = datetime(2030, 3, 9, tzinfo=UTC).isoformat()
 
 
@@ -145,7 +149,7 @@ def test_list_rows_show_the_step_earliest_in_status_order(
         ),
         pytest.param(
             ledger.STATUS_FINISHED,
-            {"pull_requests": [MERGED_PULL_REQUEST, CLOSED_PULL_REQUEST | {"state": "merged"}]},
+            {"pull_requests": [MERGED_PULL_REQUEST, SECOND_MERGED_PULL_REQUEST]},
             "2 PRs merged",
             id="prs-same-state",
         ),

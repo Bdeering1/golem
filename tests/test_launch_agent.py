@@ -32,6 +32,7 @@ LAUNCH_AGENT_ERROR_PATTERN = re.escape(launch_agent.LAUNCH_AGENT_ERROR)
 PULL_REQUEST_URL = "https://github.com/owner/repository/pull/1"
 THREAD_PRESENT_MARKER = "thread-present"
 THREAD_SHOW_ERROR_MARKER = "thread-show-error"
+UNREACHABLE_THREAD = "unreachable"
 
 
 @pytest.mark.parametrize(
@@ -575,9 +576,17 @@ def unreachable_projection(*_arguments: object) -> Never:
             ledger.THREAD_STATE_DELETED,
             id="deleted",
         ),
-        pytest.param(None, None, ledger.THREAD_STATE_DELETED, id="missing"),
-        pytest.param(None, THREAD_PRESENT_MARKER, ledger.THREAD_STATE_SETTLED, id="unreadable"),
-        pytest.param(None, THREAD_SHOW_ERROR_MARKER, ledger.THREAD_STATE_SETTLED, id="show-error"),
+        pytest.param(UNREACHABLE_THREAD, None, ledger.THREAD_STATE_DELETED, id="missing"),
+        pytest.param(None, None, ledger.THREAD_STATE_DELETED, id="null-thread"),
+        pytest.param(
+            UNREACHABLE_THREAD, THREAD_PRESENT_MARKER, ledger.THREAD_STATE_SETTLED, id="unreadable"
+        ),
+        pytest.param(
+            UNREACHABLE_THREAD,
+            THREAD_SHOW_ERROR_MARKER,
+            ledger.THREAD_STATE_SETTLED,
+            id="show-error",
+        ),
     ],
 )
 def test_launch_agent_records_thread_state_of_finished_chain(
@@ -589,7 +598,7 @@ def test_launch_agent_records_thread_state_of_finished_chain(
         t3_code_thread_id="thread",
         t3_code_thread_state=ledger.THREAD_STATE_SETTLED,
     )
-    if thread is None:
+    if thread == UNREACHABLE_THREAD:
         monkeypatch.setattr(t3_code, "thread_projection", unreachable_projection)
     server.projections[0] = {"thread": thread}
     if thread_show_marker is not None:
