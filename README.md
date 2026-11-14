@@ -1,6 +1,6 @@
-# golem
+<img width="2172" height="724" alt="exec-443e6493-249b-4510-a8f1-6cc0f689d857" src="https://github.com/user-attachments/assets/4bae1593-f078-4b47-8322-fbe6dc71f01d" />
 
-golem is an orchestrator for coding agents.
+A CLI-based orchestrator for coding agents.
 
 Queue agent sessions, chain them together, run them on different accounts, and schedule them around your usage limits. golem runs them in the background, each in its own git worktree, and notifies you when one needs review. Setup scripts, gates, and aliases let you build your own workflows on top.
 
