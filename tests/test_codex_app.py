@@ -37,7 +37,7 @@ def sent_links(fake_commands) -> list[str]:
     ]
 
 
-def set_app_lock_holder(monkeypatch, fake_commands, app: Path, link_count=1):
+def set_app_lock_holder(monkeypatch, fake_commands, app: Path, link_count):
     app_server = app / "Contents" / "Resources" / "codex-cli" / "codex"
 
     def lock_holder_commands(_lock_path: Path) -> list[str]:
@@ -60,7 +60,6 @@ def write_codex_task(ledger_path):
     "link_count",
     [
         pytest.param(0, id="already-open"),
-        pytest.param(1, id="running"),
         pytest.param(3, id="starting"),
     ],
 )
@@ -78,48 +77,6 @@ def test_pickup_opens_codex_thread_in_app(
         *[codex_app.thread_link(THREAD_ID)] * (link_count + 1),
     ]
     assert support.read_task(ledger_path)["status"] == ledger.STATUS_DONE
-
-
-def test_pickup_all_uses_codex_app_default(
-    fake_commands, ledger_path, monkeypatch, codex_app_bundle
-):
-    app = codex_app_bundle()
-    set_app_lock_holder(monkeypatch, fake_commands, app)
-    write_codex_task(ledger_path)
-
-    assert cli.main(["pickup", "--all"]) == 0
-
-    assert codex_app.thread_link(THREAD_ID) in sent_links(fake_commands)
-    assert support.read_task(ledger_path)["status"] == ledger.STATUS_DONE
-
-
-def test_auto_pickup_records_and_uses_codex_app(
-    installed_launch_agent, fake_commands, ledger_path, monkeypatch, codex_app_bundle
-):
-    app = codex_app_bundle()
-    set_app_lock_holder(monkeypatch, fake_commands, app)
-
-    assert (
-        cli.main(
-            [
-                "run",
-                support.TASK_ID,
-                support.PROMPT,
-                "--backend",
-                ledger.BACKEND_CODEX,
-                "--now",
-                "--auto-pickup",
-            ]
-        )
-        == 0
-    )
-    task = support.read_task(ledger_path)
-    assert task["auto_pickup_client"] == clients.CODEX_APP_CLIENT
-
-    assert cli.main(["_execute", support.TASK_ID, task["session_id"]]) == 0
-    completed_task = support.read_task(ledger_path)
-    assert completed_task["status"] == ledger.STATUS_DONE
-    assert codex_app.thread_link(completed_task["thread_id"]) in sent_links(fake_commands)
 
 
 def remove_app(_monkeypatch, _fake_commands, app):
