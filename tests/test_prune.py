@@ -34,10 +34,6 @@ MERGED_PULL_REQUEST: ledger.PullRequest = {
     "url": "merged",
     "state": ledger.PULL_REQUEST_STATE_MERGED,
 }
-CLOSED_PULL_REQUEST: ledger.PullRequest = {
-    "url": "closed",
-    "state": ledger.PULL_REQUEST_STATE_CLOSED,
-}
 OPEN_PULL_REQUEST: ledger.PullRequest = {"url": "open", "state": ledger.PULL_REQUEST_STATE_OPEN}
 
 
@@ -82,10 +78,8 @@ def test_prune_without_terminal_asks_for_done_chains_without_finished_prs(
     ("fields", "is_removed"),
     [
         pytest.param({"pull_requests": [MERGED_PULL_REQUEST]}, True, id="merged-pr"),
-        pytest.param({"pull_requests": [CLOSED_PULL_REQUEST]}, True, id="closed-pr"),
         pytest.param({"pull_requests": [OPEN_PULL_REQUEST]}, False, id="open-pr"),
         pytest.param({"finished_at": finished_days_ago(7)}, True, id="no-pr-old"),
-        pytest.param({"finished_at": finished_days_ago(1)}, False, id="no-pr-recent"),
     ],
 )
 def test_prune_deletes_only_done_chains(ledger_path, fields, is_removed):

@@ -5,6 +5,7 @@ from golem.backends import claude
 from tests import support
 
 OPENED_AT = "2030-03-10T12:00:00+00:00"
+CLOSED_AT = "2030-03-10T13:00:00+00:00"
 
 
 @pytest.mark.parametrize(
@@ -36,24 +37,6 @@ def test_close_refuses_unfinished_chain(ledger_path):
         cli.main(["close", support.PARENT_ID])
 
     assert "closed_at" not in support.read_task(ledger_path, support.PARENT_ID)
-
-
-def test_pickup_all_skips_closed_chain(fake_commands, ledger_path):
-    support.write_tasks(
-        ledger_path,
-        {
-            support.PARENT_ID: support.task_record(
-                ledger.STATUS_FINISHED, task_id=support.PARENT_ID
-            ),
-            support.CHILD_ID: support.task_record(
-                ledger.STATUS_FINISHED, task_id=support.CHILD_ID, after=support.PARENT_ID
-            ),
-        },
-    )
-
-    assert cli.main(["close", support.PARENT_ID]) == 0
-    assert cli.main(["pickup", "--all", "--client", "claude-desktop"]) == 0
-    assert not fake_commands["open-args"].read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize(
@@ -134,65 +117,49 @@ def test_pickup_all_and_reschedule_validate_arguments(command):
     assert exit_info.value.code == 2
 
 
-def test_pickup_counts_earlier_steps_as_opened(fake_commands, ledger_path):
-    support.write_tasks(
-        ledger_path,
-        {
-            support.PARENT_ID: support.task_record(
-                ledger.STATUS_FINISHED, task_id=support.PARENT_ID
-            ),
-            support.CHILD_ID: support.task_record(
-                ledger.STATUS_FINISHED, task_id=support.CHILD_ID, after=support.PARENT_ID
-            ),
-            support.GRANDCHILD_ID: support.task_record(
-                ledger.STATUS_FINISHED, task_id=support.GRANDCHILD_ID, after=support.CHILD_ID
-            ),
-        },
-    )
-
-    assert cli.main(["pickup", support.GRANDCHILD_ID, "--client", "claude-desktop"]) == 0
-    assert cli.main(["pickup", "--all", "--client", "claude-desktop"]) == 0
-
-    tasks = support.read_tasks(ledger_path)
-    assert {task["status"] for task in tasks.values()} == {ledger.STATUS_FINISHED}
-    assert [task_id for task_id, task in tasks.items() if "opened_at" in task] == [
-        support.GRANDCHILD_ID
-    ]
-    assert len(fake_commands["open-args"].read_text(encoding="utf-8").splitlines()) == 1
-
-
 @pytest.mark.parametrize(
-    ("parent_fields", "child_status", "opened_ids"),
+    ("parent_fields", "child_fields", "opened_ids"),
     [
-        pytest.param({}, ledger.STATUS_FINISHED, [support.CHILD_ID], id="child-needs-review"),
-        pytest.param({}, ledger.STATUS_RUNNING, [], id="child-running"),
-        pytest.param({}, ledger.STATUS_FAILED, [support.PARENT_ID], id="child-failed"),
+        pytest.param({}, {}, [support.CHILD_ID], id="child-needs-review"),
+        pytest.param({}, {"status": ledger.STATUS_RUNNING}, [], id="child-running"),
+        pytest.param({}, {"status": ledger.STATUS_FAILED}, [support.PARENT_ID], id="child-failed"),
         pytest.param(
-            {"opened_at": OPENED_AT}, ledger.STATUS_FAILED, [], id="parent-already-opened"
+            {"opened_at": OPENED_AT},
+            {"status": ledger.STATUS_FAILED},
+            [],
+            id="parent-already-opened",
         ),
         pytest.param(
+            {},
+            {"status": ledger.STATUS_FAILED, "opened_at": OPENED_AT},
+            [],
+            id="later-step-opened",
+        ),
+        pytest.param({"closed_at": CLOSED_AT}, {}, [], id="chain-closed"),
+        pytest.param(
             {"status": ledger.STATUS_BLOCKED, "gate_stop_reason": support.GATE_STOP_REASON},
-            ledger.STATUS_WAITING,
+            {"status": ledger.STATUS_WAITING},
             [support.PARENT_ID],
             id="parent-blocked",
         ),
         pytest.param(
             {"status": ledger.STATUS_BLOCKED, "gate_reason": support.GATE_STOP_REASON},
-            ledger.STATUS_WAITING,
+            {"status": ledger.STATUS_WAITING},
             [support.PARENT_ID],
             id="parent-stopped-in-old-ledger",
         ),
     ],
 )
 def test_pickup_all_opens_only_latest_reviewable_task_in_chain(
-    fake_commands, ledger_path, parent_fields, child_status, opened_ids
+    fake_commands, ledger_path, parent_fields, child_fields, opened_ids
 ):
     tasks = {
         support.PARENT_ID: support.task_record(ledger.STATUS_FINISHED, task_id=support.PARENT_ID)
         | parent_fields,
         support.CHILD_ID: support.task_record(
-            child_status, task_id=support.CHILD_ID, after=support.PARENT_ID
-        ),
+            ledger.STATUS_FINISHED, task_id=support.CHILD_ID, after=support.PARENT_ID
+        )
+        | child_fields,
     }
     support.write_tasks(ledger_path, tasks)
 

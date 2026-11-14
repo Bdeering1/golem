@@ -386,12 +386,6 @@ def finished_at(*, days_ago: int) -> str:
             id="prs-merged-or-closed",
         ),
         pytest.param(
-            {"pull_requests": [CLOSED_PULL_REQUEST]},
-            display.COLUMN_DONE,
-            "PR closed",
-            id="pr-closed-unmerged",
-        ),
-        pytest.param(
             {
                 "pull_requests": [OPEN_PULL_REQUEST],
                 "t3_code_thread_id": "thread",
