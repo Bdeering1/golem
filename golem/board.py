@@ -251,6 +251,14 @@ class CardStyle(NamedTuple):
     pitch: int
     is_boxed: bool
 
+    def stack_height(self, card_count: int) -> int:
+        return card_count * self.pitch - (self.pitch - self.height)
+
+
+class GateCheck(NamedTuple):
+    process: subprocess.Popen[bytes]
+    error_fd: int
+
 
 class Glyphs(NamedTuple):
     horizontal: str
@@ -310,7 +318,7 @@ class BoardLayout(NamedTuple):
 
 def visible_count(row_count: int, style: CardStyle, body_height: int) -> int:
     gap_height = style.pitch - style.height
-    if row_count * style.pitch - gap_height <= body_height:
+    if style.stack_height(row_count) <= body_height:
         return row_count
     # One row stays free under the last card for the "more" marker.
     return max(1, (body_height - 1 + gap_height) // style.pitch)
@@ -319,7 +327,7 @@ def visible_count(row_count: int, style: CardStyle, body_height: int) -> int:
 def column_used_height(row_count: int, style: CardStyle, body_height: int) -> int:
     shown_count = visible_count(row_count, style, body_height)
     marker_height = 1 if shown_count < row_count else 0
-    return max(1, shown_count * style.pitch - (style.pitch - style.height) + marker_height)
+    return max(1, style.stack_height(shown_count) + marker_height)
 
 
 type LedgerStat = tuple[int, int, int] | None
@@ -452,9 +460,7 @@ class BoardState:
     focus_before_done: int = 0
     changed_until: dict[str, float] = field(default_factory=dict[str, float])
     pull_request_presses: dict[str, int] = field(default_factory=dict[str, int])
-    gate_checks: dict[str, subprocess.Popen[str]] = field(
-        default_factory=dict[str, "subprocess.Popen[str]"]
-    )
+    gate_checks: dict[str, GateCheck] = field(default_factory=dict[str, GateCheck])
 
 
 def recent_activity(session_id: str) -> list[str]:
@@ -544,11 +550,7 @@ def card_style(row_count: int, body_height: int, *, can_box: bool, can_stack: bo
     if not can_stack:
         styles = tuple(style for style in styles if style != TALL_CARD)
     return next(
-        (
-            style
-            for style in styles
-            if row_count * style.pitch - (style.pitch - style.height) <= body_height
-        ),
+        (style for style in styles if style.stack_height(row_count) <= body_height),
         styles[-1],
     )
 
@@ -927,11 +929,20 @@ def card_detail(
     time_text, reason, short_reason, repository = facts
     separator = f" {glyphs.separator} "
     timed_facts = separator.join(part for part in (time_text, repository) if part)
-    coarse_facts = separator.join(
-        part for part in (coarse_time_text(time_text), repository) if part
+    coarse_time = coarse_time_text(time_text)
+    coarse_facts = separator.join(part for part in (coarse_time, repository) if part)
+    facts_repository_width = width - len(coarse_time) - len(separator) if coarse_time else width
+    cut_facts = (
+        separator.join(
+            part
+            for part in (coarse_time, fitted(repository, facts_repository_width, glyphs))
+            if part
+        )
+        if facts_repository_width >= min(len(repository), MIN_CARD_REPOSITORY_WIDTH)
+        else time_text
     )
     fitted_facts = next(
-        (option for option in (timed_facts, coarse_facts) if len(option) <= width), time_text
+        (option for option in (timed_facts, coarse_facts) if len(option) <= width), cut_facts
     )
     if not reason:
         return fitted_facts
@@ -2006,7 +2017,7 @@ def closable_task_ids(snapshot: BoardSnapshot) -> list[str]:
 
 def available_actions(snapshot: BoardSnapshot, row: display.ListRow | None) -> list[str]:
     if row is None:
-        return []
+        return [ACTION_CLOSE_ALL] if closable_task_ids(snapshot) else []
     actions: list[str] = []
     if row.status in PICKUP_STATUSES:
         actions.append(ACTION_PICKUP)
@@ -2033,14 +2044,10 @@ def footer_action_hints(
     snapshot: BoardSnapshot, row: display.ListRow | None, *, is_complete: bool = False
 ) -> list[tuple[str, str]]:
     return [
-        (action_key(action), ACTION_LABELS[action])
+        (ACTION_KEYS[action], ACTION_LABELS[action])
         for action in available_actions(snapshot, row)
         if is_complete or action not in FOOTER_HIDDEN_ACTIONS
     ]
-
-
-def action_key(action: str) -> str:
-    return ACTION_KEYS[action]
 
 
 def key_hint_segments(y: int, width: int, key_sets: list[list[tuple[str, str]]]) -> list[Segment]:
@@ -2072,28 +2079,32 @@ def status_line_segments(
     glyphs: Glyphs,
     snapshot: BoardSnapshot,
 ) -> list[Segment] | None:
-    if state.pending_action is not None and row is not None:
+    if state.pending_action == ACTION_CLOSE_ALL:
+        closable_count = len(closable_task_ids(snapshot))
+        verb, step_suffix = "Close", ""
+        name = (
+            f"{'all ' if closable_count > 1 else ''}{counted_text(closable_count, 'finished task')}"
+        )
+    elif state.pending_action is not None and row is not None:
         verb = ACTION_LABELS[state.pending_action].capitalize()
         name = chain_name(snapshot.tasks, row.task_id)
         step = step_name(snapshot.tasks, row.task_id)
         step_suffix = f" ({step})" if step else ""
-        if state.pending_action == ACTION_CLOSE_ALL:
-            verb, step_suffix = "Close", ""
-            name = f"all {len(closable_task_ids(snapshot))} finished tasks"
-        answer = CONFIRM_ANSWER_TEXT
-        if len(verb) + len(name) + len(step_suffix) + len(answer) + 4 >= width:
-            answer = CONFIRM_SHORT_ANSWER_TEXT
-        name_width = width - len(verb) - len(answer) - 5 - len(step_suffix)
-        subject = f"{fitted_task_id(name, name_width, glyphs)}{step_suffix}"
-        prompt = f"{verb} {subject}? "
-        return [
-            Segment(y, 0, prompt, STYLE_BOLD),
-            Segment(y, len(prompt), "y", STYLE_BOLD, BOARD_COLUMNS[0].color),
-            Segment(y, len(prompt) + 1, answer, STYLE_DIM),
-        ]
-    if state.flash_text and time.monotonic() < state.flash_until:
+    elif state.flash_text and time.monotonic() < state.flash_until:
         return [Segment(y, 0, fitted(state.flash_text, width - 1, glyphs), STYLE_BOLD)]
-    return None
+    else:
+        return None
+    answer = CONFIRM_ANSWER_TEXT
+    if len(verb) + len(name) + len(step_suffix) + len(answer) + 4 >= width:
+        answer = CONFIRM_SHORT_ANSWER_TEXT
+    name_width = width - len(verb) - len(answer) - 5 - len(step_suffix)
+    subject = f"{fitted_task_id(name, name_width, glyphs)}{step_suffix}"
+    prompt = f"{verb} {subject}? "
+    return [
+        Segment(y, 0, prompt, STYLE_BOLD),
+        Segment(y, len(prompt), "y", STYLE_BOLD, BOARD_COLUMNS[0].color),
+        Segment(y, len(prompt) + 1, answer, STYLE_DIM),
+    ]
 
 
 def match_count_parts(snapshot: BoardSnapshot, state: BoardState) -> tuple[str, str]:
@@ -2639,9 +2650,16 @@ def task_view_segments(
         [(glyphs.horizontal * content_width, STYLE_PLAIN, display.STATUS_COLORS[row.status])],
     ]
     activity = task_activity(row, snapshot)
-    has_tool_lines = any(map(is_tool_line, activity))
+    has_folded_tool_calls = any(
+        is_tool and len(list(group)) > 1
+        for is_tool, group in itertools.groupby(activity, key=is_tool_line)
+    )
     state.activity_level_limit = (
-        ACTIVITY_FULL if has_tool_lines else ACTIVITY_MESSAGES if activity else ACTIVITY_FOLDED
+        ACTIVITY_FULL
+        if has_folded_tool_calls
+        else ACTIVITY_MESSAGES
+        if activity
+        else ACTIVITY_FOLDED
     )
     state.activity_level = min(state.activity_level, state.activity_level_limit)
     activity_level = ACTIVITY_FULL if state.is_following else state.activity_level
@@ -2678,7 +2696,7 @@ def task_view_segments(
     )
     activity_labels = {
         ACTIVITY_FOLDED: "activity",
-        ACTIVITY_MESSAGES: "tools" if has_tool_lines else "fold",
+        ACTIVITY_MESSAGES: "tools" if has_folded_tool_calls else "fold",
         ACTIVITY_FULL: "fold",
     }
     if activity and not state.is_following:
@@ -3240,30 +3258,21 @@ def run_action(
         run_attached(screen, [*GOLEM_COMMAND, action, row.task_id])
         return
     if action == ACTION_RERUN_GATE:
-        state.gate_checks[row.task_id] = subprocess.Popen(
-            [*GOLEM_COMMAND, action, row.task_id],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
+        # A file, not a pipe: the executor a passing gate starts inherits stderr and outlives it.
+        with tempfile.TemporaryFile() as error_file:
+            process = subprocess.Popen(
+                [*GOLEM_COMMAND, action, row.task_id],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=error_file,
+            )
+            state.gate_checks[row.task_id] = GateCheck(process, os.dup(error_file.fileno()))
         flash(state, f"Rechecking the gate for {task_label(snapshot.tasks, row.task_id)}")
         return
     if action == ACTION_RETRY:
         returncode, output = run_captured([*GOLEM_COMMAND, action, row.task_id])
         report = output.removeprefix(GOLEM_PREFIX)
         flash(state, report[:1].upper() + report[1:])
-        return
-    if action == ACTION_CLOSE_ALL:
-        task_ids = closable_task_ids(snapshot)
-        errors: list[str] = []
-        for task_id in task_ids:
-            try:
-                review.close(task_id)
-            except SystemExit as error:
-                errors.append(str(error))
-        closed_count = len(task_ids) - len(errors)
-        flash(state, errors[0] if errors else f"Closed {closed_count} tasks")
         return
     if action == ACTION_COPY:
         returncode, output = run_captured([COPY_COMMAND], row.task_id)
@@ -3290,12 +3299,26 @@ def run_action(
     flash(state, done_text if returncode == 0 else output)
 
 
+def close_finished_tasks(state: BoardState, snapshot: BoardSnapshot) -> None:
+    task_ids = closable_task_ids(snapshot)
+    errors: list[str] = []
+    for task_id in task_ids:
+        try:
+            review.close(task_id)
+        except SystemExit as error:
+            errors.append(str(error))
+    closed_count = len(task_ids) - len(errors)
+    flash(state, errors[0] if errors else f"Closed {counted_text(closed_count, 'task')}")
+
+
 def report_gate_checks(state: BoardState, tasks: ledger.Tasks) -> None:
-    for task_id, process in list(state.gate_checks.items()):
+    for task_id, (process, error_fd) in list(state.gate_checks.items()):
         if process.poll() is None:
             continue
         del state.gate_checks[task_id]
-        _, error_output = process.communicate()
+        with os.fdopen(error_fd, encoding="utf-8", errors="replace") as error_file:
+            error_file.seek(0)
+            error_output = error_file.read()
         reason = display.first_line(error_output.strip()).removeprefix(GOLEM_PREFIX)
         label = task_label(tasks, task_id) if task_id in tasks else task_id
         if process.returncode == 0:
@@ -3314,6 +3337,9 @@ def handle_action_key(
         if key not in CONFIRM_ANSWER_KEYS:
             return True
         action, state.pending_action = state.pending_action, None
+        if key == ord("y") and action == ACTION_CLOSE_ALL:
+            close_finished_tasks(state, snapshot)
+            return True
         if key == ord("y") and row is not None:
             run_action(screen, state, snapshot, action, row)
             return True
@@ -3325,15 +3351,17 @@ def handle_action_key(
         flash(state, declined_text)
         return True
     key_actions = [action for action, char in ACTION_KEYS.items() if ord(char) == key]
-    if not key_actions or row is None:
+    if not key_actions:
         return False
     actions = available_actions(snapshot, row)
     action = next((action for action in key_actions if action in actions), None)
-    if action is None:
-        flash(state, UNAVAILABLE_ACTION_TEXTS[key_actions[0]])
-        return True
     if action in CONFIRMED_ACTIONS:
         state.pending_action = action
+        return True
+    if row is None:
+        return False
+    if action is None:
+        flash(state, UNAVAILABLE_ACTION_TEXTS[key_actions[0]])
         return True
     run_action(screen, state, snapshot, action, row)
     return True

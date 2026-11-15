@@ -6,6 +6,7 @@ import sys
 import time
 from datetime import date, datetime
 from pathlib import Path
+from typing import cast
 
 import pexpect
 import pyte
@@ -255,23 +256,20 @@ def test_board_durations_read_at_a_glance(seconds, text):
     assert board.duration_text(seconds) == text
 
 
-def test_board_running_card_shows_the_latest_agent_activity(ledger_path):
-    tasks = {"task": support.task_record(ledger.STATUS_RUNNING, started_at=NOW.isoformat())}
-    progress_path = progress_log.progress_path(tasks["task"]["session_id"])
-    progress_path.parent.mkdir(parents=True, exist_ok=True)
-    progress_path.write_text("Reading the auth module\n[tool] Edit app/auth/reset.py\n")
-
-    text = frame_text(tasks, state=board.BoardState(focus_index=1))
-
-    assert "Edit app/auth/reset.py" in text
-
-
 def running_task_with_activity(activity_text):
     tasks = {"task": support.task_record(ledger.STATUS_RUNNING, started_at=NOW.isoformat())}
     progress_path = progress_log.progress_path(tasks["task"]["session_id"])
     progress_path.parent.mkdir(parents=True, exist_ok=True)
     progress_path.write_text(activity_text)
     return tasks
+
+
+def test_board_running_card_shows_the_latest_agent_activity(ledger_path):
+    tasks = running_task_with_activity("Reading the auth module\n[tool] Edit app/auth/reset.py\n")
+
+    text = frame_text(tasks, state=board.BoardState(focus_index=1))
+
+    assert "Edit app/auth/reset.py" in text
 
 
 def test_board_task_view_folds_activity_and_t_unfolds_it_in_steps(ledger_path):
@@ -560,15 +558,37 @@ def test_board_keeps_unicode_rules_when_the_terminal_declares_rep(pty_board, tmp
     assert any(line.lstrip().startswith("──") for line in running_board.screen.display)
 
 
-def test_board_closes_a_finished_chain_only_after_confirmation(pty_board, ledger_path):
+@pytest.mark.parametrize(
+    ("keys", "prompt"), [("3c", "Close done?"), ("1C", "Close 1 finished task?")]
+)
+def test_board_closes_a_finished_chain_only_after_confirmation(
+    pty_board, ledger_path, keys, prompt
+):
     tasks = {"done": support.task_record(ledger.STATUS_FINISHED, task_id="done")}
     running_board = pty_board(tasks=tasks)
 
-    running_board.send("3c")
-    running_board.wait_for_text("Close done?")
+    running_board.send(keys)
+    running_board.wait_for_text(prompt)
     running_board.send("y")
 
     running_board.wait_until(lambda: "closed_at" in ledger.load_tasks()["done"])
+
+
+def test_board_reports_a_gate_check_without_waiting_for_the_executor_it_starts(monkeypatch):
+    monkeypatch.setattr(board, "GOLEM_COMMAND", ("/bin/sh", "-c", "sleep 3 &"))
+    tasks = {"task": support.task_record(ledger.STATUS_BLOCKED)}
+    snapshot = board.board_snapshot(tasks, NOW)
+    state = board.BoardState()
+    board.run_action(
+        cast("curses.window", None), state, snapshot, board.ACTION_RERUN_GATE, snapshot.rows[0]
+    )
+    state.gate_checks["task"].process.wait()
+
+    started = time.monotonic()
+    board.report_gate_checks(state, tasks)
+
+    assert time.monotonic() - started < 1
+    assert not state.gate_checks
 
 
 def test_board_opens_a_task_and_returns_to_the_board(pty_board):
@@ -588,7 +608,7 @@ def test_board_filter_narrows_cards_and_escape_clears_it():
     for key in "/TASK-03\r":
         board.apply_key(state, ord(key), snapshot)
     filtered_ids = [row.task_id for row in board.filtered_snapshot(snapshot, state).rows]
-    board.apply_key(state, 27, snapshot)
+    board.apply_key(state, board.ESCAPE_KEY, snapshot)
 
     assert filtered_ids == ["task-03"]
     assert board.filtered_snapshot(snapshot, state).rows == snapshot.rows
