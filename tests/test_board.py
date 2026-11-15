@@ -266,11 +266,18 @@ def test_board_running_card_shows_the_latest_agent_activity(ledger_path):
     assert "Edit app/auth/reset.py" in text
 
 
-def test_board_task_view_folds_activity_and_t_unfolds_it_in_steps(ledger_path):
+def running_task_with_activity(activity_text):
     tasks = {"task": support.task_record(ledger.STATUS_RUNNING, started_at=NOW.isoformat())}
     progress_path = progress_log.progress_path(tasks["task"]["session_id"])
     progress_path.parent.mkdir(parents=True, exist_ok=True)
-    progress_path.write_text("Reading auth\n[tool] Read app/tokens.py\n[tool] Edit app/reset.py\n")
+    progress_path.write_text(activity_text)
+    return tasks
+
+
+def test_board_task_view_folds_activity_and_t_unfolds_it_in_steps(ledger_path):
+    tasks = running_task_with_activity(
+        "Reading auth\n[tool] Read app/tokens.py\n[tool] Edit app/reset.py\n"
+    )
     state = board.BoardState(focus_index=1, view=board.VIEW_TASK)
 
     texts = []
@@ -283,6 +290,16 @@ def test_board_task_view_folds_activity_and_t_unfolds_it_in_steps(ledger_path):
     assert "Reading auth" in messages_text
     assert "tokens.py" not in messages_text
     assert "tokens.py" in full_text
+
+
+def test_board_task_view_keeps_tool_calls_shown_after_following_stops(ledger_path):
+    tasks = running_task_with_activity("Reading auth\n[tool] Read app/tokens.py\n")
+    state = board.BoardState(focus_index=1, view=board.VIEW_TASK, is_following=True)
+    frame_text(tasks, state=state)
+
+    board.apply_key(state, ord("k"))
+
+    assert "tokens.py" in frame_text(tasks, state=state)
 
 
 def test_board_selection_moves_within_a_column_and_scrolls_to_stay_visible():

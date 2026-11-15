@@ -38,6 +38,7 @@ MAX_DETAIL_LINE_COUNT = 9
 TALL_DETAIL_HEIGHT = 40
 TALL_DETAIL_LINE_COUNT = 9
 FIELD_PREVIEW_LINE_COUNT = 8
+MIN_PREVIEW_BODY_LINE_COUNT = 2
 PREVIEW_LABEL_WIDTH = len("Directory") + 2
 MAX_SUMMARY_SENTENCE_COUNT = 3
 MAX_SUMMARY_LINE_COUNT = 3
@@ -65,6 +66,7 @@ SELECTED_TITLE_COLOR = 255
 WIDE_REP_FIX_NCURSES_VERSION = (6, 0, 20170729)
 REP_LINE_PREFIX = b"\trep="
 TOOL_LINE_PREFIX = "[tool] "
+FOLD_MARKER = "+"
 SHELL_LINE_PREFIXES = ("[tool] command ", "[tool] Bash ")
 FINISHED_AGE_SEPARATOR = "; finished "
 TERMINFO_VARIABLE = "TERMINFO"
@@ -445,6 +447,7 @@ class BoardState:
     is_showing_help: bool = False
     help_scroll: int = 0
     help_scroll_limit: int = 0
+    activity_level_limit: int = ACTIVITY_FULL
     stale_snapshot_time: datetime | None = None
     focus_before_done: int = 0
     changed_until: dict[str, float] = field(default_factory=dict[str, float])
@@ -596,7 +599,7 @@ def board_layout(
     header_y = TAB_LINE_Y + spacer_row_count
     footer_y = height - (2 if fit_count <= MAX_TWO_LINE_FOOTER_COLUMN_COUNT else 1)
     line_count = detail_line_count(height)
-    detail_height = line_count + 1 + 2 * spacer_row_count if line_count else 0
+    detail_height = line_count + 1 + spacer_row_count if line_count else 0
     body_top = header_y + 2 + spacer_row_count
     body_height = footer_y - detail_height - body_top
     can_box = min(span_width for _, span_width in spans) >= MIN_BOXED_CARD_WIDTH
@@ -620,15 +623,18 @@ def board_layout(
             densest_style if index in shown_indices and style in style_group else style
             for index, style in enumerate(styles)
         )
+    footer_gap = 0
     if line_count:
         used_height = max(
             column_used_height(column_sizes[index], styles[index], body_height)
             for index in shown_indices
         )
-        grown_count = min(max(0, body_height - used_height), MAX_DETAIL_LINE_COUNT - line_count)
+        spare_height = max(0, body_height - used_height)
+        footer_gap = min(spacer_row_count, spare_height)
+        grown_count = min(spare_height - footer_gap, MAX_DETAIL_LINE_COUNT - line_count)
         line_count += grown_count
-        body_height -= grown_count
-    detail_bottom_y = footer_y - spacer_row_count
+        body_height -= footer_gap + grown_count
+    detail_bottom_y = footer_y - footer_gap
     return BoardLayout(
         fit_count,
         spans,
@@ -931,15 +937,19 @@ def card_detail(
         return fitted_facts
     if not is_live:
         compact_reason = GATE_COUNT_PATTERN.sub(r"\1 fail/\2 pass", short_reason)
-        shortest_reason = short_reason
+        shortest_reason = short_reason.replace(BUSY_DIRECTORY_TEXT, SHORT_BUSY_TEXT)
         for pattern, replacement in SHORTEST_REASON_PATTERNS:
             shortest_reason = pattern.sub(replacement, shortest_reason)
         time_width = len(f"{time_text}{separator}") if time_text else 0
         reason_width = width - time_width - len(separator) - len(repository)
+        cut_reason = fitted_words(short_reason, reason_width, glyphs)
+        is_reason_cuttable = (
+            reason_width >= MIN_CARD_REASON_WIDTH
+            and not short_reason.startswith(BUSY_DIRECTORY_TEXT)
+            and " " in cut_reason
+        )
         cut_reason_facts = (
-            [(time_text, fitted_words(short_reason, reason_width, glyphs), repository)]
-            if repository and reason_width >= MIN_CARD_REASON_WIDTH
-            else []
+            [(time_text, cut_reason, repository)] if repository and is_reason_cuttable else []
         )
         shortest_facts = separator.join(part for part in (time_text, shortest_reason) if part)
         repository_width = width - len(shortest_facts) - len(separator)
@@ -964,10 +974,6 @@ def card_detail(
                 (time_text, shortest_reason),
             )
         ]
-        if short_reason.startswith(BUSY_DIRECTORY_TEXT) and time_text:
-            busy_text = short_reason.replace(BUSY_DIRECTORY_TEXT, SHORT_BUSY_TEXT)
-            busy_directory = short_reason.removeprefix(BUSY_DIRECTORY_TEXT).strip()
-            options += [separator.join((time_text, text)) for text in (busy_text, busy_directory)]
         return next((option for option in options if len(option) <= width), options[-1])
     if not timed_facts:
         return reason
@@ -1623,6 +1629,8 @@ def tail_shortened_directory(directory: str, width: int, glyphs: Glyphs) -> str:
     while len(directory) > width and len(parts) > 1:
         parts = parts[1:]
         directory = f"{glyphs.ellipsis}/{'/'.join(parts)}"
+    if len(directory) > width and len(parts[-1]) <= width:
+        return parts[-1]
     return fitted(directory, width, glyphs)
 
 
@@ -1880,17 +1888,23 @@ def compact_preview_lines(
         lines.append([value_part] if is_outcome else [(f"{label} ", STYLE_DIM, None), value_part])
     body_count = line_count - meta_count - prompt_count - len(lines)
     _, body_lines, body_style = preview_body(row, width, body_count, snapshot, glyphs)
+    meta_lines: list[list[Part]] = []
+    if meta_count:
+        meta_lines = detail_meta_lines(row, width, snapshot.tasks, glyphs, can_wrap=True)
+        kept_body_count = body_count - len(meta_lines) + meta_count
+        if kept_body_count < min(len(body_lines), MIN_PREVIEW_BODY_LINE_COUNT):
+            meta_lines = detail_meta_lines(row, width, snapshot.tasks, glyphs, can_wrap=False)
+        elif kept_body_count < len(body_lines):
+            _, body_lines, body_style = preview_body(row, width, kept_body_count, snapshot, glyphs)
     body_parts: list[list[Part]] = [[(line, body_style, None)] for line in body_lines]
     lines += body_parts
     if not meta_count:
         return lines[:line_count]
-    spare_count = line_count - meta_count - prompt_count - len(lines)
-    meta_lines = detail_meta_lines(row, width, snapshot.tasks, glyphs, can_wrap=spare_count > 0)
-    spare_count -= len(meta_lines) - meta_count
-    if spare_count and lines and line_count > DETAIL_LINE_COUNT:
-        lines.append([])
-        spare_count -= 1
+    spare_count = line_count - prompt_count - len(lines) - len(meta_lines)
     shown_prompt = prompt_lines(row, width, prompt_count + spare_count, snapshot, glyphs)
+    spare_count -= len(shown_prompt) - prompt_count
+    if spare_count > 0 and lines and line_count > DETAIL_LINE_COUNT:
+        lines.append([])
     prompt_parts: list[list[Part]] = [[(line, STYLE_DIM, None)] for line in shown_prompt]
     return [*lines, *prompt_parts, *meta_lines]
 
@@ -2060,13 +2074,17 @@ def status_line_segments(
 ) -> list[Segment] | None:
     if state.pending_action is not None and row is not None:
         verb = ACTION_LABELS[state.pending_action].capitalize()
-        subject = task_label(snapshot.tasks, row.task_id)
+        name = chain_name(snapshot.tasks, row.task_id)
+        step = step_name(snapshot.tasks, row.task_id)
+        step_suffix = f" ({step})" if step else ""
         if state.pending_action == ACTION_CLOSE_ALL:
-            verb, subject = "Close", f"all {len(closable_task_ids(snapshot))} finished tasks"
+            verb, step_suffix = "Close", ""
+            name = f"all {len(closable_task_ids(snapshot))} finished tasks"
         answer = CONFIRM_ANSWER_TEXT
-        if len(verb) + len(subject) + len(answer) + 4 >= width:
+        if len(verb) + len(name) + len(step_suffix) + len(answer) + 4 >= width:
             answer = CONFIRM_SHORT_ANSWER_TEXT
-        subject = fitted(subject, width - len(verb) - len(answer) - 5, glyphs)
+        name_width = width - len(verb) - len(answer) - 5 - len(step_suffix)
+        subject = f"{fitted_task_id(name, name_width, glyphs)}{step_suffix}"
         prompt = f"{verb} {subject}? "
         return [
             Segment(y, 0, prompt, STYLE_BOLD),
@@ -2530,13 +2548,15 @@ def activity_view_lines(
             counted_text(tool_count, "tool call"),
         ]
         summary = ", ".join(count for count in counts if not count.startswith("0 "))
-        return wrapped_lines(f"{glyphs.tool} {summary}", width, STYLE_DIM)
+        return wrapped_lines(f"{FOLD_MARKER} {summary}", width, STYLE_DIM)
     lines: list[list[Part]] = []
     for is_tool, group in itertools.groupby(activity, key=is_tool_line):
         group_lines = list(group)
-        if is_tool and activity_level == ACTIVITY_MESSAGES:
-            group_lines = [f"{TOOL_LINE_PREFIX}{counted_text(len(group_lines), 'tool call')}"]
         style = STYLE_DIM if is_tool else STYLE_PLAIN
+        if is_tool and activity_level == ACTIVITY_MESSAGES and len(group_lines) > 1:
+            summary = f"{FOLD_MARKER} {counted_text(len(group_lines), 'tool call')}"
+            lines += wrapped_lines(summary, width, style, "  ")
+            continue
         for line in group_lines:
             lines += wrapped_lines(activity_text(line, glyphs), width, style, "  ")
     return lines
@@ -2620,8 +2640,10 @@ def task_view_segments(
     ]
     activity = task_activity(row, snapshot)
     has_tool_lines = any(map(is_tool_line, activity))
-    if state.activity_level == ACTIVITY_FULL and not has_tool_lines:
-        state.activity_level = ACTIVITY_FOLDED
+    state.activity_level_limit = (
+        ACTIVITY_FULL if has_tool_lines else ACTIVITY_MESSAGES if activity else ACTIVITY_FOLDED
+    )
+    state.activity_level = min(state.activity_level, state.activity_level_limit)
     activity_level = ACTIVITY_FULL if state.is_following else state.activity_level
     lines = task_view_lines(
         row, content_width, snapshot, glyphs, now, activity, activity_level=activity_level
@@ -2651,7 +2673,7 @@ def task_view_segments(
     bare_scroll_hints = [(glyphs.select_keys, position)] if is_scrollable else []
     toggle_hints = (
         [("w", "following" if state.is_following else "follow")]
-        if row.status == ledger.STATUS_RUNNING
+        if state.is_following or row.status == ledger.STATUS_RUNNING
         else []
     )
     activity_labels = {
@@ -2972,6 +2994,7 @@ def apply_board_key(state: BoardState, key: int, column_row_count: int, page_siz
     elif key in ENTER_KEYS:
         state.view = VIEW_TASK
         state.task_scroll = 0
+        state.activity_level = ACTIVITY_FOLDED
     elif key == ord("?"):
         state.is_showing_help = True
 
@@ -2989,13 +3012,16 @@ def apply_filter_key(state: BoardState, key: int) -> None:
 
 
 def apply_task_key(state: BoardState, key: int, page_size: int, column_row_count: int) -> None:
-    state.is_following = state.is_following and key in DOWN_KEYS | LAST_KEYS
+    if state.is_following and key not in DOWN_KEYS | LAST_KEYS:
+        state.is_following = False
+        state.activity_level = ACTIVITY_FULL
     if key in BACK_KEYS:
         state.view = VIEW_BOARD
     elif key in LEFT_KEYS | RIGHT_KEYS:
         step = 1 if key in RIGHT_KEYS else -1
         move_selection(state, column_row_count, state.selected_indices[state.focus_index] + step)
         state.task_scroll = 0
+        state.activity_level = ACTIVITY_FOLDED
     elif key in DOWN_KEYS | UP_KEYS:
         state.task_scroll += 1 if key in DOWN_KEYS else -1
     elif key in PAGE_DOWN_KEYS | PAGE_UP_KEYS:
@@ -3005,7 +3031,8 @@ def apply_task_key(state: BoardState, key: int, page_size: int, column_row_count
     elif key in LAST_KEYS:
         state.task_scroll = sys.maxsize
     elif key == ACTIVITY_KEY:
-        state.activity_level = (state.activity_level + 1) % (ACTIVITY_FULL + 1)
+        is_last_level = state.activity_level >= state.activity_level_limit
+        state.activity_level = ACTIVITY_FOLDED if is_last_level else state.activity_level + 1
     elif key == ord("?"):
         state.is_showing_help = True
 
@@ -3207,6 +3234,7 @@ def run_action(
     if action == ACTION_WATCH:
         state.is_following = state.view != VIEW_TASK or not state.is_following
         state.view = VIEW_TASK
+        state.activity_level = ACTIVITY_FULL
         return
     if action == ACTION_PICKUP:
         run_attached(screen, [*GOLEM_COMMAND, action, row.task_id])
