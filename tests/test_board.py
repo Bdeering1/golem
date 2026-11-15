@@ -155,10 +155,9 @@ def test_board_detail_pane_keeps_the_end_of_a_long_directory():
 def test_board_shows_as_many_columns_as_fit(width, shown_titles, has_tabs):
     lines = frame_lines(statuses_tasks(), width, HEIGHT, board.BoardState())
 
-    header_y = board.board_layout(width, HEIGHT, len(shown_titles) + has_tabs).header_y
-    header_line = lines[header_y]
+    header_line = lines[board.board_layout(width, HEIGHT, len(shown_titles)).header_y]
     assert [title for title, *_ in board.BOARD_COLUMNS if title in header_line] == shown_titles
-    assert (header_y > board.TITLE_LINE_COUNT and bool(lines[board.TITLE_LINE_COUNT])) == has_tabs
+    assert bool(lines[board.TAB_LINE_Y]) == has_tabs
 
 
 @pytest.mark.parametrize(
@@ -175,7 +174,7 @@ def test_board_lists_hidden_columns_on_the_side_they_scroll_in_from(
     state = board.BoardState(focus_index=focus_index, is_showing_all=True)
     lines = frame_lines(statuses_tasks(), width, HEIGHT, state)
 
-    tab_line = lines[board.TITLE_LINE_COUNT]
+    tab_line = lines[board.TAB_LINE_Y]
     assert tab_line.startswith(left_text)
     assert tab_line.endswith(right_text)
 
@@ -511,3 +510,10 @@ def test_board_starts_on_the_column_that_needs_attention(statuses, focused_title
     column_index = board.attention_column_index(rows)
 
     assert board.BOARD_COLUMNS[column_index].title == focused_title
+
+
+def test_board_drops_card_spacing_only_when_a_column_overflows():
+    roomy = board.board_layout(WIDE_WIDTH, HEIGHT, 3, largest_column_size=2)
+    crowded = board.board_layout(WIDE_WIDTH, HEIGHT, 3, largest_column_size=20)
+
+    assert crowded.visible_card_count > roomy.visible_card_count
