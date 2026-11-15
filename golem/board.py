@@ -29,7 +29,6 @@ TITLE_LINE_COUNT = 2
 TAB_LINE_Y = 1
 MIN_DETAIL_LINE_COUNT = 4
 MAX_DETAIL_LINE_COUNT = 6
-WIDE_CARD_CONTENT_WIDTH = 30
 NARROW_DETAIL_LINE_COUNT = 4
 DETAIL_HEIGHT_DIVISOR = 6
 MIN_DETAIL_HEIGHT = 20
@@ -52,6 +51,9 @@ TERMINFO_SOURCE_NAME = "terminal.terminfo"
 BOARD_TITLE = "golem"
 NOT_A_TERMINAL_MESSAGE = "golem: board needs a terminal; use golem list"
 HELP_CLOSE_HINT = " any key closes "
+MIN_CARD_REASON_WIDTH = 8
+CONFIRM_ANSWER_TEXT = " yes  any other key: no"
+CONFIRM_SHORT_ANSWER_TEXT = "/N"
 HELP_SECTION_GAP = 4
 RETURN_PROMPT = "golem: press Enter to return to the board"
 GOLEM_COMMAND = (sys.executable, "-m", "golem")
@@ -70,7 +72,6 @@ STYLE_ATTRIBUTES = {
 }
 VIEW_BOARD = "board"
 VIEW_TASK = "task"
-VIEW_HELP = "help"
 ACTION_PICKUP = "pickup"
 ACTION_WATCH = "watch"
 ACTION_OPEN_PULL_REQUEST = "pr"
@@ -304,6 +305,9 @@ class BoardState:
     filter_text: str = ""
     is_filtering: bool = False
     is_following: bool = False
+    is_showing_help: bool = False
+    help_scroll: int = 0
+    help_scroll_limit: int = 0
     changed_until: dict[str, float] = field(default_factory=dict[str, float])
 
 
@@ -537,15 +541,19 @@ def card_detail(row: display.ListRow, context: FrameContext, width: int) -> str:
     activity = snapshot.activity.get(row.task_id)
     reason = activity_text(activity[-1], glyphs) if activity else row_reason(row, snapshot)
     repository = Path(row.directory).name
-    is_wide = width >= WIDE_CARD_CONTENT_WIDTH
     if row.status in {ledger.STATUS_SCHEDULED, ledger.STATUS_RUNNING}:
         time_text = when_text(task, now)
     elif row.status == ledger.STATUS_WAITING:
         time_text = ""
     else:
         time_text = short_age_text(task.get("finished_at"), now)
-    parts = [time_text, repository if is_wide or not reason else "", reason]
-    return f" {glyphs.separator} ".join(part for part in parts if part)
+    separator = f" {glyphs.separator} "
+    facts = separator.join(part for part in (time_text, repository) if part)
+    if not facts:
+        return reason
+    if not reason or width - len(facts) - len(separator) < MIN_CARD_REASON_WIDTH:
+        return facts
+    return f"{facts}{separator}{reason}"
 
 
 def status_mark(status: str, glyphs: Glyphs, now: datetime) -> str:
@@ -867,10 +875,12 @@ def heading_lines(
     if parts_width(heading_parts) <= width:
         return [heading_parts]
     (task_id, id_style, id_color), (status_text, status_style, status_color), facts = heading_parts
-    return [
-        [(fitted(task_id, width, glyphs), id_style, id_color)],
-        [(status_text.lstrip(), status_style, status_color), facts],
+    status_text = status_text.lstrip()
+    id_lines: list[list[Part]] = [
+        [(line, id_style, id_color)] for line in textwrap.wrap(task_id, max(1, width))
     ]
+    facts_text = fitted(facts[0], max(0, width - len(status_text)), glyphs)
+    return [*id_lines, [(status_text, status_style, status_color), (facts_text, *facts[1:])]]
 
 
 def detail_lines(
@@ -981,11 +991,15 @@ def status_line_segments(
 ) -> list[Segment] | None:
     if state.pending_action is not None and row is not None:
         verb = ACTION_LABELS[state.pending_action].capitalize()
-        prompt = f"{verb} {row.task_id}? "
+        answer = CONFIRM_ANSWER_TEXT
+        if len(verb) + len(row.task_id) + len(answer) + 4 >= width:
+            answer = CONFIRM_SHORT_ANSWER_TEXT
+        task_id = fitted(row.task_id, width - len(verb) - len(answer) - 5, glyphs)
+        prompt = f"{verb} {task_id}? "
         return [
             Segment(y, 0, prompt, STYLE_BOLD),
             Segment(y, len(prompt), "y", STYLE_BOLD, BOARD_COLUMNS[0].color),
-            Segment(y, len(prompt) + 1, " yes  any other key keeps it", STYLE_DIM),
+            Segment(y, len(prompt) + 1, answer, STYLE_DIM),
         ]
     if state.flash_text and time.monotonic() < state.flash_until:
         return [Segment(y, 0, fitted(state.flash_text, width - 1, glyphs), STYLE_BOLD)]
@@ -1003,7 +1017,12 @@ def footer_segments(
     if state.is_filtering:
         query = f"/{state.filter_text}{glyphs.cursor}"
         shown_count = f"{len(snapshot.rows)}/{len(snapshot.unfiltered_rows)}"
-        hint = f"  {shown_count} match  {glyphs.enter_key} keep  esc clear"
+        hints = (
+            f"  {shown_count} match  {glyphs.enter_key} keep  esc clear",
+            f"  {shown_count}  {glyphs.enter_key} keep  esc clear",
+            f"  {shown_count}  esc clear",
+        )
+        hint = next((hint for hint in hints if len(query) + len(hint) < width), hints[-1])
         return [
             Segment(y, 0, query, STYLE_BOLD, BOARD_COLUMNS[1].color),
             Segment(y, len(query), hint, STYLE_DIM),
@@ -1037,6 +1056,8 @@ def footer_segments(
             ("q", "quit"),
         ],
         [*filter_hint, *open_hint, *action_hints, ("?", "help"), ("q", "quit")],
+        [*filter_hint, *open_hint, *action_hints, ("?", ""), ("q", "")],
+        [*filter_hint, *action_hints, ("?", ""), ("q", "")],
         [
             *filter_hint,
             (glyphs.column_keys, ""),
@@ -1266,7 +1287,7 @@ def help_sections(glyphs: Glyphs) -> list[tuple[str, list[tuple[str, str]]]]:
                 ("p", "pick up its session"),
                 ("w", "follow its live log"),
                 ("o", "open its pull request"),
-                ("r", "retry, or re-run its gate"),
+                ("r", "retry or re-run gate"),
                 ("c", "close (move to Done)"),
                 ("x", "cancel (if queued)"),
                 ("y", "copy its id"),
@@ -1327,18 +1348,12 @@ def help_columns(
         for title, bindings in sections
     ]
     fitting_count = max(1, (width - 4 + HELP_SECTION_GAP) // (column_width + HELP_SECTION_GAP))
-    group_count = min(len(section_rows), fitting_count)
-    while True:
-        groups = balanced_groups(section_rows, min(group_count, len(section_rows)))
-        tallest = max(sum(map(len, group)) for group in groups)
-        if tallest + 2 <= height - 1 or len(section_rows) == 1:
-            break
-        section_rows = section_rows[:-1]
+    groups = balanced_groups(section_rows, min(len(section_rows), fitting_count))
     is_spaced = all(sum(map(len, group)) + len(group) + 1 <= height - 1 for group in groups)
     return [stacked_rows(group, is_spaced=is_spaced) for group in groups]
 
 
-def help_view_segments(width: int, height: int, glyphs: Glyphs) -> list[Segment]:
+def help_view_segments(width: int, height: int, glyphs: Glyphs, state: BoardState) -> list[Segment]:
     sections = help_sections(glyphs)
     bindings = [binding for _, section_bindings in sections for binding in section_bindings]
     key_width = max(len(key) for key, _ in bindings) + 3
@@ -1350,18 +1365,25 @@ def help_view_segments(width: int, height: int, glyphs: Glyphs) -> list[Segment]
     box_height = min(height - 1, content_height + 2 + 2 * padding)
     left = max(0, (width - box_width) // 2)
     top = max(0, (height - 1 - box_height) // 2)
-    corners = glyphs.corners
-    title = " Keys "
-    top_rule = glyphs.horizontal * max(0, box_width - 2 - len(title) - 1)
-    bottom_rule = glyphs.horizontal * max(0, box_width - 3 - len(HELP_CLOSE_HINT))
+    visible_count = box_height - 2 - 2 * padding
+    state.help_scroll_limit = max(0, content_height - visible_count)
+    state.help_scroll = min(state.help_scroll, state.help_scroll_limit)
+    corners, line = glyphs.corners, glyphs.horizontal
+    more_above = f" {glyphs.up} more {line}" if state.help_scroll else ""
+    more_below = f" {glyphs.down} more " if state.help_scroll < state.help_scroll_limit else ""
+    close_hint = HELP_CLOSE_HINT
+    if state.help_scroll_limit:
+        close_hint = f" {glyphs.up}{glyphs.down} scroll  other keys close "
+    top_text = f"{corners[0]}{line} Keys "
+    bottom_text = f"{corners[2]}{line}{more_below}"
+    top_rule = line * max(0, box_width - len(top_text) - len(more_above) - 1)
+    bottom_rule = line * max(0, box_width - len(bottom_text) - len(close_hint) - 2)
     segments = [
-        Segment(
-            top, left, f"{corners[0]}{glyphs.horizontal}{title}{top_rule}{corners[1]}", STYLE_DIM
-        ),
+        Segment(top, left, f"{top_text}{top_rule}{more_above}{corners[1]}", STYLE_DIM),
         Segment(
             top + box_height - 1,
             left,
-            f"{corners[2]}{bottom_rule}{HELP_CLOSE_HINT}{glyphs.horizontal}{corners[3]}",
+            f"{bottom_text}{bottom_rule}{close_hint}{line}{corners[3]}",
             STYLE_DIM,
         ),
     ]
@@ -1373,7 +1395,8 @@ def help_view_segments(width: int, height: int, glyphs: Glyphs) -> list[Segment]
     first_row_y = top + 1 + padding
     for column_index, rows in enumerate(columns):
         x = left + 2 + column_index * (column_width + HELP_SECTION_GAP)
-        for offset, (key, label, is_title) in enumerate(rows[: box_height - 2 - 2 * padding]):
+        shown_rows = rows[state.help_scroll : state.help_scroll + visible_count]
+        for offset, (key, label, is_title) in enumerate(shown_rows):
             if is_title:
                 segments.append(
                     Segment(first_row_y + offset, x, key, STYLE_BOLD, BOARD_COLUMNS[1].color)
@@ -1399,13 +1422,13 @@ def board_frame(
         segments = task_view_segments(snapshot, width, height, state, glyphs, now)
     else:
         segments = board_view_segments(snapshot, width, height, state, glyphs, now)
-    if state.view == VIEW_HELP:
+    if state.is_showing_help:
         backdrop = [
             Segment(segment.y, segment.x, segment.text, STYLE_PLAIN, FAINT_COLOR)
             for segment in segments
             if segment.y < height - 1
         ]
-        segments = backdrop + help_view_segments(width, height, glyphs)
+        segments = backdrop + help_view_segments(width, height, glyphs, state)
     return clipped(segments, width, height)
 
 
@@ -1440,7 +1463,7 @@ def apply_board_key(state: BoardState, key: int, column_row_count: int, page_siz
         state.view = VIEW_TASK
         state.task_scroll = 0
     elif key == ord("?"):
-        state.view = VIEW_HELP
+        state.is_showing_help = True
 
 
 def apply_filter_key(state: BoardState, key: int) -> None:
@@ -1468,7 +1491,23 @@ def apply_task_key(state: BoardState, key: int, page_size: int) -> None:
     elif key in LAST_KEYS:
         state.task_scroll = sys.maxsize
     elif key == ord("?"):
-        state.view = VIEW_HELP
+        state.is_showing_help = True
+
+
+def apply_help_key(state: BoardState, key: int, page_size: int) -> None:
+    scroll_steps = {
+        **dict.fromkeys(DOWN_KEYS, 1),
+        **dict.fromkeys(UP_KEYS, -1),
+        **dict.fromkeys(PAGE_DOWN_KEYS, page_size),
+        **dict.fromkeys(PAGE_UP_KEYS, -page_size),
+    }
+    if state.help_scroll_limit and key in scroll_steps:
+        state.help_scroll = max(
+            0, min(state.help_scroll + scroll_steps[key], state.help_scroll_limit)
+        )
+        return
+    state.is_showing_help = False
+    state.help_scroll = 0
 
 
 def apply_key(
@@ -1478,8 +1517,8 @@ def apply_key(
     columns = rows_by_column(rows, is_showing_all=state.is_showing_all)
     column_row_count = len(columns[min(state.focus_index, len(columns) - 1)][1])
     page_size = max(1, (height - 12) // COMPACT_CARD_PITCH)
-    if state.view == VIEW_HELP:
-        state.view = VIEW_BOARD
+    if state.is_showing_help:
+        apply_help_key(state, key, max(1, height - 6))
     elif state.is_filtering:
         apply_filter_key(state, key)
     elif state.view == VIEW_TASK:
@@ -1652,7 +1691,7 @@ def run_action(
 def handle_action_key(
     screen: curses.window, state: BoardState, snapshot: BoardSnapshot, key: int
 ) -> bool:
-    if state.view == VIEW_HELP or state.is_filtering:
+    if state.is_showing_help or state.is_filtering:
         return False
     row = selected_row(snapshot, state)
     if state.pending_action is not None:
@@ -1676,7 +1715,7 @@ def handle_action_key(
 
 
 def is_quit_key(state: BoardState, key: int) -> bool:
-    is_idle = state.pending_action is None and not state.is_filtering
+    is_idle = state.pending_action is None and not state.is_filtering and not state.is_showing_help
     return state.view == VIEW_BOARD and is_idle and key == ord("q")
 
 
