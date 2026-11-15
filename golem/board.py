@@ -55,6 +55,7 @@ HELP_CLOSE_HINT = " any key closes "
 HELP_SECTION_GAP = 4
 RETURN_PROMPT = "golem: press Enter to return to the board"
 GOLEM_COMMAND = (sys.executable, "-m", "golem")
+GOLEM_PREFIX = "golem: "
 OPEN_COMMAND = "open"
 COPY_COMMAND = "pbcopy"
 STYLE_PLAIN = "plain"
@@ -76,6 +77,8 @@ ACTION_OPEN_PULL_REQUEST = "pr"
 ACTION_CLOSE = "close"
 ACTION_CANCEL = "cancel"
 ACTION_COPY = "copy"
+ACTION_RETRY = "retry"
+ACTION_RERUN_GATE = "continue"
 ESCAPE_KEY = 27
 CONTROL_D = 4
 CONTROL_U = 21
@@ -93,18 +96,22 @@ BACK_KEYS = {ESCAPE_KEY, ord("q"), *BACKSPACE_KEYS, *ENTER_KEYS}
 FILTER_KEY = ord("/")
 PRINTABLE_KEYS = range(32, 127)
 ACTION_KEYS = {
-    ord("p"): ACTION_PICKUP,
-    ord("w"): ACTION_WATCH,
-    ord("o"): ACTION_OPEN_PULL_REQUEST,
-    ord("c"): ACTION_CLOSE,
-    ord("x"): ACTION_CANCEL,
-    ord("y"): ACTION_COPY,
+    ACTION_PICKUP: "p",
+    ACTION_WATCH: "w",
+    ACTION_OPEN_PULL_REQUEST: "o",
+    ACTION_RETRY: "r",
+    ACTION_RERUN_GATE: "r",
+    ACTION_CLOSE: "c",
+    ACTION_CANCEL: "x",
+    ACTION_COPY: "y",
 }
-CONFIRMED_ACTIONS = {ACTION_CLOSE, ACTION_CANCEL}
+CONFIRMED_ACTIONS = {ACTION_CLOSE, ACTION_CANCEL, ACTION_RETRY}
 ACTION_LABELS = {
     ACTION_PICKUP: "pickup",
     ACTION_WATCH: "log",
     ACTION_OPEN_PULL_REQUEST: "PR",
+    ACTION_RETRY: "retry",
+    ACTION_RERUN_GATE: "re-run gate",
     ACTION_CLOSE: "close",
     ACTION_CANCEL: "cancel",
     ACTION_COPY: "copy id",
@@ -114,6 +121,7 @@ FOOTER_HIDDEN_ACTIONS = {ACTION_COPY}
 STOPPED_STATUSES = {ledger.STATUS_BLOCKED, ledger.STATUS_FAILED}
 PICKUP_STATUSES = {ledger.STATUS_BLOCKED, ledger.STATUS_FAILED, ledger.STATUS_FINISHED}
 CANCEL_STATUSES = {ledger.STATUS_SCHEDULED, ledger.STATUS_WAITING}
+RETRY_STATUSES = {ledger.STATUS_FAILED, ledger.STATUS_CANCELLED}
 EMPTY_COLUMN_TEXTS = {
     display.COLUMN_QUEUED: "Nothing queued",
     display.COLUMN_RUNNING: "Nothing running",
@@ -128,6 +136,7 @@ UNAVAILABLE_ACTION_TEXTS = {
     ACTION_PICKUP: "Only blocked, failed or finished tasks can be picked up",
     ACTION_WATCH: "This task hasn't started, so it has no log yet",
     ACTION_OPEN_PULL_REQUEST: "This task has no pull request",
+    ACTION_RETRY: "Only failed, cancelled or blocked tasks can be retried",
     ACTION_CLOSE: "Only finished tasks in Review can be closed",
     ACTION_CANCEL: "Only queued tasks can be cancelled",
     ACTION_COPY: "",
@@ -921,6 +930,10 @@ def available_actions(snapshot: BoardSnapshot, row: display.ListRow | None) -> l
         actions.append(ACTION_WATCH)
     if chain_pull_requests(snapshot, row.task_id):
         actions.append(ACTION_OPEN_PULL_REQUEST)
+    if row.status in RETRY_STATUSES:
+        actions.append(ACTION_RETRY)
+    if row.status == ledger.STATUS_BLOCKED:
+        actions.append(ACTION_RERUN_GATE)
     if row.column == display.COLUMN_REVIEW and row.status == ledger.STATUS_FINISHED:
         actions.append(ACTION_CLOSE)
     if row.status in CANCEL_STATUSES:
@@ -940,7 +953,7 @@ def footer_action_hints(
 
 
 def action_key(action: str) -> str:
-    return next(chr(key) for key, key_action in ACTION_KEYS.items() if key_action == action)
+    return ACTION_KEYS[action]
 
 
 def key_hint_segments(y: int, width: int, key_sets: list[list[tuple[str, str]]]) -> list[Segment]:
@@ -1253,6 +1266,7 @@ def help_sections(glyphs: Glyphs) -> list[tuple[str, list[tuple[str, str]]]]:
                 ("p", "pick up its session"),
                 ("w", "follow its live log"),
                 ("o", "open its pull request"),
+                ("r", "retry, or re-run its gate"),
                 ("c", "close (move to Done)"),
                 ("x", "cancel (if queued)"),
                 ("y", "copy its id"),
@@ -1607,8 +1621,13 @@ def run_action(
         state.view = VIEW_TASK
         state.is_following = True
         return
-    if action == ACTION_PICKUP:
+    if action in {ACTION_PICKUP, ACTION_RERUN_GATE}:
         run_attached(screen, [*GOLEM_COMMAND, action, row.task_id])
+        return
+    if action == ACTION_RETRY:
+        returncode, output = run_captured([*GOLEM_COMMAND, action, row.task_id])
+        report = output.removeprefix(GOLEM_PREFIX)
+        flash(state, report[:1].upper() + report[1:])
         return
     if action == ACTION_COPY:
         returncode, output = run_captured([COPY_COMMAND], row.task_id)
@@ -1641,11 +1660,13 @@ def handle_action_key(
         if key == ord("y") and row is not None:
             run_action(screen, state, snapshot, action, row)
         return True
-    action = ACTION_KEYS.get(key)
-    if action is None or row is None:
+    key_actions = [action for action, char in ACTION_KEYS.items() if ord(char) == key]
+    if not key_actions or row is None:
         return False
-    if action not in available_actions(snapshot, row):
-        flash(state, UNAVAILABLE_ACTION_TEXTS[action])
+    actions = available_actions(snapshot, row)
+    action = next((action for action in key_actions if action in actions), None)
+    if action is None:
+        flash(state, UNAVAILABLE_ACTION_TEXTS[key_actions[0]])
         return True
     if action in CONFIRMED_ACTIONS:
         state.pending_action = action
