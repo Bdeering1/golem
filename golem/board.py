@@ -176,6 +176,8 @@ LEDGER_ERROR_TEXT = "Can't read the ledger, showing the last good state: "
 NOTHING_NEEDS_YOU_TEXT = "Nothing needs you right now"
 WAITING_DIRECTORY_TEXT = "waiting for directory:"
 BUSY_DIRECTORY_TEXT = "dir busy:"
+SHORT_BUSY_TEXT = "busy:"
+STUCK_PREFIX = "stuck "
 THREAD_STATE_TEXTS = {"thread unsettled": "thread open, no PR"}
 SHORT_REASON_TEXTS = {"thread open, no PR": "thread, no PR"}
 EMPTY_BOARD_LINES = ("No tasks yet", "Queue one with", 'golem run <id> "<prompt>"')
@@ -701,7 +703,7 @@ def when_text(task: ledger.Task, now: datetime) -> str:
 
 def row_when_text(row: display.ListRow, task: ledger.Task, now: datetime) -> str:
     if is_stuck(row, task, now):
-        return f"stuck {short_age_text(task.get('due_at'), now)}"
+        return f"{STUCK_PREFIX}{short_age_text(task.get('due_at'), now)}"
     return when_text(task, now)
 
 
@@ -788,7 +790,7 @@ def card_facts(row: display.ListRow, context: FrameContext) -> tuple[str, str, s
     else:
         time_text = short_age_text(task.get("finished_at") or task.get("started_at"), now)
     if is_stuck(row, task, now):
-        time_text = f"stuck {short_age_text(task.get('due_at'), now)}"
+        time_text = f"{STUCK_PREFIX}{short_age_text(task.get('due_at'), now)}"
     short_reason = short_reason_text(row, reason, snapshot)
     return time_text, reason, short_reason, Path(row.directory).name
 
@@ -829,7 +831,12 @@ def card_detail(
             )
         ]
         if short_reason.startswith(BUSY_DIRECTORY_TEXT) and time_text:
-            options.append(separator.join((time_text, BUSY_DIRECTORY_TEXT.rstrip(":"))))
+            busy_text = short_reason.replace(BUSY_DIRECTORY_TEXT, SHORT_BUSY_TEXT)
+            options += [
+                separator.join((coarse_time_text(time_text.removeprefix(STUCK_PREFIX)), busy_text)),
+                busy_text,
+                separator.join((time_text, BUSY_DIRECTORY_TEXT.rstrip(":"))),
+            ]
         return next((option for option in options if len(option) <= width), options[-1])
     if not timed_facts:
         return reason
@@ -1847,16 +1854,6 @@ def footer_segments(
             *filter_hint,
             (move_hint[0], ""),
             *open_hint,
-            next_hint,
-            *action_hints,
-            *toggle_hints,
-            *filter_key_hint,
-            help_hint,
-            quit_hint,
-        ],
-        [
-            *filter_hint,
-            move_hint,
             next_hint,
             *action_hints,
             *toggle_hints,
