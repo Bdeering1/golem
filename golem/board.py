@@ -34,9 +34,11 @@ MIN_BOXED_CARD_WIDTH = 30
 TAB_LINE_Y = 1
 SPACED_HEIGHT = 24
 DETAIL_LINE_COUNT = 3
-MAX_DETAIL_LINE_COUNT = 6
+MAX_DETAIL_LINE_COUNT = 9
 TALL_DETAIL_HEIGHT = 40
-TALL_DETAIL_LINE_COUNT = 5
+TALL_DETAIL_LINE_COUNT = 9
+FIELD_PREVIEW_LINE_COUNT = 8
+PREVIEW_LABEL_WIDTH = len("Directory") + 2
 MAX_SUMMARY_SENTENCE_COUNT = 3
 MAX_SUMMARY_LINE_COUNT = 3
 META_GAP = "   "
@@ -127,7 +129,10 @@ BACKSPACE_KEYS = {curses.KEY_BACKSPACE, 127, 8}
 BACK_KEYS = {ESCAPE_KEY, ord("q"), *BACKSPACE_KEYS, *ENTER_KEYS}
 FILTER_KEY = ord("/")
 NEXT_ATTENTION_KEY = ord("n")
-TOOLS_KEY = ord("t")
+ACTIVITY_KEY = ord("t")
+ACTIVITY_FOLDED = 0
+ACTIVITY_MESSAGES = 1
+ACTIVITY_FULL = 2
 PRINTABLE_KEYS = range(32, 127)
 ACTION_KEYS = {
     ACTION_PICKUP: "p",
@@ -293,6 +298,7 @@ class BoardLayout(NamedTuple):
     body_top: int
     body_height: int
     detail_line_count: int
+    detail_bottom_y: int
     footer_y: int
     card_styles: tuple[CardStyle, ...]
 
@@ -319,12 +325,11 @@ type Part = tuple[str, str, int | None]
 
 BOXED_CARD = CardStyle(height=4, pitch=5, is_boxed=True)
 STACKED_BOXED_CARD = CardStyle(height=4, pitch=4, is_boxed=True)
-SLIM_BOXED_CARD = CardStyle(height=3, pitch=3, is_boxed=True)
 THIN_BOXED_CARD = CardStyle(height=2, pitch=2, is_boxed=True)
 TALL_CARD = CardStyle(height=3, pitch=4, is_boxed=False)
 SPACED_CARD = CardStyle(height=2, pitch=3, is_boxed=False)
 DENSE_CARD = CardStyle(height=2, pitch=2, is_boxed=False)
-BOXED_CARD_STYLES = (BOXED_CARD, STACKED_BOXED_CARD, SLIM_BOXED_CARD, THIN_BOXED_CARD)
+BOXED_CARD_STYLES = (BOXED_CARD, STACKED_BOXED_CARD, THIN_BOXED_CARD)
 UNBOXED_CARD_STYLES = (TALL_CARD, SPACED_CARD, DENSE_CARD)
 
 BOARD_COLUMNS = (
@@ -436,7 +441,7 @@ class BoardState:
     filter_text: str = ""
     is_filtering: bool = False
     is_following: bool = False
-    is_showing_tools: bool = False
+    activity_level: int = 0
     is_showing_help: bool = False
     help_scroll: int = 0
     help_scroll_limit: int = 0
@@ -591,7 +596,7 @@ def board_layout(
     header_y = TAB_LINE_Y + spacer_row_count
     footer_y = height - (2 if fit_count <= MAX_TWO_LINE_FOOTER_COLUMN_COUNT else 1)
     line_count = detail_line_count(height)
-    detail_height = line_count + 1 + spacer_row_count if line_count else 0
+    detail_height = line_count + 1 + 2 * spacer_row_count if line_count else 0
     body_top = header_y + 2 + spacer_row_count
     body_height = footer_y - detail_height - body_top
     can_box = min(span_width for _, span_width in spans) >= MIN_BOXED_CARD_WIDTH
@@ -623,8 +628,17 @@ def board_layout(
         grown_count = min(max(0, body_height - used_height), MAX_DETAIL_LINE_COUNT - line_count)
         line_count += grown_count
         body_height -= grown_count
+    detail_bottom_y = footer_y - spacer_row_count
     return BoardLayout(
-        fit_count, spans, header_y, body_top, body_height, line_count, footer_y, styles
+        fit_count,
+        spans,
+        header_y,
+        body_top,
+        body_height,
+        line_count,
+        detail_bottom_y,
+        footer_y,
+        styles,
     )
 
 
@@ -1154,9 +1168,8 @@ def boxed_card_segments(
     context: FrameContext,
     *,
     is_selected: bool,
-    content_height: int = 2,
+    is_thin: bool = False,
 ) -> list[Segment]:
-    is_slim = content_height < BOXED_CARD.height - 2
     glyphs, now, changed_task_ids = context.glyphs, context.now, context.changed_task_ids
     color, frame_color = card_colors(row, context, is_selected=is_selected)
     corners = glyphs.heavy_corners if is_selected else glyphs.corners
@@ -1168,15 +1181,15 @@ def boxed_card_segments(
     status_time = status_line_time(row, context, facts)
     badge_parts = card_badge_parts(row, context, is_named=True)
     status_line_width = len(f"  {row.status} {glyphs.separator} {status_time} ")
-    used_width = len(name) + 3 if is_slim else status_line_width
+    used_width = len(name) + 3 if is_thin else status_line_width
     if used_width + parts_width(badge_parts) > content_width:
         badge_parts = card_badge_parts(row, context)
     border_parts: list[Part] = (
         [(" ", STYLE_PLAIN, None), *badge_parts, (" ", STYLE_PLAIN, None)]
-        if is_slim and badge_parts
+        if is_thin and badge_parts
         else []
     )
-    right_parts = [] if is_slim else badge_parts
+    right_parts = [] if is_thin else badge_parts
     title_width = content_width - parts_width(border_parts)
     title = fitted_task_id(name, title_width - 1, glyphs)
     is_changed = row.task_id in changed_task_ids
@@ -1220,27 +1233,30 @@ def boxed_card_segments(
     )
     if row.status == ledger.STATUS_RUNNING and not detail:
         detail = IDLE_CARD_TEXT
-    detail_line_segments = [
-        Segment(y + 2, x + 2, fitted_words(detail, content_width, glyphs), STYLE_DIM)
-    ]
-    if is_slim:
-        slim_width = status_width - (2 if content_height else 3)
-        slim_detail = fitted_words(
-            card_detail(facts, slim_width, glyphs, is_live=is_live_card(row, context)),
-            slim_width,
+    if is_thin:
+        thin_width = content_width - 3
+        thin_detail = fitted_words(
+            card_detail(facts, thin_width, glyphs, is_live=is_live_card(row, context)),
+            thin_width,
             glyphs,
         )
-        warning_text = time_text if is_warning and slim_detail.startswith(time_text) else ""
-        status_parts = [
+        warning_text = time_text if is_warning and thin_detail.startswith(time_text) else ""
+        bottom_parts: list[Part] = [
+            (f"{corners[2]} ", STYLE_PLAIN, frame_color),
             status_parts[0],
             (" ", STYLE_PLAIN, None),
             (warning_text, STYLE_PLAIN, frame_color),
-            (slim_detail.removeprefix(warning_text), STYLE_DIM, None),
+            (thin_detail.removeprefix(warning_text), STYLE_DIM, None),
+            (
+                f" {horizontal * (thin_width - len(thin_detail))}{corners[3]}",
+                STYLE_PLAIN,
+                frame_color,
+            ),
         ]
-        detail_line_segments = []
+        return [*part_segments(y, x, top_parts), *part_segments(y + 1, x, bottom_parts)]
     background = SELECTION_BACKGROUND if is_selected else None
     segments = part_segments(y, x, top_parts)
-    for offset in range(1, content_height + 1):
+    for offset in (1, 2):
         segments += [
             Segment(y + offset, x, vertical, color=frame_color),
             *highlighted([Segment(y + offset, x + 1, " " * (width - 2))], background),
@@ -1250,25 +1266,12 @@ def boxed_card_segments(
         [
             *part_segments(y + 1, x + 2, status_parts),
             *part_segments(y + 1, x + width - 2 - parts_width(right_parts), right_parts),
-            *detail_line_segments,
+            Segment(y + 2, x + 2, fitted_words(detail, content_width, glyphs), STYLE_DIM),
         ],
         background,
     )
-    bottom_y = y + content_height + 1
-    if not content_height:
-        segments = part_segments(y, x, top_parts)
-        bottom_parts: list[Part] = [
-            (f"{corners[2]} ", STYLE_PLAIN, frame_color),
-            *status_parts,
-            (
-                f" {horizontal * (width - 4 - parts_width(status_parts))}{corners[3]}",
-                STYLE_PLAIN,
-                frame_color,
-            ),
-        ]
-        return [*segments, *part_segments(bottom_y, x, bottom_parts)]
     bottom = f"{corners[2]}{horizontal * (width - 2)}{corners[3]}"
-    return [*segments, Segment(bottom_y, x, bottom, color=frame_color)]
+    return [*segments, Segment(y + 3, x, bottom, color=frame_color)]
 
 
 def column_segments(
@@ -1325,7 +1328,7 @@ def column_segments(
                 row,
                 context,
                 is_selected=is_selected,
-                content_height=style.height - 2,
+                is_thin=style == THIN_BOXED_CARD,
             )
             continue
         segments += card_segments(
@@ -1624,7 +1627,7 @@ def tail_shortened_directory(directory: str, width: int, glyphs: Glyphs) -> str:
 
 
 def detail_segments(
-    footer_y: int,
+    bottom_y: int,
     width: int,
     line_count: int,
     row: display.ListRow | None,
@@ -1635,7 +1638,7 @@ def detail_segments(
     lines: list[list[Part]] = []
     if row is not None:
         lines = detail_lines(row, text_width, line_count, context.snapshot, context.glyphs)
-    rule_y = footer_y - 1 - max(1, line_count)
+    rule_y = bottom_y - 1 - max(1, line_count)
     segments = detail_title_segments(rule_y, line_width, row, context)
     for line_offset, parts in enumerate(lines, start=1):
         segments += part_segments(rule_y + line_offset, CARD_INDENT, parts)
@@ -1779,34 +1782,117 @@ def summary_lines(result: str, width: int, line_count: int, glyphs: Glyphs) -> l
     return clipped_lines(paragraph_lines(summary, width), line_count, width, glyphs)
 
 
-def detail_outcome_text(
-    row: display.ListRow, width: int, snapshot: BoardSnapshot, glyphs: Glyphs
-) -> str:
-    outcome = row_reason(row, snapshot)
+def preview_pull_request_field(
+    row: display.ListRow, width: int, snapshot: BoardSnapshot
+) -> tuple[str, str] | None:
     pull_requests = chain_pull_requests(snapshot, row.task_id)
-    if len(pull_requests) == 1:
-        linked = f"{outcome} {glyphs.separator} {pull_requests[0]['url']}"
-        outcome = linked if len(linked) <= width else outcome
-    return fitted(outcome, width, glyphs)
+    if len(pull_requests) > 1:
+        return ("PRs", pull_request_text(pull_requests).removeprefix("PRs "))
+    if pull_requests:
+        pull_request = pull_requests[0]
+        linked = f"{pull_request['url']} ({pull_request['state']})"
+        return ("PR", linked if len(linked) <= width else pull_request_text(pull_requests)[3:])
+    if row.status == ledger.STATUS_FINISHED:
+        return ("Outcome", row_reason(row, snapshot))
+    return None
 
 
-def detail_primary_lines(
+def preview_body(
     row: display.ListRow, width: int, line_count: int, snapshot: BoardSnapshot, glyphs: Glyphs
-) -> list[str]:
+) -> tuple[str, list[str], str]:
     activity = snapshot.activity.get(row.task_id, [])
     if activity:
-        return activity_lines(activity, width, line_count, glyphs)
+        return "Activity", activity_lines(activity, width, line_count, glyphs), STYLE_PLAIN
     if row.status == ledger.STATUS_FINISHED:
         result = snapshot.tasks[row.task_id].get("result", "")
-        summary_count = min(MAX_SUMMARY_LINE_COUNT, line_count - 1)
-        outcome = detail_outcome_text(row, width, snapshot, glyphs)
-        return [outcome, *summary_lines(result, width, summary_count, glyphs)][:line_count]
+        summary_count = min(MAX_SUMMARY_LINE_COUNT, line_count)
+        return "Result", summary_lines(result, width, summary_count, glyphs), STYLE_DIM
     reason = detail_reason_text(row, snapshot)
     lines = paragraph_lines(reason, width)
     if len(lines) > PRIMARY_LINE_COUNT:
         short_reason = PATH_PREFIX_PATTERN.sub("", EXIT_PREFIX_PATTERN.sub("", reason))
         lines = paragraph_lines(f" {glyphs.separator} ".join(short_reason.splitlines()), width)
-    return clipped_lines(lines, line_count, width, glyphs)
+    return "Reason", clipped_lines(lines, line_count, width, glyphs), STYLE_PLAIN
+
+
+def prompt_lines(
+    row: display.ListRow, width: int, line_count: int, snapshot: BoardSnapshot, glyphs: Glyphs
+) -> list[str]:
+    prompt = " ".join(snapshot.tasks[row.task_id].get("prompt", "").split())
+    return clipped_lines(paragraph_lines(prompt, width), line_count, width, glyphs)
+
+
+def labelled_lines(label: str, lines: list[str], style: str) -> list[list[Part]]:
+    return [
+        [
+            ((label if index == 0 else "").ljust(PREVIEW_LABEL_WIDTH), STYLE_DIM, None),
+            (line, style, None),
+        ]
+        for index, line in enumerate(lines)
+    ]
+
+
+def field_preview_lines(
+    row: display.ListRow, width: int, line_count: int, snapshot: BoardSnapshot, glyphs: Glyphs
+) -> list[list[Part]]:
+    tasks = snapshot.tasks
+    value_width = max(1, width - PREVIEW_LABEL_WIDTH)
+    directory = tail_shortened_directory(
+        display.display_directory(row.directory), value_width, glyphs
+    )
+    fields = [
+        preview_pull_request_field(row, value_width, snapshot),
+        ("Directory", directory),
+        ("Step", fitted(step_text(row, tasks), value_width, glyphs)) if row.step else None,
+        ("Backend", tasks[row.task_id]["backend"]),
+    ]
+    lines = [
+        line
+        for field in fields
+        if field is not None
+        for line in labelled_lines(field[0], [fitted(field[1], value_width, glyphs)], STYLE_PLAIN)
+    ]
+    text_count = line_count - len(lines) - 1
+    shown_prompt = prompt_lines(row, value_width, 1, snapshot, glyphs)
+    body_label, body_lines, body_style = preview_body(
+        row, value_width, text_count - len(shown_prompt), snapshot, glyphs
+    )
+    shown_prompt = prompt_lines(row, value_width, text_count - len(body_lines), snapshot, glyphs)
+    return [
+        *lines,
+        [],
+        *labelled_lines("Prompt", shown_prompt, STYLE_DIM),
+        *labelled_lines(body_label, body_lines, body_style),
+    ][:line_count]
+
+
+def compact_preview_lines(
+    row: display.ListRow, width: int, line_count: int, snapshot: BoardSnapshot, glyphs: Glyphs
+) -> list[list[Part]]:
+    meta_count = 1 if line_count > 1 else 0
+    prompt_count = 1 if line_count > DETAIL_LINE_COUNT else 0
+    lines: list[list[Part]] = []
+    field = preview_pull_request_field(row, width - len("PRs "), snapshot)
+    if field is not None and row.status == ledger.STATUS_FINISHED:
+        label, value = field
+        value_part: Part = (fitted(value, width - len(label) - 1, glyphs), STYLE_PLAIN, None)
+        is_outcome = label == "Outcome"
+        lines.append([value_part] if is_outcome else [(f"{label} ", STYLE_DIM, None), value_part])
+    body_count = line_count - meta_count - prompt_count - len(lines)
+    _, body_lines, body_style = preview_body(row, width, body_count, snapshot, glyphs)
+    body_parts: list[list[Part]] = [[(line, body_style, None)] for line in body_lines]
+    lines += body_parts
+    if not meta_count:
+        return lines[:line_count]
+    spare_count = line_count - meta_count - prompt_count - len(lines)
+    meta_lines = detail_meta_lines(row, width, snapshot.tasks, glyphs, can_wrap=spare_count > 0)
+    spare_count -= len(meta_lines) - meta_count
+    if spare_count and lines and line_count > DETAIL_LINE_COUNT:
+        lines.append([])
+        spare_count -= 1
+    shown_prompt = prompt_lines(row, width, prompt_count + spare_count, snapshot, glyphs)
+    prompt_parts: list[list[Part]] = [[(line, STYLE_DIM, None)] for line in shown_prompt]
+    return [*lines, *prompt_parts, *meta_lines]
 
 
 def detail_lines(
@@ -1817,23 +1903,9 @@ def detail_lines(
     glyphs: Glyphs,
 ) -> list[list[Part]]:
     width = max(1, width)
-    meta_count = 1 if line_count > 1 else 0
-    primary_lines = detail_primary_lines(row, width, line_count - meta_count, snapshot, glyphs)
-    lines: list[list[Part]] = [[(line, STYLE_PLAIN, None)] for line in primary_lines]
-    if not meta_count:
-        return lines
-    spare_count = line_count - meta_count - len(primary_lines)
-    meta_lines = detail_meta_lines(row, width, snapshot.tasks, glyphs, can_wrap=spare_count > 0)
-    spare_count -= len(meta_lines) - meta_count
-    if spare_count and primary_lines and line_count > DETAIL_LINE_COUNT:
-        lines.append([])
-        spare_count -= 1
-    task = snapshot.tasks[row.task_id]
-    prompt = "" if snapshot.activity.get(row.task_id) else task.get("prompt", "")
-    prompt_lines = paragraph_lines(" ".join(prompt.split()), width)
-    shown_prompt = clipped_lines(prompt_lines, spare_count, width, glyphs)
-    prompt_parts: list[list[Part]] = [[(line, STYLE_DIM, None)] for line in shown_prompt]
-    return [*lines, *prompt_parts, *meta_lines]
+    if line_count >= FIELD_PREVIEW_LINE_COUNT:
+        return field_preview_lines(row, width, line_count, snapshot, glyphs)
+    return compact_preview_lines(row, width, line_count, snapshot, glyphs)
 
 
 def task_heading_parts(
@@ -1893,6 +1965,12 @@ def chain_name(tasks: ledger.Tasks, task_id: str) -> str:
 def step_name(tasks: ledger.Tasks, task_id: str) -> str:
     root_id = chain_name(tasks, task_id)
     return "" if task_id == root_id else task_id.removeprefix(f"{root_id}-")
+
+
+def task_label(tasks: ledger.Tasks, task_id: str) -> str:
+    step = step_name(tasks, task_id)
+    name = chain_name(tasks, task_id)
+    return f"{name} ({step})" if step else name
 
 
 def step_text(row: display.ListRow, tasks: ledger.Tasks) -> str:
@@ -1982,7 +2060,7 @@ def status_line_segments(
 ) -> list[Segment] | None:
     if state.pending_action is not None and row is not None:
         verb = ACTION_LABELS[state.pending_action].capitalize()
-        subject = row.task_id
+        subject = task_label(snapshot.tasks, row.task_id)
         if state.pending_action == ACTION_CLOSE_ALL:
             verb, subject = "Close", f"all {len(closable_task_ids(snapshot))} finished tasks"
         answer = CONFIRM_ANSWER_TEXT
@@ -2311,7 +2389,7 @@ def board_view_segments(
     row = selected_row(snapshot, state)
     if layout.detail_line_count and has_visible_rows:
         segments += detail_segments(
-            layout.footer_y,
+            layout.detail_bottom_y,
             width,
             layout.detail_line_count,
             row,
@@ -2421,13 +2499,12 @@ class PathWrapper(textwrap.TextWrapper):
 def field_lines(fields: list[tuple[str, str]], width: int) -> list[list[Part]]:
     if not fields:
         return []
-    label_width = max(len(label) for label, _ in fields) + 2
+    label_width = len(TASK_VIEW_INDENT) + max(len(label) for label, _ in fields) + 2
     lines: list[list[Part]] = []
     for label, value in fields:
         value_lines = PathWrapper(max(1, width - label_width)).wrap(value) or [""]
-        lines.append(
-            [(label.ljust(label_width), STYLE_DIM, None), (value_lines[0], STYLE_PLAIN, None)]
-        )
+        label_text = f"{TASK_VIEW_INDENT}{label}".ljust(label_width)
+        lines.append([(label_text, STYLE_DIM, None), (value_lines[0], STYLE_PLAIN, None)])
         continuation_lines: list[list[Part]] = [
             [(" " * label_width + line, STYLE_PLAIN, None)] for line in value_lines[1:]
         ]
@@ -2435,17 +2512,30 @@ def field_lines(fields: list[tuple[str, str]], width: int) -> list[list[Part]]:
     return lines
 
 
+def counted_text(count: int, noun: str) -> str:
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
+def is_tool_line(line: str) -> bool:
+    return line.startswith(TOOL_LINE_PREFIX)
+
+
 def activity_view_lines(
-    activity: list[str], width: int, glyphs: Glyphs, *, is_showing_tools: bool
+    activity: list[str], width: int, glyphs: Glyphs, activity_level: int
 ) -> list[list[Part]]:
+    if activity_level == ACTIVITY_FOLDED:
+        tool_count = sum(map(is_tool_line, activity))
+        counts = [
+            counted_text(len(activity) - tool_count, "message"),
+            counted_text(tool_count, "tool call"),
+        ]
+        summary = ", ".join(count for count in counts if not count.startswith("0 "))
+        return wrapped_lines(f"{glyphs.tool} {summary}", width, STYLE_DIM)
     lines: list[list[Part]] = []
-    for is_tool, group in itertools.groupby(
-        activity, key=lambda line: line.startswith(TOOL_LINE_PREFIX)
-    ):
+    for is_tool, group in itertools.groupby(activity, key=is_tool_line):
         group_lines = list(group)
-        if is_tool and not is_showing_tools:
-            noun = "tool call" if len(group_lines) == 1 else "tool calls"
-            group_lines = [f"{TOOL_LINE_PREFIX}{len(group_lines)} {noun}"]
+        if is_tool and activity_level == ACTIVITY_MESSAGES:
+            group_lines = [f"{TOOL_LINE_PREFIX}{counted_text(len(group_lines), 'tool call')}"]
         style = STYLE_DIM if is_tool else STYLE_PLAIN
         for line in group_lines:
             lines += wrapped_lines(activity_text(line, glyphs), width, style, "  ")
@@ -2487,11 +2577,13 @@ def task_view_lines(
     now: datetime,
     activity_entries: list[str],
     *,
-    is_showing_tools: bool,
+    activity_level: int,
 ) -> list[list[Part]]:
     task = snapshot.tasks[row.task_id]
-    activity = activity_view_lines(
-        activity_entries, width, glyphs, is_showing_tools=is_showing_tools
+    activity = (
+        activity_view_lines(activity_entries, width, glyphs, activity_level)
+        if activity_entries
+        else []
     )
     if not activity and row.status == ledger.STATUS_RUNNING:
         activity = wrapped_lines(NO_ACTIVITY_TEXT, width, STYLE_DIM)
@@ -2499,13 +2591,13 @@ def task_view_lines(
     fields = field_lines(task_fields(row, snapshot, glyphs, now), width)
     prompt = task.get("prompt", "")
     return [
-        *text_section_lines(
-            "Stop reason", wrapped_lines(stop_reason, width, STYLE_PLAIN), width, glyphs
-        ),
-        *text_section_lines("Result", result_lines(task.get("result", ""), width), width, glyphs),
         *section_lines("Details", fields, width, glyphs),
         *text_section_lines("Prompt", wrapped_lines(prompt, width, STYLE_PLAIN), width, glyphs),
         *text_section_lines("Activity", activity, width, glyphs),
+        *text_section_lines("Result", result_lines(task.get("result", ""), width), width, glyphs),
+        *text_section_lines(
+            "Stop reason", wrapped_lines(stop_reason, width, STYLE_PLAIN), width, glyphs
+        ),
     ]
 
 
@@ -2527,8 +2619,12 @@ def task_view_segments(
         [(glyphs.horizontal * content_width, STYLE_PLAIN, display.STATUS_COLORS[row.status])],
     ]
     activity = task_activity(row, snapshot)
+    has_tool_lines = any(map(is_tool_line, activity))
+    if state.activity_level == ACTIVITY_FULL and not has_tool_lines:
+        state.activity_level = ACTIVITY_FOLDED
+    activity_level = ACTIVITY_FULL if state.is_following else state.activity_level
     lines = task_view_lines(
-        row, content_width, snapshot, glyphs, now, activity, is_showing_tools=state.is_showing_tools
+        row, content_width, snapshot, glyphs, now, activity, activity_level=activity_level
     )
     is_two_line_footer = fitting_column_count(width) <= MAX_TWO_LINE_FOOTER_COLUMN_COUNT
     footer_y = height - (2 if is_two_line_footer else 1)
@@ -2558,8 +2654,13 @@ def task_view_segments(
         if row.status == ledger.STATUS_RUNNING
         else []
     )
-    if any(line.startswith(TOOL_LINE_PREFIX) for line in activity):
-        toggle_hints.append(("t", "hide tools" if state.is_showing_tools else "tools"))
+    activity_labels = {
+        ACTIVITY_FOLDED: "activity",
+        ACTIVITY_MESSAGES: "tools" if has_tool_lines else "fold",
+        ACTIVITY_FULL: "fold",
+    }
+    if activity and not state.is_following:
+        toggle_hints.append(("t", activity_labels[state.activity_level]))
     column_row_count = len(
         rows_by_column(snapshot.rows, is_showing_all=state.is_showing_all)[state.focus_index][1]
     )
@@ -2636,7 +2737,7 @@ def help_sections(glyphs: Glyphs, *, is_task_view: bool) -> list[tuple[str, list
                 ("g G", "top, bottom"),
                 ("PgUp PgDn", "page"),
                 ("Space", "page down"),
-                ("t", "show or hide tool calls"),
+                ("t", "expand activity, then tool calls"),
                 ("esc q", "back to the board"),
                 ("?", "this help"),
             ],
@@ -2903,8 +3004,8 @@ def apply_task_key(state: BoardState, key: int, page_size: int, column_row_count
         state.task_scroll = 0
     elif key in LAST_KEYS:
         state.task_scroll = sys.maxsize
-    elif key == TOOLS_KEY:
-        state.is_showing_tools = not state.is_showing_tools
+    elif key == ACTIVITY_KEY:
+        state.activity_level = (state.activity_level + 1) % (ACTIVITY_FULL + 1)
     elif key == ord("?"):
         state.is_showing_help = True
 
@@ -3118,7 +3219,7 @@ def run_action(
             stderr=subprocess.PIPE,
             text=True,
         )
-        flash(state, f"Rechecking the gate for {row.task_id}")
+        flash(state, f"Rechecking the gate for {task_label(snapshot.tasks, row.task_id)}")
         return
     if action == ACTION_RETRY:
         returncode, output = run_captured([*GOLEM_COMMAND, action, row.task_id])
@@ -3157,20 +3258,22 @@ def run_action(
         flash(state, opened_text if returncode == 0 else output)
         return
     returncode, output = run_captured([*GOLEM_COMMAND, action, row.task_id])
-    flash(state, f"{ACTION_DONE_VERBS[action]} {row.task_id}" if returncode == 0 else output)
+    done_text = f"{ACTION_DONE_VERBS[action]} {task_label(snapshot.tasks, row.task_id)}"
+    flash(state, done_text if returncode == 0 else output)
 
 
-def report_gate_checks(state: BoardState) -> None:
+def report_gate_checks(state: BoardState, tasks: ledger.Tasks) -> None:
     for task_id, process in list(state.gate_checks.items()):
         if process.poll() is None:
             continue
         del state.gate_checks[task_id]
         _, error_output = process.communicate()
         reason = display.first_line(error_output.strip()).removeprefix(GOLEM_PREFIX)
+        label = task_label(tasks, task_id) if task_id in tasks else task_id
         if process.returncode == 0:
-            flash(state, f"Gate passed for {task_id}; follow-ups started")
+            flash(state, f"Gate passed for {label}; follow-ups started")
         else:
-            flash(state, f"Gate still failing for {task_id}: {reason}")
+            flash(state, f"Gate still failing for {label}: {reason}")
 
 
 def handle_action_key(
@@ -3187,7 +3290,7 @@ def handle_action_key(
             run_action(screen, state, snapshot, action, row)
             return True
         declined_text = (
-            f"Didn't {ACTION_LABELS[action]} {row.task_id}"
+            f"Didn't {ACTION_LABELS[action]} {task_label(snapshot.tasks, row.task_id)}"
             if action != ACTION_CLOSE_ALL and row is not None
             else CLOSE_ALL_DECLINED_TEXT
         )
@@ -3227,7 +3330,7 @@ def mark_changed_tasks(state: BoardState, previous: BoardSnapshot, current: Boar
         if previous_position != position:
             state.changed_until[task_id] = until
         if previous_position is not None and previous_position[1] != position[1]:
-            status_changes.append(f"{task_id} {position[1]}")
+            status_changes.append(f"{task_label(current.tasks, task_id)} {position[1]}")
     if status_changes:
         flash(state, ", ".join(status_changes))
     selected_task_id = state.selected_task_ids[state.focus_index]
@@ -3242,7 +3345,7 @@ def mark_changed_tasks(state: BoardState, previous: BoardSnapshot, current: Boar
         return
     state.focus_index = titles.index(column)
     state.selected_task_ids[state.focus_index] = selected_task_id
-    flash(state, f"{selected_task_id} {status}, now in {column}")
+    flash(state, f"{task_label(current.tasks, selected_task_id)} {status}, now in {column}")
 
 
 def board_loop(screen: curses.window, *, is_color: bool, glyphs: Glyphs) -> int:
@@ -3270,7 +3373,7 @@ def board_loop(screen: curses.window, *, is_color: bool, glyphs: Glyphs) -> int:
             else:
                 mark_changed_tasks(state, previous_snapshot, snapshot)
             shown_source_key = (source_key[0], progress_stats(snapshot), now.date())
-        report_gate_checks(state)
+        report_gate_checks(state, snapshot.tasks)
         if screen.getmaxyx() != shown_size:
             shown_size = screen.getmaxyx()
             screen.clear()

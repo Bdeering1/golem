@@ -144,7 +144,7 @@ def test_board_names_a_chain_after_its_first_step_and_labels_the_shown_step():
     )
 
     assert "fix-login-review" not in "\n".join(board_lines + detail_lines)
-    assert "Step 2/3 review" in "\n".join(detail_lines)
+    assert "2/3 review" in "\n".join(detail_lines)
 
 
 def test_board_task_view_shows_only_chain_states_that_cannot_be_inferred():
@@ -266,20 +266,23 @@ def test_board_running_card_shows_the_latest_agent_activity(ledger_path):
     assert "Edit app/auth/reset.py" in text
 
 
-def test_board_task_view_folds_tool_calls_until_t_is_pressed(ledger_path):
+def test_board_task_view_folds_activity_and_t_unfolds_it_in_steps(ledger_path):
     tasks = {"task": support.task_record(ledger.STATUS_RUNNING, started_at=NOW.isoformat())}
     progress_path = progress_log.progress_path(tasks["task"]["session_id"])
     progress_path.parent.mkdir(parents=True, exist_ok=True)
     progress_path.write_text("Reading auth\n[tool] Read app/tokens.py\n[tool] Edit app/reset.py\n")
     state = board.BoardState(focus_index=1, view=board.VIEW_TASK)
 
-    folded_text = frame_text(tasks, state=state)
-    board.apply_key(state, ord("t"))
-    unfolded_text = frame_text(tasks, state=state)
+    texts = []
+    for _ in range(3):
+        texts.append(frame_text(tasks, state=state))
+        board.apply_key(state, ord("t"))
+    folded_text, messages_text, full_text = texts
 
-    assert "2 tool calls" in folded_text
-    assert "tokens.py" not in folded_text
-    assert "tokens.py" in unfolded_text
+    assert "Reading auth" not in folded_text
+    assert "Reading auth" in messages_text
+    assert "tokens.py" not in messages_text
+    assert "tokens.py" in full_text
 
 
 def test_board_selection_moves_within_a_column_and_scrolls_to_stay_visible():
