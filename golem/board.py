@@ -922,16 +922,16 @@ def is_status_implied(row: display.ListRow, context: FrameContext) -> bool:
     return is_done or is_running or is_stuck(row, context.snapshot.tasks[row.task_id], context.now)
 
 
-def is_repository_on_status_line(row: display.ListRow, reason: str) -> bool:
-    return row.status == ledger.STATUS_RUNNING and bool(reason)
+def is_repository_on_status_line(row: display.ListRow) -> bool:
+    return row.status == ledger.STATUS_RUNNING
 
 
 def status_line_time(
     row: display.ListRow, context: FrameContext, facts: tuple[str, str, str, str]
 ) -> str:
-    time_text, reason, _, repository = facts
+    time_text, _, _, repository = facts
     status_time = status_time_text(row, context, time_text)
-    if not is_repository_on_status_line(row, reason):
+    if not repository or not is_repository_on_status_line(row):
         return status_time
     return f"{status_time} {context.glyphs.separator} {repository}"
 
@@ -983,7 +983,7 @@ def card_segments(
     facts = card_facts(row, context)
     time_text, reason, short_reason, repository = facts
     is_live = is_live_card(row, context)
-    is_repository_moved = is_tall and is_repository_on_status_line(row, reason)
+    is_repository_moved = is_tall and is_repository_on_status_line(row)
     detail_repository = "" if is_repository_moved else repository
     detail_facts = ("" if is_tall else time_text, reason, short_reason, detail_repository)
     detail_y = y + 2 if is_tall else y + 1
@@ -1099,7 +1099,7 @@ def boxed_card_segments(
         (time_part, STYLE_PLAIN, frame_color) if is_warning else (time_part, STYLE_DIM, None),
     ]
     detail = card_detail(
-        ("", reason, short_reason, "" if is_repository_on_status_line(row, reason) else repository),
+        ("", reason, short_reason, "" if is_repository_on_status_line(row) else repository),
         content_width,
         glyphs,
         is_live=is_live_card(row, context),
@@ -2251,7 +2251,7 @@ def task_view_segments(
     position = f"{min(len(lines), state.task_scroll + body_height)}/{len(lines)}"
     position_hints = [(position, "")] if is_scrollable else []
     scroll_hints = [(glyphs.select_keys, "scroll")] if is_scrollable else []
-    bare_scroll_hints = [(glyphs.select_keys, "")] if is_scrollable else []
+    bare_scroll_hints = [(glyphs.select_keys, position)] if is_scrollable else []
     follow_hint = (
         [("w", "following" if state.is_following else "follow")]
         if row.status == ledger.STATUS_RUNNING
@@ -2265,10 +2265,7 @@ def task_view_segments(
     short_step_hint = [(glyphs.column_keys, f"{task_number}/{column_row_count}")]
     core_action_hints = [hint for hint in action_hints if hint[0] != ACTION_KEYS[ACTION_COPY]]
     bare_action_hints = [(key, "") for key, _ in core_action_hints]
-    bare_action_sets = [
-        [(glyphs.select_keys, position), *short_step_hint, *follow_hint, *bare_action_hints],
-        [*bare_scroll_hints, *short_step_hint, *follow_hint, *bare_action_hints],
-    ]
+    bare_action_sets = [[*bare_scroll_hints, *short_step_hint, *follow_hint, *bare_action_hints]]
     key_sets = [
         [*scroll_hints, *step_hint, *follow_hint, *action_hints, ("esc", "back"), *position_hints],
         [*scroll_hints, *step_hint, *follow_hint, *action_hints, ("esc", "back")],
@@ -2398,6 +2395,9 @@ def help_view_segments(width: int, height: int, glyphs: Glyphs, state: BoardStat
     more_below = f" {glyphs.down} more " if state.help_scroll < state.help_scroll_limit else ""
     top_text = f"{corners[0]}{line} Keys "
     bottom_text = f"{corners[2]}{line}{more_below}"
+    widest_bottom_text = (
+        f"{corners[2]}{line} {glyphs.down} more " if state.help_scroll_limit else bottom_text
+    )
     close_hints = [HELP_CLOSE_HINT]
     if state.help_scroll_limit:
         scroll_hint = f" {glyphs.up}{glyphs.down} scroll"
@@ -2409,7 +2409,7 @@ def help_view_segments(width: int, height: int, glyphs: Glyphs, state: BoardStat
             "",
         ]
     close_hint = next(
-        (hint for hint in close_hints if len(bottom_text) + len(hint) + 2 <= box_width), ""
+        (hint for hint in close_hints if len(widest_bottom_text) + len(hint) + 2 <= box_width), ""
     )
     top_rule = line * max(0, box_width - len(top_text) - len(more_above) - 1)
     bottom_rule = line * max(0, box_width - len(bottom_text) - len(close_hint) - 2)
