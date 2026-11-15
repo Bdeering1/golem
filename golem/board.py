@@ -147,6 +147,11 @@ BOARD_STATUS_ORDER = (
 LIVE_STATUSES = {ledger.STATUS_SCHEDULED, ledger.STATUS_RUNNING}
 EXIT_PREFIX_PATTERN = re.compile(r"^[^:]{1,40} exited (?:with status )?\d+:\s*")
 PATH_PREFIX_PATTERN = re.compile(r"[~/]\S*/")
+SHORT_REASON_PATTERNS = (
+    (re.compile(r"^(?:fatal|error): "), ""),
+    (re.compile(r"a branch named '[^']+' already exists"), "branch already exists"),
+)
+DURATION_PART_PATTERN = re.compile(r"\d+[a-z]")
 LOUD_STATUSES = {*STOPPED_STATUSES, ledger.STATUS_RUNNING}
 PICKUP_STATUSES = {ledger.STATUS_BLOCKED, ledger.STATUS_FAILED, ledger.STATUS_FINISHED}
 CANCEL_STATUSES = {ledger.STATUS_SCHEDULED, ledger.STATUS_WAITING}
@@ -733,7 +738,10 @@ def short_reason_text(row: display.ListRow, reason: str, snapshot: BoardSnapshot
     if row.status == ledger.STATUS_FINISHED and pull_requests:
         return short_pull_request_text(pull_requests)
     reason = SHORT_REASON_TEXTS.get(reason, reason).replace(WAITING_DIRECTORY_TEXT, WAITING_TEXT)
-    return EXIT_PREFIX_PATTERN.sub("", reason)
+    reason = EXIT_PREFIX_PATTERN.sub("", reason)
+    for pattern, replacement in SHORT_REASON_PATTERNS:
+        reason = pattern.sub(replacement, reason)
+    return reason
 
 
 def card_facts(row: display.ListRow, context: FrameContext) -> tuple[str, str, str, str]:
@@ -757,6 +765,13 @@ def card_facts(row: display.ListRow, context: FrameContext) -> tuple[str, str, s
     return time_text, reason, short_reason, Path(row.directory).name
 
 
+def coarse_time_text(time_text: str) -> str:
+    words = time_text.split()
+    if len(words) > 1 and all(DURATION_PART_PATTERN.fullmatch(word) for word in words[-2:]):
+        return " ".join(words[:-1])
+    return time_text
+
+
 def card_detail(
     facts: tuple[str, str, str, str],
     width: int,
@@ -768,8 +783,14 @@ def card_detail(
     time_text, reason, short_reason, repository = facts
     separator = f" {glyphs.separator} "
     timed_facts = separator.join(part for part in (time_text, repository) if part)
+    coarse_facts = separator.join(
+        part for part in (coarse_time_text(time_text), repository) if part
+    )
+    fitted_facts = next(
+        (option for option in (timed_facts, coarse_facts) if len(option) <= width), time_text
+    )
     if not reason:
-        return timed_facts if len(timed_facts) <= width else time_text
+        return fitted_facts
     if not is_live:
         options = [
             separator.join(part for part in parts if part)
@@ -787,7 +808,7 @@ def card_detail(
         return reason
     reason_width = width - len(timed_facts) - len(separator)
     if reason_width < MIN_CARD_REASON_WIDTH:
-        return timed_facts if len(timed_facts) <= width else time_text
+        return fitted_facts
     return f"{timed_facts}{separator}{fitted(reason, reason_width, glyphs)}"
 
 
@@ -1650,11 +1671,14 @@ def narrow_footer_segments(
     move_hint = (f"{glyphs.column_keys}{glyphs.select_keys}", "move")
     help_hint, quit_hint = ("?", "help"), ("q", "quit")
     if state.filter_text:
-        filter_hint = (f"/{state.filter_text}", "".join(match_count_parts(snapshot, state)))
+        count_text, done_text = match_count_parts(snapshot, state)
+        filter_hint = (f"/{state.filter_text}", count_text + done_text)
+        short_filter_hint = (f"/{state.filter_text}", count_text)
         filter_sets = [
             [filter_hint, ("esc", "clear"), help_hint, quit_hint],
-            [filter_hint, ("esc", "clear"), ("?", ""), ("q", "")],
-            [filter_hint, ("esc", "")],
+            [short_filter_hint, ("esc", "clear"), help_hint, quit_hint],
+            [short_filter_hint, ("esc", "clear"), ("?", ""), ("q", "")],
+            [short_filter_hint, ("esc", "")],
         ]
         return action_segments + key_hint_segments(y + 1, width, filter_sets)
     navigation_sets = [
