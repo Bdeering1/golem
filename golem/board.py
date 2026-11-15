@@ -25,8 +25,6 @@ MIN_COLUMN_WIDTH = 20
 HIDDEN_COLUMN_MARGIN = 2
 COLUMN_GAP = 2
 RAIL_WIDTH = 1
-REVIEW_SHARE_PERCENT = 40
-MAX_REVIEW_SHARE_COLUMN_COUNT = 3
 CARD_INDENT = 2
 BOX_BORDER_WIDTH = 4
 MIN_BOXED_CARD_WIDTH = 30
@@ -305,7 +303,6 @@ BOARD_COLUMNS = (
     BoardColumn(display.COLUMN_REVIEW, display.STATUS_COLORS[ledger.STATUS_BLOCKED]),
     BoardColumn(display.COLUMN_DONE, display.STATUS_COLORS[ledger.STATUS_FINISHED]),
 )
-REVIEW_COLUMN_INDEX = [column.title for column in BOARD_COLUMNS].index(display.COLUMN_REVIEW)
 PAIR_COLORS = sorted(
     {
         *display.STATUS_COLORS.values(),
@@ -526,18 +523,6 @@ def column_spans(
     right_margin = HIDDEN_COLUMN_MARGIN if is_split and has_right_hidden else 0
     total_width = width - left_margin - right_margin - (fit_count - 1) * COLUMN_GAP
     widths = [total_width // fit_count] * fit_count
-    review_offset = REVIEW_COLUMN_INDEX - first_index
-    if 1 < fit_count <= MAX_REVIEW_SHARE_COLUMN_COUNT and 0 <= review_offset < fit_count:
-        review_width = max(
-            widths[0],
-            min(
-                total_width * REVIEW_SHARE_PERCENT // 100,
-                total_width - (fit_count - 1) * MIN_BOXED_CARD_WIDTH,
-            ),
-        )
-        other_width = (total_width - review_width) // (fit_count - 1)
-        widths = [other_width] * fit_count
-        widths[review_offset] = review_width
     spans: list[tuple[int, int]] = []
     x = left_margin
     for column_width in widths:
@@ -1977,6 +1962,8 @@ def footer_segments(
             help_hint,
             quit_hint,
         ],
+    ]
+    reduced_sets = [
         arrowless_set,
         *(next_or_toggle_sets[::-1] if state.is_showing_all else next_or_toggle_sets),
         [*filter_hint, *open_hint, next_hint, *action_hints, help_hint, quit_hint],
@@ -1991,6 +1978,8 @@ def footer_segments(
         [help_hint, quit_hint],
         [("?", ""), ("q", "")],
     ]
+    arrows_hint = (f"{glyphs.column_keys}{glyphs.select_keys}", "")
+    key_sets += [[arrows_hint, *key_set] for key_set in reduced_sets]
     return key_hint_segments(y, width, key_sets)
 
 
