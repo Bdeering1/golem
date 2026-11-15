@@ -156,8 +156,8 @@ PATH_PREFIX_PATTERN = re.compile(r"[~/]\S*/")
 SHORT_REASON_PATTERNS = (
     (re.compile(r"^(?:fatal|error): "), ""),
     (re.compile(r"a branch named '[^']+' already exists"), "branch exists"),
-    (re.compile(r"(\d+) failed, (\d+) passed"), r"\1 fail/\2 pass"),
 )
+GATE_COUNT_PATTERN = re.compile(r"(\d+) failed, (\d+) passed")
 DURATION_PART_PATTERN = re.compile(r"(\d+)([a-z])")
 DURATION_UNIT_SIZES = {"m": 60, "h": 24}
 LOUD_STATUSES = {*STOPPED_STATUSES, ledger.STATUS_RUNNING}
@@ -831,13 +831,16 @@ def card_detail(
     if not reason:
         return fitted_facts
     if not is_live:
+        compact_reason = GATE_COUNT_PATTERN.sub(r"\1 fail/\2 pass", short_reason)
         options = [
             separator.join(part for part in parts if part)
             for parts in (
                 (time_text, reason, repository),
                 (time_text, short_reason, repository),
+                (time_text, compact_reason, repository),
                 (time_text, reason),
                 (time_text, short_reason),
+                (time_text, compact_reason),
             )
         ]
         if short_reason.startswith(BUSY_DIRECTORY_TEXT) and time_text:
@@ -872,6 +875,13 @@ def is_new_for_review(snapshot: BoardSnapshot, row: display.ListRow) -> bool:
     if row.status == ledger.STATUS_FAILED:
         return not ledger.is_counted_opened(snapshot.tasks, row.task_id)
     return chains.is_ready_to_open(snapshot.tasks, row.task_id)
+
+
+def status_time_text(row: display.ListRow, context: FrameContext, time_text: str) -> str:
+    task = context.snapshot.tasks[row.task_id]
+    if is_stuck(row, task, context.now):
+        return time_text
+    return when_text(task, context.now).removesuffix(" ago") or time_text
 
 
 def is_live_card(row: display.ListRow, context: FrameContext) -> bool:
@@ -968,11 +978,14 @@ def card_segments(
     mark_style = STYLE_BADGE if is_changed else STYLE_BOLD
     status_parts: list[Part] = []
     if is_tall:
-        time_part = f" {glyphs.separator} {time_text}" if time_text else ""
+        status_time = status_time_text(row, context, time_text)
+        time_part = f" {glyphs.separator} {status_time}" if status_time else ""
         status_parts = [(row.status, STYLE_PLAIN, mark_color), (time_part, STYLE_DIM, None)]
         if is_status_implied(row, context):
             status_parts = [
-                (time_text, STYLE_PLAIN, mark_color) if is_warning else (time_text, STYLE_DIM, None)
+                (status_time, STYLE_PLAIN, mark_color)
+                if is_warning
+                else (status_time, STYLE_DIM, None)
             ]
     rail = (
         [
@@ -1028,8 +1041,13 @@ def boxed_card_segments(
     is_warning = is_stuck(row, context.snapshot.tasks[row.task_id], now)
     right_parts = card_badge_parts(row, context)
     status_width = content_width - parts_width(right_parts) - (1 if right_parts else 0)
-    time_part = f" {glyphs.separator} {time_text}" if time_text else ""
-    status_options = [(f" {row.status}", time_part), ("", f" {time_text}"), (f" {row.status}", "")]
+    status_time = status_time_text(row, context, time_text)
+    time_part = f" {glyphs.separator} {status_time}" if status_time else ""
+    status_options = [
+        (f" {row.status}", time_part),
+        ("", f" {status_time}"),
+        (f" {row.status}", ""),
+    ]
     if is_status_implied(row, context) and time_text:
         status_options = status_options[1:]
     label, time_part = next(
@@ -1114,10 +1132,7 @@ def column_segments(
         )
         card_y = layout.body_top + card_index * style.pitch
         if not is_focused and scroll_offset + card_index == state.selected_indices[column_index]:
-            segments += [
-                Segment(card_y + offset, x - RAIL_WIDTH, glyphs.focus_marker, color=FAINT_COLOR)
-                for offset in range(style.height)
-            ]
+            segments.append(Segment(card_y, x - RAIL_WIDTH, glyphs.focus_marker, color=FAINT_COLOR))
         if style.is_boxed:
             segments += boxed_card_segments(
                 card_y, x, column_width, row, context, is_selected=is_selected
@@ -1878,7 +1893,7 @@ def footer_segments(
         [
             *filter_hint,
             move_hint,
-            next_hint,
+            *open_hint,
             *action_hints,
             *toggle_hints,
             *filter_key_hint,
