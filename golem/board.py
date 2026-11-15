@@ -28,6 +28,7 @@ TITLE_LINE_COUNT = 2
 TAB_LINE_COUNT = 2
 MIN_DETAIL_LINE_COUNT = 4
 MAX_DETAIL_LINE_COUNT = 9
+NARROW_DETAIL_LINE_COUNT = 4
 DETAIL_HEIGHT_DIVISOR = 6
 MIN_DETAIL_HEIGHT = 20
 TICK_MILLISECONDS = 250
@@ -100,7 +101,7 @@ ACTION_KEYS = {
 CONFIRMED_ACTIONS = {ACTION_CLOSE, ACTION_CANCEL}
 ACTION_LABELS = {
     ACTION_PICKUP: "pickup",
-    ACTION_WATCH: "watch",
+    ACTION_WATCH: "log",
     ACTION_OPEN_PULL_REQUEST: "PR",
     ACTION_CLOSE: "close",
     ACTION_CANCEL: "cancel",
@@ -121,7 +122,7 @@ EMPTY_BOARD_LINES = ("No tasks yet", "Queue one with", 'golem run <id> "<prompt>
 REASON_LINE_COUNT = 2
 UNAVAILABLE_ACTION_TEXTS = {
     ACTION_PICKUP: "Only blocked, failed or finished tasks can be picked up",
-    ACTION_WATCH: "Only running tasks can be watched",
+    ACTION_WATCH: "This task hasn't started, so it has no log yet",
     ACTION_OPEN_PULL_REQUEST: "This task has no pull request",
     ACTION_CLOSE: "Only finished tasks in Review can be closed",
     ACTION_CANCEL: "Only queued tasks can be cancelled",
@@ -287,6 +288,7 @@ class BoardState:
     flash_until: float = 0.0
     filter_text: str = ""
     is_filtering: bool = False
+    is_following: bool = False
     changed_until: dict[str, float] = field(default_factory=dict[str, float])
 
 
@@ -383,6 +385,8 @@ def board_layout(width: int, height: int, column_count: int) -> BoardLayout:
     header_y = TITLE_LINE_COUNT + (TAB_LINE_COUNT if fit_count < column_count else 0)
     body_top = header_y + 3
     line_count = detail_line_count(height)
+    if fit_count == 1:
+        line_count = min(line_count, NARROW_DETAIL_LINE_COUNT)
     detail_height = line_count + 1 if line_count else 0
     body_height = height - 1 - detail_height - body_top
     return BoardLayout(fit_count, column_width, header_y, body_top, body_height, line_count)
@@ -534,22 +538,22 @@ def card_segments(
         right_parts += [(" " if right_parts else "", STYLE_PLAIN, None)]
         right_parts += [(glyphs.new_mark, STYLE_BOLD, color)]
     right_width = parts_width(right_parts) + (1 if right_parts else 0)
-    title = fitted(row.task_id, width - CARD_INDENT - right_width, glyphs)
-    detail = fitted(card_detail(row, context), width - CARD_INDENT, glyphs)
+    title = fitted(row.task_id, width - CARD_INDENT, glyphs)
+    detail = fitted(card_detail(row, context), width - CARD_INDENT - right_width, glyphs)
     mark = status_mark(row.status, glyphs, now)
     if is_selected:
         right_text = "".join(text for text, _, _ in right_parts)
-        first_line = f"{mark} {title}".ljust(width - len(right_text)) + right_text
+        second_line = f"{' ' * CARD_INDENT}{detail}".ljust(width - len(right_text)) + right_text
         return [
-            Segment(y, x, first_line, STYLE_SELECTED, color),
-            Segment(y + 1, x, f"{' ' * CARD_INDENT}{detail}".ljust(width), STYLE_SELECTED, color),
+            Segment(y, x, f"{mark} {title}".ljust(width), STYLE_SELECTED, color),
+            Segment(y + 1, x, second_line, STYLE_SELECTED, color),
         ]
     title_color = color if row.task_id in changed_task_ids else None
     return [
         Segment(y, x, mark, STYLE_BOLD, color),
         Segment(y, x + CARD_INDENT, title, STYLE_BOLD, title_color),
-        *part_segments(y, x + width - parts_width(right_parts), right_parts),
         Segment(y + 1, x + CARD_INDENT, detail, STYLE_DIM),
+        *part_segments(y + 1, x + width - parts_width(right_parts), right_parts),
     ]
 
 
@@ -864,7 +868,7 @@ def available_actions(snapshot: BoardSnapshot, row: display.ListRow | None) -> l
     actions: list[str] = []
     if row.status in PICKUP_STATUSES:
         actions.append(ACTION_PICKUP)
-    if row.status == ledger.STATUS_RUNNING:
+    if row.status not in ledger.NOT_STARTED_STATUSES:
         actions.append(ACTION_WATCH)
     if chain_pull_requests(snapshot, row.task_id):
         actions.append(ACTION_OPEN_PULL_REQUEST)
@@ -877,12 +881,12 @@ def available_actions(snapshot: BoardSnapshot, row: display.ListRow | None) -> l
 
 
 def footer_action_hints(
-    snapshot: BoardSnapshot, row: display.ListRow | None
+    snapshot: BoardSnapshot, row: display.ListRow | None, *, is_complete: bool = False
 ) -> list[tuple[str, str]]:
     return [
         (action_key(action), ACTION_LABELS[action])
         for action in available_actions(snapshot, row)
-        if action not in FOOTER_HIDDEN_ACTIONS
+        if is_complete or action not in FOOTER_HIDDEN_ACTIONS
     ]
 
 
@@ -956,7 +960,7 @@ def footer_segments(
             (glyphs.column_keys, "column"),
             (glyphs.select_keys, "select"),
             *open_hint,
-            *action_hints,
+            *footer_action_hints(snapshot, row, is_complete=True),
             done_hint,
             ("?", "help"),
             ("q", "quit"),
@@ -1059,6 +1063,14 @@ def wrapped_lines(text: str, width: int, style: str, indent: str = "  ") -> list
     return lines
 
 
+def task_activity(row: display.ListRow, snapshot: BoardSnapshot) -> list[str]:
+    if row.task_id in snapshot.activity:
+        return snapshot.activity[row.task_id]
+    if row.status in ledger.NOT_STARTED_STATUSES:
+        return []
+    return recent_activity(snapshot.tasks[row.task_id]["session_id"])
+
+
 def moment_text(timestamp: str | None, now: datetime) -> str:
     if timestamp is None:
         return ""
@@ -1120,9 +1132,7 @@ def task_view_lines(
         ("Prompt", task.get("prompt", ""), STYLE_PLAIN),
         (
             "Activity",
-            "\n".join(
-                activity_text(line, glyphs) for line in snapshot.activity.get(row.task_id, [])
-            ),
+            "\n".join(activity_text(line, glyphs) for line in task_activity(row, snapshot)),
             STYLE_DIM,
         ),
         ("Result", task.get("result", ""), STYLE_PLAIN),
@@ -1149,6 +1159,8 @@ def task_view_segments(
         return board_view_segments(snapshot, width, height, state, glyphs, now)
     lines = task_view_lines(row, width - 1, snapshot, glyphs, now)
     body_height = max(1, height - 1)
+    if state.is_following:
+        state.task_scroll = len(lines)
     state.task_scroll = max(0, min(state.task_scroll, len(lines) - body_height))
     segments: list[Segment] = []
     for offset, parts in enumerate(lines[state.task_scroll : state.task_scroll + body_height]):
@@ -1158,9 +1170,16 @@ def task_view_segments(
         return segments + status_segments
     action_hints = footer_action_hints(snapshot, row)
     position = f"{min(len(lines), state.task_scroll + body_height)}/{len(lines)}"
+    follow_hint = [("G", "following" if state.is_following else "follow")]
     key_sets = [
-        [(glyphs.select_keys, "scroll"), *action_hints, ("esc", "back"), (position, "")],
-        [*action_hints, ("esc", "back")],
+        [
+            (glyphs.select_keys, "scroll"),
+            *follow_hint,
+            *action_hints,
+            ("esc", "back"),
+            (position, ""),
+        ],
+        [*follow_hint, *action_hints, ("esc", "back")],
         [("esc", "back")],
     ]
     return segments + key_hint_segments(height - 1, width, key_sets)
@@ -1183,7 +1202,7 @@ def help_sections(glyphs: Glyphs) -> list[tuple[str, list[tuple[str, str]]]]:
             [
                 (glyphs.enter_key, "open details"),
                 ("p", "pick up its session"),
-                ("w", "watch its progress"),
+                ("w", "follow its live log"),
                 ("o", "open its pull request"),
                 ("c", "close (move to Done)"),
                 ("x", "cancel (if queued)"),
@@ -1286,7 +1305,12 @@ def board_frame(
     else:
         segments = board_view_segments(snapshot, width, height, state, glyphs, now)
     if state.view == VIEW_HELP:
-        segments += help_view_segments(width, height, glyphs)
+        backdrop = [
+            Segment(segment.y, segment.x, segment.text, STYLE_PLAIN, FAINT_COLOR)
+            for segment in segments
+            if segment.y < height - 1
+        ]
+        segments = backdrop + help_view_segments(width, height, glyphs)
     return clipped(segments, width, height)
 
 
@@ -1337,6 +1361,7 @@ def apply_filter_key(state: BoardState, key: int) -> None:
 
 
 def apply_task_key(state: BoardState, key: int, page_size: int) -> None:
+    state.is_following = key in LAST_KEYS or (state.is_following and key in DOWN_KEYS)
     if key in BACK_KEYS:
         state.view = VIEW_BOARD
     elif key in DOWN_KEYS | UP_KEYS:
@@ -1497,7 +1522,11 @@ def run_action(
     action: str,
     row: display.ListRow,
 ) -> None:
-    if action in {ACTION_PICKUP, ACTION_WATCH}:
+    if action == ACTION_WATCH:
+        state.view = VIEW_TASK
+        state.is_following = True
+        return
+    if action == ACTION_PICKUP:
         run_attached(screen, [*GOLEM_COMMAND, action, row.task_id])
         return
     if action == ACTION_COPY:
