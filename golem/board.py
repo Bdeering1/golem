@@ -32,9 +32,7 @@ BOX_BORDER_WIDTH = 4
 MIN_BOXED_CARD_WIDTH = 30
 TAB_LINE_Y = 1
 SPACED_HEIGHT = 24
-TALL_HEIGHT = 30
 DETAIL_LINE_COUNT = 3
-TALL_DETAIL_LINE_COUNT = 4
 MAX_DETAIL_LINE_COUNT = 6
 PRIMARY_LINE_COUNT = 2
 MARK_ONLY_WIDTH = 3
@@ -104,6 +102,7 @@ ESCAPE_SEQUENCE_KEYS = {
     **dict.fromkeys(("[4~", "[8~", "[F", "OF"), curses.KEY_END),
 }
 ESCAPE_SEQUENCE_FINAL_KEYS = range(0x40, 0x7F)
+ESCAPE_SEQUENCE_STARTS = "[O"
 ENTER_KEYS = {ord("\n"), ord("\r"), curses.KEY_ENTER}
 LEFT_KEYS = {ord("h"), curses.KEY_LEFT}
 RIGHT_KEYS = {ord("l"), curses.KEY_RIGHT}
@@ -482,7 +481,7 @@ def rows_by_column(
 def detail_line_count(height: int) -> int:
     if height < MIN_DETAIL_HEIGHT:
         return 1 if height >= MIN_SUMMARY_HEIGHT else 0
-    return TALL_DETAIL_LINE_COUNT if height >= TALL_HEIGHT else DETAIL_LINE_COUNT
+    return DETAIL_LINE_COUNT
 
 
 def card_style(row_count: int, body_height: int, *, can_box: bool, can_stack: bool) -> CardStyle:
@@ -761,6 +760,8 @@ def short_pull_request_text(pull_requests: list[ledger.PullRequest]) -> str:
     if len(pull_requests) == 1:
         return pull_request_text(pull_requests)
     states = Counter(pull_request["state"] for pull_request in pull_requests)
+    if len(states) > 1 and ledger.PULL_REQUEST_STATE_OPEN in states:
+        return f"{len(pull_requests)} PRs, {states[ledger.PULL_REQUEST_STATE_OPEN]} open"
     return "PRs " + ", ".join(f"{count} {state}" for state, count in states.items())
 
 
@@ -838,11 +839,7 @@ def card_detail(
         ]
         if short_reason.startswith(BUSY_DIRECTORY_TEXT) and time_text:
             busy_text = short_reason.replace(BUSY_DIRECTORY_TEXT, SHORT_BUSY_TEXT)
-            directory_name = short_reason.removeprefix(BUSY_DIRECTORY_TEXT).strip()
-            options += [
-                separator.join((time_text, busy_text)),
-                separator.join((time_text, directory_name)),
-            ]
+            options.append(separator.join((time_text, busy_text)))
         return next((option for option in options if len(option) <= width), options[-1])
     if not timed_facts:
         return reason
@@ -1436,6 +1433,8 @@ def detail_title_segments(
             (f" {short_when} " if when else " ", STYLE_DIM, None),
         ],
     ]
+    if when and not when.endswith(" ago") and when != short_when:
+        right_options[-1] = [(status_text[:2], STYLE_PLAIN, color), (f" {when} ", STYLE_DIM, None)]
     title_width = len(row.task_id) + 2 if is_id_shown else 0
     right_parts = next(
         (
@@ -2840,6 +2839,9 @@ def read_key(screen: curses.window) -> int:
     screen.timeout(0)
     sequence = ""
     while (char := screen.getch()) != -1:
+        if not sequence and chr(char) not in ESCAPE_SEQUENCE_STARTS:
+            curses.ungetch(char)
+            break
         sequence += chr(char)
         if len(sequence) > 1 and char in ESCAPE_SEQUENCE_FINAL_KEYS:
             break
