@@ -22,8 +22,6 @@ if TYPE_CHECKING:
     from types import FrameType
 
 MIN_COLUMN_WIDTH = 20
-MIN_UNFOCUSED_COLUMN_WIDTH = 25
-FOCUSED_COLUMN_WIDTH = 34
 HIDDEN_COLUMN_MARGIN = 2
 COLUMN_GAP = 2
 CARD_INDENT = 2
@@ -491,7 +489,7 @@ def attention_column_index(rows: list[display.ListRow]) -> int:
 
 
 def column_spans(
-    width: int, fit_count: int, column_count: int, first_index: int, focus_index: int
+    width: int, fit_count: int, column_count: int, first_index: int
 ) -> tuple[tuple[int, int], ...]:
     is_split = fit_count > 1
     left_margin = HIDDEN_COLUMN_MARGIN if is_split and first_index > 0 else 0
@@ -499,16 +497,7 @@ def column_spans(
     right_margin = HIDDEN_COLUMN_MARGIN if is_split and has_right_hidden else 0
     total_width = width - left_margin - right_margin - (fit_count - 1) * COLUMN_GAP
     widths = [total_width // fit_count] * fit_count
-    focus_offset = focus_index - first_index
-    if is_split and 0 <= focus_offset < fit_count:
-        floor_width = max(MIN_UNFOCUSED_COLUMN_WIDTH, min(widths[0], MIN_BOXED_CARD_WIDTH))
-        focused_width = max(
-            widths[0], min(FOCUSED_COLUMN_WIDTH, total_width - (fit_count - 1) * floor_width)
-        )
-        other_width = (total_width - focused_width) // (fit_count - 1)
-        widths = [
-            focused_width if offset == focus_offset else other_width for offset in range(fit_count)
-        ]
+    widths[-1] += total_width % fit_count
     spans: list[tuple[int, int]] = []
     x = left_margin
     for column_width in widths:
@@ -523,12 +512,11 @@ def board_layout(
     column_sizes: tuple[int, ...],
     *,
     first_index: int = 0,
-    focus_index: int = 0,
 ) -> BoardLayout:
     column_count = len(column_sizes)
     fit_count = min(column_count, max(1, (width + COLUMN_GAP) // (MIN_COLUMN_WIDTH + COLUMN_GAP)))
     first_index = min(first_index, column_count - fit_count)
-    spans = column_spans(width, fit_count, column_count, first_index, focus_index)
+    spans = column_spans(width, fit_count, column_count, first_index)
     spacer_row_count = 1 if height >= SPACED_HEIGHT else 0
     header_y = TAB_LINE_Y + spacer_row_count
     footer_y = height - (2 if fit_count == 1 else 1)
@@ -564,14 +552,12 @@ def board_layout(
 def snapshot_layout(
     snapshot: BoardSnapshot, width: int, height: int, state: BoardState
 ) -> BoardLayout:
-    sized_rows = snapshot.unfiltered_rows if state.is_filtering else snapshot.rows
-    columns = rows_by_column(sized_rows, is_showing_all=state.is_showing_all)
+    columns = rows_by_column(snapshot.rows, is_showing_all=state.is_showing_all)
     return board_layout(
         width,
         height,
         tuple(len(column_rows) for _, column_rows in columns),
         first_index=state.first_column_index,
-        focus_index=state.focus_index,
     )
 
 
@@ -632,7 +618,8 @@ def fitted_words(text: str, width: int, glyphs: Glyphs) -> str:
     head = text[: max(0, width - 1)]
     word_end = head.rfind(" ")
     is_word_cut = text[len(head)] != " "
-    if is_word_cut and word_end > 0 and len(head) - word_end <= MAX_WORD_SNAP:
+    is_label_kept = not head[:word_end].endswith(":")
+    if is_word_cut and is_label_kept and word_end > 0 and len(head) - word_end <= MAX_WORD_SNAP:
         head = head[:word_end]
     return head.rstrip(f" ,:{glyphs.separator}") + glyphs.ellipsis
 
@@ -780,7 +767,6 @@ def card_detail(
     glyphs: Glyphs,
     *,
     is_live: bool,
-    is_time_kept: bool = False,
 ) -> str:
     time_text, reason, short_reason, repository = facts
     separator = f" {glyphs.separator} "
@@ -803,8 +789,10 @@ def card_detail(
                 (time_text, short_reason),
             )
         ]
-        dependency = short_reason.removeprefix(WAITING_TEXT).strip()
-        options.append(separator.join((time_text, dependency)) if is_time_kept else short_reason)
+        if short_reason.startswith(WAITING_TEXT):
+            waiting_mark = glyphs.status_marks[ledger.STATUS_WAITING]
+            dependency = short_reason.removeprefix(WAITING_TEXT).strip()
+            options.append(f"{time_text} {waiting_mark} {dependency}")
         return next((option for option in options if len(option) <= width), options[-1])
     if not timed_facts:
         return reason
@@ -904,7 +892,6 @@ def card_segments(
         detail_text_width,
         glyphs,
         is_live=is_live,
-        is_time_kept=is_stuck(row, context.snapshot.tasks[row.task_id], now),
     )
     is_changed = row.task_id in changed_task_ids
     title_color = color if is_changed else (SELECTED_TITLE_COLOR if is_selected else None)
@@ -1220,7 +1207,9 @@ def summary_options(snapshot: BoardSnapshot, glyphs: Glyphs, now: datetime) -> l
     counts = {board_column.title: len(column_rows) for board_column, column_rows in columns.items()}
     review_statuses = [row.status for row in columns[BOARD_COLUMNS[2]]]
     running_count = counts[display.COLUMN_RUNNING]
-    running_mark = status_mark(ledger.STATUS_RUNNING, glyphs, now) if running_count else ""
+    running_mark = (
+        status_mark(ledger.STATUS_RUNNING, glyphs, now) if running_count else glyphs.spinner[0]
+    )
 
     items = [
         (running_mark, running_count, "running", ledger.STATUS_RUNNING, True),
@@ -1782,6 +1771,15 @@ def footer_segments(
         [*filter_hint, move_hint, *open_hint, next_hint, *action_hints, help_hint, quit_hint],
         [
             *filter_hint,
+            (move_hint[0], ""),
+            *open_hint,
+            next_hint,
+            *action_hints,
+            help_hint,
+            quit_hint,
+        ],
+        [
+            *filter_hint,
             move_hint,
             *open_hint,
             *action_hints,
@@ -2107,7 +2105,7 @@ def help_sections(glyphs: Glyphs) -> list[tuple[str, list[tuple[str, str]]]]:
             "Status",
             [
                 (glyphs.status_marks[ledger.STATUS_SCHEDULED], "scheduled"),
-                (glyphs.status_marks[ledger.STATUS_WAITING], "waiting on a step"),
+                (glyphs.status_marks[ledger.STATUS_WAITING], "waiting on another task"),
                 (glyphs.spinner[0], "running"),
                 (glyphs.status_marks[ledger.STATUS_BLOCKED], "blocked by its gate"),
                 (glyphs.status_marks[ledger.STATUS_FAILED], "failed"),
