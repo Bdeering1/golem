@@ -35,7 +35,6 @@ SPACED_HEIGHT = 24
 DETAIL_LINE_COUNT = 3
 MAX_DETAIL_LINE_COUNT = 6
 PRIMARY_LINE_COUNT = 2
-MARK_ONLY_WIDTH = 3
 MAX_WORD_SNAP = 3
 DAYS_PER_YEAR = 365
 MIN_WHOLE_HOURS = 6
@@ -51,6 +50,7 @@ INTERRUPTED_EXIT_STATUS = 130
 MIN_COLOR_COUNT = 256
 MUTED_COLOR = 245
 FAINT_COLOR = 239
+REMEMBERED_COLOR = 237
 SELECTION_BACKGROUND = 238
 SELECTED_MUTED_COLOR = 250
 SELECTED_TITLE_COLOR = 255
@@ -310,6 +310,7 @@ PAIR_COLORS = sorted(
         *(column.color for column in BOARD_COLUMNS),
         MUTED_COLOR,
         FAINT_COLOR,
+        REMEMBERED_COLOR,
         SELECTED_MUTED_COLOR,
         SELECTED_TITLE_COLOR,
     }
@@ -1151,7 +1152,7 @@ def column_segments(
         card_y = layout.body_top + card_index * style.pitch
         if not is_focused and scroll_offset + card_index == state.selected_indices[column_index]:
             segments.append(
-                Segment(card_y, x - RAIL_WIDTH, glyphs.remembered_marker, color=FAINT_COLOR)
+                Segment(card_y, x - RAIL_WIDTH, glyphs.remembered_marker, color=REMEMBERED_COLOR)
             )
         if style.is_boxed:
             segments += boxed_card_segments(
@@ -1437,7 +1438,7 @@ def detail_segments(
     line_width = width - 1
     text_width = line_width - CARD_INDENT
     lines: list[tuple[str, str]] = []
-    is_id_in_title = row is not None and is_id_in_rule(row.task_id, line_width)
+    is_id_in_title = row is not None and is_id_in_rule(row, line_width, context)
     id_lines: list[str] = []
     if row is not None and not is_id_in_title:
         id_lines = textwrap.wrap(row.task_id, text_width)
@@ -1455,8 +1456,14 @@ def detail_segments(
     return segments
 
 
-def is_id_in_rule(task_id: str, line_width: int) -> bool:
-    return CARD_INDENT + len(task_id) + 2 + MARK_ONLY_WIDTH + 2 <= line_width
+def compact_status_text(row: display.ListRow, context: FrameContext) -> str:
+    label, when = status_label_and_when(row, context.snapshot.tasks[row.task_id], context.now)
+    return when.removesuffix(" ago") or label
+
+
+def is_id_in_rule(row: display.ListRow, line_width: int, context: FrameContext) -> bool:
+    compact_width = len(compact_status_text(row, context)) + 4
+    return CARD_INDENT + len(row.task_id) + 2 + compact_width + 2 <= line_width
 
 
 def detail_title_segments(
@@ -1477,20 +1484,13 @@ def detail_title_segments(
     label, when = status_label_and_when(row, task, now)
     status_text = f" {status_mark(row.status, glyphs, now)} {label}"
     when_text_part = f" {glyphs.separator} {when}" if when else ""
-    short_when = coarse_time_text(when.removesuffix(" ago"))
     right_options: list[list[Part]] = [
         [(status_text, STYLE_PLAIN, color), (f"{when_text_part} ", STYLE_DIM, None)],
         [
             (status_text[:2], STYLE_PLAIN, color),
-            (f" {short_when or label} ", STYLE_DIM, None),
+            (f" {compact_status_text(row, context)} ", STYLE_DIM, None),
         ],
     ]
-    full_when = when.removesuffix(" ago")
-    if full_when != short_when:
-        right_options[-1] = [
-            (status_text[:2], STYLE_PLAIN, color),
-            (f" {full_when} ", STYLE_DIM, None),
-        ]
     title_width = len(row.task_id) + 2 if is_id_shown else 0
     right_parts = next(
         (
