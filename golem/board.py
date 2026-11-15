@@ -155,6 +155,7 @@ LIVE_STATUSES = {ledger.STATUS_SCHEDULED, ledger.STATUS_RUNNING}
 EXIT_PREFIX_PATTERN = re.compile(r"^[^:]{1,40} exited (?:with status )?\d+:\s*")
 PATH_PREFIX_PATTERN = re.compile(r"[~/]\S*/")
 PATH_DIRECTORY_PATTERN = re.compile(r"(?<!\S)\S*/(?=\S)")
+COMMAND_OPTION_PATTERN = re.compile(r" --?[A-Za-z][\w-]*(?:=\S*)?(?=\s|$)")
 COMMAND_RUNNER_PATTERN = re.compile(
     r"^\$ (?:uv run|poetry run|pipenv run|npx|bunx|pnpm exec|bundle exec) "
 )
@@ -815,17 +816,18 @@ def short_reason_text(row: display.ListRow, reason: str, snapshot: BoardSnapshot
     return reason
 
 
+def card_activity_text(entry: str, glyphs: Glyphs) -> str:
+    text = COMMAND_RUNNER_PATTERN.sub("$ ", activity_text(entry, glyphs))
+    if text.startswith("$ "):
+        text = COMMAND_OPTION_PATTERN.sub("", text)
+    return PATH_DIRECTORY_PATTERN.sub("", text)
+
+
 def card_facts(row: display.ListRow, context: FrameContext) -> tuple[str, str, str, str]:
     snapshot, glyphs, now = context.snapshot, context.glyphs, context.now
     task = snapshot.tasks[row.task_id]
     activity = snapshot.activity.get(row.task_id)
-    reason = (
-        PATH_DIRECTORY_PATTERN.sub(
-            "", COMMAND_RUNNER_PATTERN.sub("$ ", activity_text(activity[-1], glyphs))
-        )
-        if activity
-        else row_reason(row, snapshot)
-    )
+    reason = card_activity_text(activity[-1], glyphs) if activity else row_reason(row, snapshot)
     if row.task_id in context.checking_task_ids:
         reason = GATE_CHECK_TEXT
     if row.status == ledger.STATUS_SCHEDULED:
