@@ -153,9 +153,13 @@ BOARD_STATUS_ORDER = (
 LIVE_STATUSES = {ledger.STATUS_SCHEDULED, ledger.STATUS_RUNNING}
 EXIT_PREFIX_PATTERN = re.compile(r"^[^:]{1,40} exited (?:with status )?\d+:\s*")
 PATH_PREFIX_PATTERN = re.compile(r"[~/]\S*/")
+COMMAND_RUNNER_PATTERN = re.compile(
+    r"^\$ (?:uv run|poetry run|pipenv run|npx|bunx|pnpm exec|bundle exec) "
+)
 SHORT_REASON_PATTERNS = (
     (re.compile(r"^(?:fatal|error): "), ""),
     (re.compile(r"a branch named '[^']+' already exists"), "branch exists"),
+    (re.compile(r"\b(\w+) found (\d+)"), r"\1: \2"),
 )
 GATE_COUNT_PATTERN = re.compile(r"(\d+) failed, (\d+) passed")
 DURATION_PART_PATTERN = re.compile(r"(\d+)([a-z])")
@@ -219,6 +223,7 @@ class Glyphs(NamedTuple):
     horizontal: str
     heavy_horizontal: str
     focus_marker: str
+    remembered_marker: str
     ellipsis: str
     separator: str
     up: str
@@ -323,6 +328,7 @@ UNICODE_GLYPHS = Glyphs(
     horizontal="─",
     heavy_horizontal="━",
     focus_marker="▌",
+    remembered_marker="▏",
     ellipsis="…",
     separator="·",
     up="↑",
@@ -354,6 +360,7 @@ ASCII_GLYPHS = Glyphs(
     horizontal="-",
     heavy_horizontal="=",
     focus_marker=">",
+    remembered_marker="'",
     ellipsis="~",
     separator="|",
     up="^",
@@ -789,7 +796,11 @@ def card_facts(row: display.ListRow, context: FrameContext) -> tuple[str, str, s
     snapshot, glyphs, now = context.snapshot, context.glyphs, context.now
     task = snapshot.tasks[row.task_id]
     activity = snapshot.activity.get(row.task_id)
-    reason = activity_text(activity[-1], glyphs) if activity else row_reason(row, snapshot)
+    reason = (
+        COMMAND_RUNNER_PATTERN.sub("$ ", activity_text(activity[-1], glyphs))
+        if activity
+        else row_reason(row, snapshot)
+    )
     if row.task_id in context.checking_task_ids:
         reason = GATE_CHECK_TEXT
     if row.status == ledger.STATUS_SCHEDULED:
@@ -1139,7 +1150,9 @@ def column_segments(
         )
         card_y = layout.body_top + card_index * style.pitch
         if not is_focused and scroll_offset + card_index == state.selected_indices[column_index]:
-            segments.append(Segment(card_y, x - RAIL_WIDTH, glyphs.focus_marker, color=FAINT_COLOR))
+            segments.append(
+                Segment(card_y, x - RAIL_WIDTH, glyphs.remembered_marker, color=FAINT_COLOR)
+            )
         if style.is_boxed:
             segments += boxed_card_segments(
                 card_y, x, column_width, row, context, is_selected=is_selected
@@ -2266,6 +2279,15 @@ def help_sections(glyphs: Glyphs) -> list[tuple[str, list[tuple[str, str]]]]:
             ],
         ),
         (
+            "Board",
+            [
+                ("/", "filter tasks"),
+                ("a", "show or hide Done"),
+                ("?", "this help"),
+                ("q", "quit"),
+            ],
+        ),
+        (
             "Task",
             [
                 (glyphs.enter_key, "open details"),
@@ -2277,15 +2299,6 @@ def help_sections(glyphs: Glyphs) -> list[tuple[str, list[tuple[str, str]]]]:
                 ("C", "close all finished"),
                 ("x", "cancel (if queued)"),
                 ("y", "copy its id"),
-            ],
-        ),
-        (
-            "Board",
-            [
-                ("/", "filter tasks"),
-                ("a", "show or hide Done"),
-                ("?", "this help"),
-                ("q", "quit"),
             ],
         ),
         (
