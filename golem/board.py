@@ -540,6 +540,10 @@ def column_spans(
     return tuple(spans)
 
 
+def fitting_column_count(width: int) -> int:
+    return max(1, (width + COLUMN_GAP) // (MIN_COLUMN_WIDTH + COLUMN_GAP))
+
+
 def board_layout(
     width: int,
     height: int,
@@ -548,7 +552,7 @@ def board_layout(
     first_index: int = 0,
 ) -> BoardLayout:
     column_count = len(column_sizes)
-    fit_count = min(column_count, max(1, (width + COLUMN_GAP) // (MIN_COLUMN_WIDTH + COLUMN_GAP)))
+    fit_count = min(column_count, fitting_column_count(width))
     first_index = min(first_index, column_count - fit_count)
     spans = column_spans(width, fit_count, column_count, first_index)
     spacer_row_count = 1 if height >= SPACED_HEIGHT else 0
@@ -2245,7 +2249,9 @@ def task_view_segments(
         [(glyphs.horizontal * content_width, STYLE_PLAIN, display.STATUS_COLORS[row.status])],
     ]
     lines = task_view_lines(row, content_width, snapshot, glyphs, now)
-    body_height = max(1, height - 1 - len(header_lines))
+    is_two_line_footer = fitting_column_count(width) <= MAX_TWO_LINE_FOOTER_COLUMN_COUNT
+    footer_y = height - (2 if is_two_line_footer else 1)
+    body_height = max(1, footer_y - len(header_lines))
     if state.is_following:
         state.task_scroll = len(lines)
     state.task_scroll = max(0, min(state.task_scroll, len(lines) - body_height))
@@ -2253,8 +2259,8 @@ def task_view_segments(
     segments: list[Segment] = []
     for offset, parts in enumerate(shown_lines):
         segments += part_segments(offset, 0, parts)
-    status_segments = status_line_segments(height - 1, width, state, row, glyphs, snapshot)
-    if status_segments is not None:
+    status_segments = status_line_segments(footer_y, width, state, row, glyphs, snapshot)
+    if status_segments is not None and (not is_two_line_footer or state.pending_action):
         return segments + status_segments
     action_hints = [
         hint
@@ -2280,6 +2286,24 @@ def task_view_segments(
     core_action_hints = [hint for hint in action_hints if hint[0] != ACTION_KEYS[ACTION_COPY]]
     bare_action_hints = [(key, "") for key, _ in core_action_hints]
     bare_action_sets = [[*bare_scroll_hints, *short_step_hint, *follow_hint, *bare_action_hints]]
+    if is_two_line_footer:
+        action_segments = status_segments or key_hint_segments(
+            footer_y,
+            width,
+            [
+                [*follow_hint, *action_hints],
+                [*follow_hint, *core_action_hints],
+                [*follow_hint, *bare_action_hints],
+            ],
+        )
+        navigation_sets = [
+            [*scroll_hints, *step_hint, ("esc", "back"), *position_hints],
+            [*bare_scroll_hints, *step_hint, ("esc", "back")],
+            [*bare_scroll_hints, *short_step_hint, ("esc", "back")],
+            [*short_step_hint, ("esc", "back")],
+            [("esc", "back")],
+        ]
+        return segments + action_segments + key_hint_segments(height - 1, width, navigation_sets)
     key_sets = [
         [*scroll_hints, *step_hint, *follow_hint, *action_hints, ("esc", "back"), *position_hints],
         [*scroll_hints, *step_hint, *follow_hint, *action_hints, ("esc", "back")],
