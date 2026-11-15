@@ -13,7 +13,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, NamedTuple, override
 
 from golem import chains, display, ledger, progress_log, review
 
@@ -704,6 +704,14 @@ def row_when_text(row: display.ListRow, task: ledger.Task, now: datetime) -> str
     return when_text(task, now)
 
 
+def status_label_and_when(
+    row: display.ListRow, task: ledger.Task, now: datetime
+) -> tuple[str, str]:
+    if is_stuck(row, task, now):
+        return row_when_text(row, task, now), ""
+    return row.status, row_when_text(row, task, now)
+
+
 def activity_text(line: str, glyphs: Glyphs) -> str:
     shell_prefix = next((prefix for prefix in SHELL_LINE_PREFIXES if line.startswith(prefix)), None)
     if shell_prefix is not None:
@@ -724,7 +732,8 @@ def pull_request_text(pull_requests: list[ledger.PullRequest]) -> str:
 def row_reason(row: display.ListRow, snapshot: BoardSnapshot) -> str:
     task = snapshot.tasks[row.task_id]
     if row.status in {ledger.STATUS_SCHEDULED, ledger.STATUS_RUNNING}:
-        return display.list_reason(task).replace(str(Path.home()), "~")
+        reason = display.list_reason(task).replace(str(Path.home()), "~")
+        return reason.replace(WAITING_DIRECTORY_TEXT, BUSY_DIRECTORY_TEXT)
     if row.status == ledger.STATUS_WAITING:
         return f"after {row.detail}" if row.detail else ""
     if row.status != ledger.STATUS_FINISHED:
@@ -818,13 +827,8 @@ def card_detail(
                 (time_text, short_reason),
             )
         ]
-        if short_reason.startswith(BUSY_DIRECTORY_TEXT):
-            dependency = short_reason.removeprefix(BUSY_DIRECTORY_TEXT).strip()
-            busy_texts = (f"{dependency} busy", BUSY_DIRECTORY_TEXT.rstrip(":"))
-            options += [
-                separator.join(part for part in (time_text, busy_text) if part)
-                for busy_text in busy_texts
-            ]
+        if short_reason.startswith(BUSY_DIRECTORY_TEXT) and time_text:
+            options.append(separator.join((time_text, BUSY_DIRECTORY_TEXT.rstrip(":"))))
         return next((option for option in options if len(option) <= width), options[-1])
     if not timed_facts:
         return reason
@@ -891,6 +895,7 @@ def card_title_style(row: display.ListRow, context: FrameContext, *, is_selected
         row.status in LOUD_STATUSES
         or row.task_id in context.changed_task_ids
         or is_new_for_review(context.snapshot, row)
+        or is_stuck(row, context.snapshot.tasks[row.task_id], context.now)
     )
     return (
         STYLE_BOLD
@@ -1388,8 +1393,8 @@ def detail_title_segments(
         return [*segments, Segment(rule_y, CARD_INDENT, " No task selected ", STYLE_DIM)]
     task = snapshot.tasks[row.task_id]
     color, _ = card_colors(row, context, is_selected=True)
-    status_text = f" {status_mark(row.status, glyphs, now)} {row.status}"
-    when = row_when_text(row, task, now)
+    label, when = status_label_and_when(row, task, now)
+    status_text = f" {status_mark(row.status, glyphs, now)} {label}"
     when_text_part = f" {glyphs.separator} {when}" if when else ""
     short_when = coarse_time_text(when.removesuffix(" ago"))
     right_options: list[list[Part]] = [
@@ -1490,8 +1495,8 @@ def task_heading_parts(
 ) -> list[Part]:
     task = snapshot.tasks[row.task_id]
     color = display.STATUS_COLORS[row.status]
-    status_text = f"  {status_mark(row.status, glyphs, now)} {row.status}"
-    when = row_when_text(row, task, now)
+    label, when = status_label_and_when(row, task, now)
+    status_text = f"  {status_mark(row.status, glyphs, now)} {label}"
     facts = [text for text in (when, f"step {row.step}" if row.step else "") if text]
     facts_text = f" {glyphs.separator} ".join(facts)
     facts_text = f"  {facts_text}" if facts_text else ""
@@ -2037,13 +2042,19 @@ def task_fields(
     return [(label, value) for label, value in fields if value]
 
 
+class PathWrapper(textwrap.TextWrapper):
+    @override
+    def _split(self, text: str) -> list[str]:
+        return [chunk for chunk in re.split(r"(\s+)|(?<=/)", text) if chunk]
+
+
 def field_lines(fields: list[tuple[str, str]], width: int) -> list[list[Part]]:
     if not fields:
         return []
     label_width = max(len(label) for label, _ in fields) + 2
     lines: list[list[Part]] = []
     for label, value in fields:
-        value_lines = textwrap.wrap(value, max(1, width - label_width)) or [""]
+        value_lines = PathWrapper(max(1, width - label_width)).wrap(value) or [""]
         lines.append(
             [(label.ljust(label_width), STYLE_DIM, None), (value_lines[0], STYLE_PLAIN, None)]
         )
