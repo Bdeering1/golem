@@ -417,15 +417,15 @@ def test_board_keys_switch_columns_and_select_tasks(pty_board, keys):
     tasks = statuses_tasks() | running_tasks()
     running_board = pty_board(tasks=tasks)
 
-    running_board.send(right)
+    running_board.send(left)
     running_board.wait_until(lambda: running_board.selected_task_id() == ledger.STATUS_RUNNING)
     running_board.send(down)
     running_board.wait_until(lambda: running_board.selected_task_id() == "task-00")
     running_board.send(up)
     running_board.wait_until(lambda: running_board.selected_task_id() == ledger.STATUS_RUNNING)
-    running_board.send(left)
+    running_board.send(right)
 
-    running_board.wait_until(lambda: running_board.is_focused("Queued"))
+    running_board.wait_until(lambda: running_board.is_focused("Review"))
 
 
 @pytest.mark.parametrize("is_color", [True, False])
@@ -494,3 +494,20 @@ def test_board_filter_narrows_cards_and_escape_clears_it():
 
     assert filtered_ids == ["task-03"]
     assert board.filtered_snapshot(snapshot, state).rows == snapshot.rows
+
+
+@pytest.mark.parametrize(
+    ("statuses", "focused_title"),
+    [
+        ((ledger.STATUS_SCHEDULED, ledger.STATUS_RUNNING, ledger.STATUS_BLOCKED), "Review"),
+        ((ledger.STATUS_SCHEDULED, ledger.STATUS_RUNNING), "Running"),
+        ((ledger.STATUS_SCHEDULED,), "Queued"),
+    ],
+)
+def test_board_starts_on_the_column_that_needs_attention(statuses, focused_title):
+    tasks = {status: support.task_record(status, task_id=status) for status in statuses}
+    rows = board.board_snapshot(tasks, NOW).rows
+
+    column_index = board.attention_column_index(rows)
+
+    assert board.BOARD_COLUMNS[column_index].title == focused_title

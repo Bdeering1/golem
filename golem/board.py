@@ -364,6 +364,16 @@ def detail_line_count(height: int) -> int:
     return max(MIN_DETAIL_LINE_COUNT, min(MAX_DETAIL_LINE_COUNT, height // DETAIL_HEIGHT_DIVISOR))
 
 
+def attention_column_index(rows: list[display.ListRow]) -> int:
+    columns = rows_by_column(rows, is_showing_all=False)
+    attention_order = (display.COLUMN_REVIEW, display.COLUMN_RUNNING, display.COLUMN_QUEUED)
+    titles = [board_column.title for board_column, _ in columns]
+    for title in attention_order:
+        if columns[titles.index(title)][1]:
+            return titles.index(title)
+    return 0
+
+
 def board_layout(width: int, height: int, column_count: int) -> BoardLayout:
     fit_count = min(column_count, max(1, (width + COLUMN_GAP) // (MIN_COLUMN_WIDTH + COLUMN_GAP)))
     column_width = (width - (fit_count - 1) * COLUMN_GAP) // fit_count
@@ -1539,7 +1549,10 @@ def board_loop(screen: curses.window, *, is_color: bool, glyphs: Glyphs) -> int:
         now = datetime.now().astimezone()
         source_key = (file_stat(task_ledger_path), progress_stats(snapshot), now.date())
         if source_key != shown_source_key:
+            is_first_load = shown_source_key is None and not snapshot.unfiltered_rows
             snapshot = board_snapshot(ledger.load_tasks(), now)
+            if is_first_load:
+                state.focus_index = attention_column_index(snapshot.rows)
             shown_source_key = (source_key[0], progress_stats(snapshot), now.date())
         if screen.getmaxyx() != shown_size:
             shown_size = screen.getmaxyx()
