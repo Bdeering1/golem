@@ -152,6 +152,7 @@ BOARD_STATUS_ORDER = (
 LIVE_STATUSES = {ledger.STATUS_SCHEDULED, ledger.STATUS_RUNNING}
 EXIT_PREFIX_PATTERN = re.compile(r"^[^:]{1,40} exited (?:with status )?\d+:\s*")
 PATH_PREFIX_PATTERN = re.compile(r"[~/]\S*/")
+PATH_DIRECTORY_PATTERN = re.compile(r"(?<!\S)\S*/(?=\S)")
 COMMAND_RUNNER_PATTERN = re.compile(
     r"^\$ (?:uv run|poetry run|pipenv run|npx|bunx|pnpm exec|bundle exec) "
 )
@@ -811,7 +812,9 @@ def card_facts(row: display.ListRow, context: FrameContext) -> tuple[str, str, s
     task = snapshot.tasks[row.task_id]
     activity = snapshot.activity.get(row.task_id)
     reason = (
-        COMMAND_RUNNER_PATTERN.sub("$ ", activity_text(activity[-1], glyphs))
+        PATH_DIRECTORY_PATTERN.sub(
+            "", COMMAND_RUNNER_PATTERN.sub("$ ", activity_text(activity[-1], glyphs))
+        )
         if activity
         else row_reason(row, snapshot)
     )
