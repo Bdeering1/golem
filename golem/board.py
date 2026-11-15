@@ -451,7 +451,13 @@ def board_sort_key(row: display.ListRow, tasks: ledger.Tasks) -> tuple[int, int,
 
 
 def board_snapshot(tasks: ledger.Tasks, now: datetime) -> BoardSnapshot:
-    rows = sorted(display.list_rows(tasks, now.date()), key=lambda row: board_sort_key(row, tasks))
+    rows = sorted(
+        (
+            row._replace(column=display.COLUMN_DONE) if row.column is None else row
+            for row in display.list_rows(tasks, now.date())
+        ),
+        key=lambda row: board_sort_key(row, tasks),
+    )
     activity = {
         row.task_id: recent_activity(tasks[row.task_id]["session_id"])
         for row in rows
@@ -745,6 +751,8 @@ def row_reason(row: display.ListRow, snapshot: BoardSnapshot) -> str:
         return reason.replace(WAITING_DIRECTORY_TEXT, BUSY_DIRECTORY_TEXT)
     if row.status == ledger.STATUS_WAITING:
         return f"after {row.detail}" if row.detail else ""
+    if row.status == ledger.STATUS_CANCELLED:
+        return row.detail or ledger.STATUS_CANCELLED
     if row.status != ledger.STATUS_FINISHED:
         return row.detail
     pull_requests = chain_pull_requests(snapshot, row.task_id)
@@ -1651,6 +1659,8 @@ def detail_reason_text(row: display.ListRow, snapshot: BoardSnapshot) -> str:
         return task.get("gate_stop_reason") or task.get("setup_failure_reason") or row.detail
     if row.status in {ledger.STATUS_SCHEDULED, ledger.STATUS_WAITING}:
         return waiting_reason_text(row, snapshot)
+    if row.status == ledger.STATUS_CANCELLED:
+        return row.detail
     result = task.get("result", "").strip()
     if row.status == ledger.STATUS_FINISHED and result:
         return f"{row_reason(row, snapshot)}\n{result}"

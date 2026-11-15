@@ -182,7 +182,7 @@ def test_board_shows_as_many_columns_as_fit(width, shown_titles, has_tabs):
     [
         pytest.param(46, 2, "←   Running 1", "→", id="both-sides"),
         pytest.param(40, 1, "← Queued 2  ▌ Running 1", "Review  Done →", id="drops-counts"),
-        pytest.param(28, 3, "← +2  Review 3", "▌ Done 0", id="folds-left"),
+        pytest.param(28, 3, "← +2  Review 3", "▌ Done 1", id="folds-left"),
         pytest.param(28, 0, "▌ Queued 2", "Running 1  +2 →", id="right-only"),
     ],
 )
