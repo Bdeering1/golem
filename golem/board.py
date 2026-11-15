@@ -2,6 +2,7 @@ import contextlib
 import curses
 import locale
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -34,6 +35,7 @@ DAYS_PER_YEAR = 365
 NARROW_DETAIL_LINE_COUNT = 4
 DETAIL_HEIGHT_DIVISOR = 6
 MIN_DETAIL_HEIGHT = 20
+MIN_SUMMARY_HEIGHT = 14
 TICK_MILLISECONDS = 250
 ESCAPE_DELAY_MILLISECONDS = 25
 FLASH_SECONDS = 3
@@ -123,7 +125,9 @@ ACTION_LABELS = {
 ACTION_DONE_VERBS = {ACTION_CLOSE: "Closed", ACTION_CANCEL: "Cancelled"}
 FOOTER_HIDDEN_ACTIONS = {ACTION_COPY}
 STOPPED_STATUSES = {ledger.STATUS_BLOCKED, ledger.STATUS_FAILED}
-REASON_FIRST_STATUSES = {*STOPPED_STATUSES, ledger.STATUS_WAITING}
+LIVE_STATUSES = {ledger.STATUS_SCHEDULED, ledger.STATUS_RUNNING}
+EXIT_PREFIX_PATTERN = re.compile(r"^[^:]{1,40} exited (?:with status )?\d+:\s*")
+PATH_PREFIX_PATTERN = re.compile(r"[~/]\S*/")
 LOUD_STATUSES = {*STOPPED_STATUSES, ledger.STATUS_RUNNING}
 PICKUP_STATUSES = {ledger.STATUS_BLOCKED, ledger.STATUS_FAILED, ledger.STATUS_FINISHED}
 CANCEL_STATUSES = {ledger.STATUS_SCHEDULED, ledger.STATUS_WAITING}
@@ -205,6 +209,7 @@ class BoardLayout(NamedTuple):
     body_top: int
     body_height: int
     detail_line_count: int
+    footer_y: int
     card_pitch: int = CARD_PITCH
 
     @property
@@ -391,7 +396,7 @@ def rows_by_column(
 
 def detail_line_count(height: int) -> int:
     if height < MIN_DETAIL_HEIGHT:
-        return 0
+        return 1 if height >= MIN_SUMMARY_HEIGHT else 0
     return max(MIN_DETAIL_LINE_COUNT, min(MAX_DETAIL_LINE_COUNT, height // DETAIL_HEIGHT_DIVISOR))
 
 
@@ -410,23 +415,28 @@ def board_layout(
 ) -> BoardLayout:
     fit_count = min(column_count, max(1, (width + COLUMN_GAP) // (MIN_COLUMN_WIDTH + COLUMN_GAP)))
     column_width = (width - (fit_count - 1) * COLUMN_GAP) // fit_count
-    header_y = TAB_LINE_Y + 1 if 1 < fit_count < column_count else TAB_LINE_Y
-    free_row_count = height - 1 - header_y - 2
+    header_y = TAB_LINE_Y
+    footer_y = height - (2 if fit_count == 1 else 1)
+    free_row_count = footer_y - header_y - 2
     roomy_row_count = largest_column_size * CARD_PITCH
     compact_row_count = largest_column_size * COMPACT_CARD_PITCH
     line_count = detail_line_count(height)
     if fit_count == 1:
         line_count = min(line_count, NARROW_DETAIL_LINE_COUNT)
-    if line_count and free_row_count - roomy_row_count - 1 >= SHRUNK_DETAIL_LINE_COUNT:
-        line_count = min(GROWN_DETAIL_LINE_COUNT, free_row_count - roomy_row_count - 1)
-    elif line_count and free_row_count - compact_row_count - 1 >= SHRUNK_DETAIL_LINE_COUNT:
-        line_count = min(line_count, free_row_count - compact_row_count - 1)
+    roomy_spare_count = free_row_count - roomy_row_count - 1
+    compact_spare_count = free_row_count - compact_row_count - 1
+    if line_count and roomy_spare_count >= MAX_DETAIL_LINE_COUNT:
+        line_count = min(GROWN_DETAIL_LINE_COUNT, roomy_spare_count)
+    elif line_count and compact_spare_count >= min(line_count, SHRUNK_DETAIL_LINE_COUNT):
+        line_count = min(GROWN_DETAIL_LINE_COUNT, compact_spare_count)
     detail_height = line_count + 1 if line_count else 0
     is_roomy = roomy_row_count <= free_row_count - detail_height
     body_top = header_y + 2 + (1 if is_roomy else 0)
-    body_height = height - 1 - detail_height - body_top
+    body_height = footer_y - detail_height - body_top
     pitch = CARD_PITCH if is_roomy else COMPACT_CARD_PITCH
-    return BoardLayout(fit_count, column_width, header_y, body_top, body_height, line_count, pitch)
+    return BoardLayout(
+        fit_count, column_width, header_y, body_top, body_height, line_count, footer_y, pitch
+    )
 
 
 def snapshot_layout(
@@ -565,6 +575,8 @@ def card_detail(row: display.ListRow, context: FrameContext, width: int) -> str:
     task = snapshot.tasks[row.task_id]
     activity = snapshot.activity.get(row.task_id)
     reason = activity_text(activity[-1], glyphs) if activity else row_reason(row, snapshot)
+    if row.status == ledger.STATUS_SCHEDULED:
+        reason = PATH_PREFIX_PATTERN.sub("", reason)
     repository = Path(row.directory).name
     if row.status in {ledger.STATUS_SCHEDULED, ledger.STATUS_RUNNING}:
         time_text = when_text(task, now)
@@ -576,12 +588,19 @@ def card_detail(row: display.ListRow, context: FrameContext, width: int) -> str:
     facts = separator.join(part for part in (time_text, repository) if part)
     if not reason:
         return facts
-    if row.status in REASON_FIRST_STATUSES:
+    if row.status not in LIVE_STATUSES:
+        short_reason = EXIT_PREFIX_PATTERN.sub("", reason)
         options = [
             separator.join(part for part in parts if part)
-            for parts in ((time_text, repository, reason), (time_text, reason))
+            for parts in (
+                (time_text, repository, reason),
+                (time_text, reason),
+                (reason,),
+                (time_text, short_reason),
+                (short_reason,),
+            )
         ]
-        return next((option for option in options if len(option) <= width), reason)
+        return next((option for option in options if len(option) <= width), short_reason)
     if not facts:
         return reason
     if width - len(facts) - len(separator) < MIN_CARD_REASON_WIDTH:
@@ -662,11 +681,6 @@ def column_segments(
     rule = glyphs.heavy_horizontal if is_focused else glyphs.horizontal
     rule_color = board_column.color if is_focused else FAINT_COLOR
     segments = [Segment(layout.header_y + 1, x, rule * layout.column_width, color=rule_color)]
-    if layout.fit_count > 1:
-        header_parts = column_header_parts(
-            board_column, len(column_rows), glyphs, is_focused=is_focused
-        )
-        segments += part_segments(layout.header_y, x, header_parts)
     if not context.snapshot.rows:
         return segments
     if not column_rows:
@@ -688,6 +702,42 @@ def column_segments(
         segments += card_segments(
             card_y, x, layout.column_width, row, context, is_selected=is_selected
         )
+    return segments
+
+
+def fitting_parts(options: list[list[Part]], width: int) -> list[Part]:
+    return next((option for option in options if parts_width(option) <= width), options[-1])
+
+
+def header_row_segments(
+    layout: BoardLayout,
+    columns: list[tuple[BoardColumn, list[display.ListRow]]],
+    state: BoardState,
+    glyphs: Glyphs,
+) -> list[Segment]:
+    last_index = state.first_column_index + layout.fit_count - 1
+    left_hidden, right_hidden = columns[: state.first_column_index], columns[last_index + 1 :]
+    segments: list[Segment] = []
+    for offset in range(layout.fit_count):
+        column_index = state.first_column_index + offset
+        board_column, column_rows = columns[column_index]
+        column_x = offset * (layout.column_width + COLUMN_GAP)
+        header_parts = column_header_parts(
+            board_column, len(column_rows), glyphs, is_focused=column_index == state.focus_index
+        )
+        room = layout.column_width - parts_width(header_parts) - 2
+        header_x = column_x
+        if offset == 0 and left_hidden:
+            left_parts = fitting_parts(hidden_side_options(left_hidden, glyphs, is_left=True), room)
+            segments += part_segments(layout.header_y, column_x, left_parts)
+            header_x += parts_width(left_parts) + 2
+        segments += part_segments(layout.header_y, header_x, header_parts)
+        if column_index == last_index and right_hidden:
+            right_parts = fitting_parts(
+                hidden_side_options(right_hidden, glyphs, is_left=False), room
+            )
+            right_x = column_x + layout.column_width - parts_width(right_parts)
+            segments += part_segments(layout.header_y, right_x, right_parts)
     return segments
 
 
@@ -749,13 +799,15 @@ def hidden_side_options(
     is_left: bool,
 ) -> list[list[Part]]:
     options: list[list[Part]] = []
-    for shown_count in range(len(hidden_columns), -1, -1):
+    counted_shapes = [(len(hidden_columns), True)]
+    counted_shapes += [(shown_count, False) for shown_count in range(len(hidden_columns), -1, -1)]
+    for shown_count, is_counted in counted_shapes:
         folded_count = len(hidden_columns) - shown_count
         shown_columns = hidden_columns[folded_count:] if is_left else hidden_columns[:shown_count]
         labels: list[list[Part]] = [
             [
                 (board_column.title, STYLE_PLAIN, board_column.color),
-                (f" {len(column_rows)}", STYLE_DIM, None),
+                (f" {len(column_rows)}" if is_counted else "", STYLE_DIM, None),
             ]
             for board_column, column_rows in shown_columns
         ]
@@ -825,7 +877,7 @@ def summary_options(snapshot: BoardSnapshot, glyphs: Glyphs, now: datetime) -> l
     review_statuses = [row.status for row in columns[BOARD_COLUMNS[2]]]
     running_count = counts[display.COLUMN_RUNNING]
     running_mark = (
-        status_mark(ledger.STATUS_RUNNING, glyphs, now) if running_count else glyphs.spinner[0]
+        status_mark(ledger.STATUS_RUNNING, glyphs, now) if running_count else glyphs.separator
     )
     items = [
         (running_mark, running_count, "running", ledger.STATUS_RUNNING, True),
@@ -877,11 +929,9 @@ def title_segments(
     right_style = STYLE_BOLD if state.filter_text else STYLE_DIM
     right_color = BOARD_COLUMNS[1].color if state.filter_text else None
     title_parts: list[Part] = [(BOARD_TITLE, STYLE_BOLD, None)]
-    options = [
-        (option, shown_right_text)
-        for option in summary_options(snapshot, glyphs, now)
-        for shown_right_text in (right_text, "")
-    ]
+    summaries = summary_options(snapshot, glyphs, now)
+    options = [(option, right_text) for option in summaries]
+    options += [(option, "") for option in summaries]
     summary, right_text = next(
         (
             (option, shown_right_text)
@@ -1099,6 +1149,69 @@ def match_count_parts(snapshot: BoardSnapshot, state: BoardState) -> tuple[str, 
     return count_text, f", {done_count} in Done" if done_count else ""
 
 
+def filter_input_segments(
+    y: int, width: int, state: BoardState, snapshot: BoardSnapshot, glyphs: Glyphs
+) -> list[Segment]:
+    query = f"/{state.filter_text}{glyphs.cursor}"
+    count_text, done_text = match_count_parts(snapshot, state)
+    hints = (
+        f"  {count_text} match{done_text}  {glyphs.enter_key} keep  esc clear",
+        f"  {count_text}{done_text}  {glyphs.enter_key} keep  esc clear",
+        f"  {count_text}  esc clear",
+    )
+    hint = next((hint for hint in hints if len(query) + len(hint) < width), hints[-1])
+    return [
+        Segment(y, 0, query, STYLE_BOLD, BOARD_COLUMNS[1].color),
+        Segment(y, len(query), hint, STYLE_DIM),
+    ]
+
+
+def narrow_footer_segments(
+    y: int,
+    width: int,
+    state: BoardState,
+    snapshot: BoardSnapshot,
+    row: display.ListRow | None,
+    glyphs: Glyphs,
+) -> list[Segment]:
+    if state.is_filtering:
+        action_segments = filter_input_segments(y, width, state, snapshot, glyphs)
+    else:
+        action_segments = status_line_segments(y, width, state, row, glyphs) or []
+    if not action_segments:
+        match_text = "".join(match_count_parts(snapshot, state))
+        filter_hint = [(f"/{state.filter_text}", match_text)] if state.filter_text else []
+        action_hints = footer_action_hints(snapshot, row)
+        action_segments = key_hint_segments(
+            y,
+            width,
+            [
+                [*filter_hint, *footer_action_hints(snapshot, row, is_complete=True)],
+                [*filter_hint, *action_hints],
+                [*filter_hint, *[(key, "") for key, _ in action_hints]],
+            ],
+        )
+    open_hint = [(glyphs.enter_key, "open")] if row is not None else []
+    move_hint = (f"{glyphs.column_keys}{glyphs.select_keys}", "move")
+    navigation_sets = [
+        [
+            (glyphs.column_keys, "column"),
+            (glyphs.select_keys, "select"),
+            *open_hint,
+            ("/", "filter"),
+            ("a", "done"),
+            ("?", "help"),
+            ("q", "quit"),
+        ],
+        [move_hint, *open_hint, ("/", "filter"), ("?", "help"), ("q", "quit")],
+        [move_hint, *open_hint, ("?", "help"), ("q", "quit")],
+        [*open_hint, ("?", "help"), ("q", "quit")],
+        [("?", "help"), ("q", "quit")],
+        [("?", ""), ("q", "")],
+    ]
+    return action_segments + key_hint_segments(y + 1, width, navigation_sets)
+
+
 def footer_segments(
     y: int,
     width: int,
@@ -1108,18 +1221,7 @@ def footer_segments(
     glyphs: Glyphs,
 ) -> list[Segment]:
     if state.is_filtering:
-        query = f"/{state.filter_text}{glyphs.cursor}"
-        count_text, done_text = match_count_parts(snapshot, state)
-        hints = (
-            f"  {count_text} match{done_text}  {glyphs.enter_key} keep  esc clear",
-            f"  {count_text}{done_text}  {glyphs.enter_key} keep  esc clear",
-            f"  {count_text}  esc clear",
-        )
-        hint = next((hint for hint in hints if len(query) + len(hint) < width), hints[-1])
-        return [
-            Segment(y, 0, query, STYLE_BOLD, BOARD_COLUMNS[1].color),
-            Segment(y, len(query), hint, STYLE_DIM),
-        ]
+        return filter_input_segments(y, width, state, snapshot, glyphs)
     status_segments = status_line_segments(y, width, state, row, glyphs)
     if status_segments is not None:
         return status_segments
@@ -1131,6 +1233,17 @@ def footer_segments(
     short_done_hint = ("a", "done")
     column_hint, select_hint = (glyphs.column_keys, "column"), (glyphs.select_keys, "select")
     key_sets = [
+        [
+            *filter_hint,
+            column_hint,
+            select_hint,
+            *open_hint,
+            *footer_action_hints(snapshot, row, is_complete=True),
+            done_hint,
+            *([] if state.filter_text else [("/", "filter")]),
+            ("?", "help"),
+            ("q", "quit"),
+        ],
         [
             *filter_hint,
             column_hint,
@@ -1252,8 +1365,8 @@ def board_view_segments(
         segments += tab_segments(
             layout.header_y, width, columns, layout, state, glyphs, middle_parts=header_parts
         )
-    elif layout.fit_count < len(columns):
-        segments += tab_segments(TAB_LINE_Y, width, columns, layout, state, glyphs, middle_parts=[])
+    else:
+        segments += header_row_segments(layout, columns, state, glyphs)
     body_bottom = layout.body_top + layout.body_height
     changed_task_ids = frozenset(
         task_id for task_id, until in state.changed_until.items() if until > time.monotonic()
@@ -1272,10 +1385,13 @@ def board_view_segments(
         segments += empty_board_segments(layout, width, state)
     row = selected_row(snapshot, state)
     if layout.detail_line_count and snapshot.rows:
-        segments += detail_segments(height - 1, width, layout.detail_line_count, row, context)
+        segments += detail_segments(layout.footer_y, width, layout.detail_line_count, row, context)
     segments += more_below_segments(layout, columns, state, glyphs)
-    segments += footer_segments(height - 1, width, state, snapshot, row, glyphs)
-    return segments
+    if layout.fit_count == 1:
+        return segments + narrow_footer_segments(
+            layout.footer_y, width, state, snapshot, row, glyphs
+        )
+    return segments + footer_segments(layout.footer_y, width, state, snapshot, row, glyphs)
 
 
 def wrapped_lines(text: str, width: int, style: str, hanging_indent: str = "") -> list[list[Part]]:
@@ -1308,6 +1424,14 @@ def moment_text(timestamp: str | None, now: datetime) -> str:
     return f"{display.display_time(timestamp, now.date())} ({relative})"
 
 
+def waiting_reason_text(row: display.ListRow, snapshot: BoardSnapshot) -> str:
+    if row.status not in {ledger.STATUS_SCHEDULED, ledger.STATUS_WAITING}:
+        return ""
+    reason = row_reason(row, snapshot)
+    retry_count = snapshot.tasks[row.task_id].get("setup_busy_retry_count")
+    return f"{reason} (checked {retry_count} times)" if reason and retry_count else reason
+
+
 def task_view_lines(
     row: display.ListRow,
     width: int,
@@ -1327,6 +1451,7 @@ def task_view_lines(
         ("Finished", moment_text(task.get("finished_at"), now)),
         ("Gate", task.get("gate", "")),
         ("Setup", task.get("setup", "")),
+        ("Reason", waiting_reason_text(row, snapshot)),
     ]
     chain_ids = chains.chain_task_ids(snapshot.tasks, row.task_id)
     if len(chain_ids) > 1:
@@ -1535,11 +1660,15 @@ def help_view_segments(width: int, height: int, glyphs: Glyphs, state: BoardStat
     corners, line = glyphs.corners, glyphs.horizontal
     more_above = f" {glyphs.up} more {line}" if state.help_scroll else ""
     more_below = f" {glyphs.down} more " if state.help_scroll < state.help_scroll_limit else ""
-    close_hint = HELP_CLOSE_HINT
-    if state.help_scroll_limit:
-        close_hint = f" {glyphs.up}{glyphs.down} scroll  other keys close "
     top_text = f"{corners[0]}{line} Keys "
     bottom_text = f"{corners[2]}{line}{more_below}"
+    close_hints = [HELP_CLOSE_HINT]
+    if state.help_scroll_limit:
+        scroll_hint = f" {glyphs.up}{glyphs.down} scroll"
+        close_hints = [f"{scroll_hint}  other keys close ", f"{scroll_hint} ", ""]
+    close_hint = next(
+        (hint for hint in close_hints if len(bottom_text) + len(hint) + 2 <= box_width), ""
+    )
     top_rule = line * max(0, box_width - len(top_text) - len(more_above) - 1)
     bottom_rule = line * max(0, box_width - len(bottom_text) - len(close_hint) - 2)
     segments = [
@@ -1612,7 +1741,8 @@ def apply_board_key(state: BoardState, key: int, column_row_count: int, page_siz
         state.focus_index = max(state.focus_index - 1, 0)
     elif key in RIGHT_KEYS:
         state.focus_index = min(state.focus_index + 1, column_count - 1)
-    elif ord("1") <= key < ord("1") + column_count:
+    elif ord("1") <= key < ord("1") + len(BOARD_COLUMNS):
+        state.is_showing_all = state.is_showing_all or key - ord("1") >= column_count
         state.focus_index = key - ord("1")
     elif key in DOWN_KEYS | UP_KEYS:
         move_selection(state, column_row_count, selected_index + (1 if key in DOWN_KEYS else -1))
