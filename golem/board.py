@@ -1611,7 +1611,11 @@ def narrow_footer_segments(
     if state.is_filtering:
         return filter_input_segments(y, width, state, snapshot, glyphs)
     if not snapshot.unfiltered_rows:
-        return key_hint_segments(y + 1, width, [[("?", "help"), ("q", "quit")]])
+        status_segments = status_line_segments(y, width, state, row, glyphs, snapshot) or []
+        return [
+            *status_segments,
+            *key_hint_segments(y + 1, width, [[("?", "help"), ("q", "quit")]]),
+        ]
     is_flashing = state.flash_text and time.monotonic() < state.flash_until
     if is_flashing and state.pending_action is None and len(state.flash_text) >= width:
         flash_lines = textwrap.wrap(state.flash_text, width - 1)[:2]
@@ -1675,11 +1679,11 @@ def footer_segments(
 ) -> list[Segment]:
     if state.is_filtering:
         return filter_input_segments(y, width, state, snapshot, glyphs)
-    if not snapshot.unfiltered_rows:
-        return key_hint_segments(y, width, [[("?", "help"), ("q", "quit")]])
     status_segments = status_line_segments(y, width, state, row, glyphs, snapshot)
     if status_segments is not None:
         return status_segments
+    if not snapshot.unfiltered_rows:
+        return key_hint_segments(y, width, [[("?", "help"), ("q", "quit")]])
     action_hints = footer_action_hints(snapshot, row)
     complete_hints = footer_action_hints(snapshot, row, is_complete=True)
     open_hint = [(glyphs.enter_key, "open")] if row is not None else []
@@ -2013,10 +2017,10 @@ def task_view_segments(
     key_sets = [
         [*scroll_hints, *step_hint, *follow_hint, *action_hints, ("esc", "back"), *position_hints],
         [*scroll_hints, *step_hint, *follow_hint, *action_hints, ("esc", "back")],
-        [*scroll_hints, *follow_hint, *action_hints, ("esc", "back")],
-        [*bare_scroll_hints, *follow_hint, *action_hints, ("esc", "back")],
-        [*follow_hint, *action_hints, ("esc", "back")],
+        [*bare_scroll_hints, *short_step_hint, *follow_hint, *action_hints, ("esc", "back")],
+        [*short_step_hint, *follow_hint, *action_hints, ("esc", "back")],
         [*short_step_hint, *follow_hint, *core_action_hints, ("esc", "back")],
+        [*short_step_hint, *follow_hint, *core_action_hints, ("esc", "")],
         [*follow_hint, *core_action_hints, ("esc", "back")],
         [("esc", "back")],
     ]
@@ -2485,8 +2489,8 @@ def run_action(
     row: display.ListRow,
 ) -> None:
     if action == ACTION_WATCH:
+        state.is_following = state.view != VIEW_TASK or not state.is_following
         state.view = VIEW_TASK
-        state.is_following = True
         return
     if action == ACTION_PICKUP:
         run_attached(screen, [*GOLEM_COMMAND, action, row.task_id])
