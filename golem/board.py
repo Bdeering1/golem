@@ -2264,11 +2264,17 @@ def task_view_segments(
     step_hint = [(glyphs.column_keys, f"task {task_number} of {column_row_count}")]
     short_step_hint = [(glyphs.column_keys, f"{task_number}/{column_row_count}")]
     core_action_hints = [hint for hint in action_hints if hint[0] != ACTION_KEYS[ACTION_COPY]]
+    bare_action_hints = [(key, "") for key, _ in core_action_hints]
+    bare_action_sets = [
+        [(glyphs.select_keys, position), *short_step_hint, *follow_hint, *bare_action_hints],
+        [*bare_scroll_hints, *short_step_hint, *follow_hint, *bare_action_hints],
+    ]
     key_sets = [
         [*scroll_hints, *step_hint, *follow_hint, *action_hints, ("esc", "back"), *position_hints],
         [*scroll_hints, *step_hint, *follow_hint, *action_hints, ("esc", "back")],
         [*bare_scroll_hints, *short_step_hint, *follow_hint, *action_hints, ("esc", "back")],
         [*bare_scroll_hints, *short_step_hint, *follow_hint, *core_action_hints, ("esc", "back")],
+        *([*key_set, ("esc", "back")] for key_set in (bare_action_sets if is_scrollable else [])),
         [*short_step_hint, *follow_hint, *action_hints, ("esc", "back")],
         [*short_step_hint, *follow_hint, *core_action_hints, ("esc", "back")],
         [*bare_scroll_hints, *short_step_hint, *follow_hint, *core_action_hints, ("esc", "")],
