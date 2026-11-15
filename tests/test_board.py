@@ -41,6 +41,13 @@ def frame_lines(tasks, width, height, state, glyphs=board.UNICODE_GLYPHS):
     return ["".join(line).rstrip() for line in lines]
 
 
+def selected_text(tasks, state, width=WIDE_WIDTH, height=HEIGHT):
+    snapshot = board.board_snapshot(tasks, NOW)
+    board.fit_state_to_layout(snapshot.rows, width, height, state)
+    segments = board.board_frame(snapshot, width, height, state)
+    return "".join(segment.text for segment in segments if segment.style == board.STYLE_SELECTED)
+
+
 def frame_text(tasks, width=WIDE_WIDTH, height=HEIGHT, state=None):
     return "\n".join(frame_lines(tasks, width, height, state or board.BoardState()))
 
@@ -118,8 +125,9 @@ def test_board_shortens_card_text_and_shows_it_in_full_in_the_detail_pane():
 
     lines = frame_lines(tasks, WIDE_WIDTH, HEIGHT, board.BoardState(focus_index=1))
 
-    board_text = "\n".join(lines[: -board.DETAIL_PANE_LINE_COUNT - 1])
-    detail_pane = lines[-board.DETAIL_PANE_LINE_COUNT - 1 : -1]
+    detail_line_count = board.detail_line_count(HEIGHT)
+    board_text = "\n".join(lines[: -detail_line_count - 1])
+    detail_pane = lines[-detail_line_count - 1 : -1]
     assert f"{task_id[:20]}" in board_text
     assert task_id not in board_text
     assert detail_pane[0].startswith(task_id)
@@ -204,12 +212,12 @@ def test_board_selection_moves_within_a_column_and_scrolls_to_stay_visible():
 
     for _ in range(100):
         board.apply_key(state, ord("j"))
-    bottom_text = frame_text(running_tasks(), state=state)
+    bottom_selection = selected_text(running_tasks(), state)
     board.apply_key(state, ord("k"))
-    scrolled_up_text = frame_text(running_tasks(), state=state)
+    scrolled_up_selection = selected_text(running_tasks(), state)
 
-    assert f"{board.UNICODE_GLYPHS.selected_card_bar} task-09" in bottom_text
-    assert f"{board.UNICODE_GLYPHS.selected_card_bar} task-08" in scrolled_up_text
+    assert "task-09" in bottom_selection
+    assert "task-08" in scrolled_up_selection
 
 
 def test_board_selection_stays_on_its_task_when_a_task_is_added_above_it():
@@ -219,9 +227,7 @@ def test_board_selection_stays_on_its_task_when_a_task_is_added_above_it():
     board.apply_key(state, ord("j"))
     frame_text(tasks, state=state)
 
-    text = frame_text(tasks | {"task-00": added_task}, state=state)
-
-    assert f"{board.UNICODE_GLYPHS.selected_card_bar} task-02" in text
+    assert "task-02" in selected_text(tasks | {"task-00": added_task}, state)
 
 
 def test_board_moves_focus_off_done_when_it_hides():
@@ -475,3 +481,16 @@ def test_board_opens_a_task_and_returns_to_the_board(pty_board):
     running_board.send("\x1b")
 
     running_board.wait_for_text("q quit")
+
+
+def test_board_filter_narrows_cards_and_escape_clears_it():
+    snapshot = board.board_snapshot(running_tasks(), NOW)
+    state = board.BoardState(focus_index=1)
+
+    for key in "/TASK-03\r":
+        board.apply_key(state, ord(key), snapshot)
+    filtered_ids = [row.task_id for row in board.filtered_snapshot(snapshot, state).rows]
+    board.apply_key(state, 27, snapshot)
+
+    assert filtered_ids == ["task-03"]
+    assert board.filtered_snapshot(snapshot, state).rows == snapshot.rows
