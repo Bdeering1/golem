@@ -162,6 +162,7 @@ SHORT_REASON_PATTERNS = (
     (re.compile(r"\b(\w+) found (\d+)"), r"\1: \2"),
 )
 GATE_COUNT_PATTERN = re.compile(r"(\d+) failed, (\d+) passed")
+COUNT_NOUN_PATTERN = re.compile(r"(\d+) (?:problem|error|warning|issue)s?\b")
 DURATION_PART_PATTERN = re.compile(r"(\d+)([a-z])")
 DURATION_UNIT_SIZES = {"m": 60, "h": 24}
 LOUD_STATUSES = {*STOPPED_STATUSES, ledger.STATUS_RUNNING}
@@ -411,7 +412,7 @@ class BoardState:
     is_showing_help: bool = False
     help_scroll: int = 0
     help_scroll_limit: int = 0
-    is_ledger_stale: bool = False
+    stale_snapshot_time: datetime | None = None
     focus_before_done: int = 0
     changed_until: dict[str, float] = field(default_factory=dict[str, float])
     gate_checks: dict[str, subprocess.Popen[str]] = field(
@@ -852,7 +853,9 @@ def card_detail(
     if not reason:
         return fitted_facts
     if not is_live:
-        compact_reason = GATE_COUNT_PATTERN.sub(r"\1 fail/\2 pass", short_reason)
+        compact_reason = COUNT_NOUN_PATTERN.sub(
+            r"\1", GATE_COUNT_PATTERN.sub(r"\1 fail/\2 pass", short_reason)
+        )
         options = [
             separator.join(part for part in parts if part)
             for parts in (
@@ -1401,9 +1404,9 @@ def title_segments(
     right_text = f"/{state.filter_text}" if state.filter_text else display.clock_time(now)
     right_style = STYLE_BOLD if state.filter_text else STYLE_DIM
     right_color = BOARD_COLUMNS[1].color if state.filter_text else None
-    if state.is_ledger_stale:
+    if state.stale_snapshot_time is not None:
         right_text, right_style = STALE_TEXT, STYLE_BOLD
-        right_color = display.STATUS_COLORS[ledger.STATUS_FAILED]
+        right_color = display.STATUS_COLORS[ledger.STATUS_BLOCKED]
     title_parts: list[Part] = [(BOARD_TITLE, STYLE_BOLD, None)]
     summaries = summary_options(snapshot, glyphs, now)
     options = [(option, right_text) for option in summaries[:-1]]
@@ -2448,7 +2451,7 @@ def board_frame(
     glyphs: Glyphs = UNICODE_GLYPHS,
     now: datetime | None = None,
 ) -> list[Segment]:
-    now = now or datetime.now().astimezone()
+    now = state.stale_snapshot_time or now or datetime.now().astimezone()
     if state.view == VIEW_TASK:
         segments = task_view_segments(snapshot, width, height, state, glyphs, now)
     else:
@@ -2865,6 +2868,7 @@ def board_loop(screen: curses.window, *, is_color: bool, glyphs: Glyphs) -> int:
     state = BoardState()
     shown_source_key: tuple[LedgerStat, tuple[LedgerStat, ...], date] | None = None
     snapshot = BoardSnapshot([], {}, {}, [])
+    snapshot_time = datetime.now().astimezone()
     shown_size = screen.getmaxyx()
     while True:
         now = datetime.now().astimezone()
@@ -2876,10 +2880,11 @@ def board_loop(screen: curses.window, *, is_color: bool, glyphs: Glyphs) -> int:
                 snapshot = board_snapshot(ledger.load_tasks(), now)
             except (ValueError, KeyError, TypeError) as error:
                 flash(state, f"{LEDGER_ERROR_TEXT}{error}")
-                state.is_ledger_stale = True
+                state.stale_snapshot_time = snapshot_time
                 shown_source_key = source_key
                 continue
-            state.is_ledger_stale = False
+            state.stale_snapshot_time = None
+            snapshot_time = now
             if is_first_load:
                 state.focus_index = attention_column_index(snapshot.rows)
             else:
