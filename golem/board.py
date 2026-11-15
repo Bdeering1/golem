@@ -1401,7 +1401,9 @@ def task_view_segments(
     status_segments = status_line_segments(height - 1, width, state, row, glyphs)
     if status_segments is not None:
         return segments + status_segments
-    action_hints = footer_action_hints(snapshot, row)
+    action_hints = [
+        hint for hint in footer_action_hints(snapshot, row) if hint[0] != ACTION_KEYS[ACTION_WATCH]
+    ]
     position = f"{min(len(lines), state.task_scroll + body_height)}/{len(lines)}"
     follow_hint = (
         [("G", "following" if state.is_following else "follow")]
@@ -1416,6 +1418,8 @@ def task_view_segments(
             ("esc", "back"),
             (position, ""),
         ],
+        [(glyphs.select_keys, "scroll"), *follow_hint, *action_hints, ("esc", "back")],
+        [(glyphs.select_keys, ""), *follow_hint, *action_hints, ("esc", "back")],
         [*follow_hint, *action_hints, ("esc", "back")],
         [("esc", "back")],
     ]
