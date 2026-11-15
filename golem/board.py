@@ -38,6 +38,7 @@ TALL_DETAIL_LINE_COUNT = 4
 MAX_DETAIL_LINE_COUNT = 6
 PRIMARY_LINE_COUNT = 2
 MARK_ONLY_WIDTH = 3
+MAX_ID_WORD_SNAP = 3
 DAYS_PER_YEAR = 365
 MIN_DETAIL_HEIGHT = 20
 MIN_SUMMARY_HEIGHT = 14
@@ -269,6 +270,7 @@ type LedgerStat = tuple[int, int, int] | None
 type Part = tuple[str, str, int | None]
 
 BOXED_CARD = CardStyle(height=4, pitch=5, is_boxed=True)
+STACKED_BOXED_CARD = CardStyle(height=4, pitch=4, is_boxed=True)
 TALL_CARD = CardStyle(height=3, pitch=4, is_boxed=False)
 SPACED_CARD = CardStyle(height=2, pitch=3, is_boxed=False)
 DENSE_CARD = CardStyle(height=2, pitch=2, is_boxed=False)
@@ -462,7 +464,7 @@ def detail_line_count(height: int) -> int:
 
 
 def card_style(row_count: int, body_height: int, *, can_box: bool, can_stack: bool) -> CardStyle:
-    styles = (BOXED_CARD, TALL_CARD, SPACED_CARD) if can_box else (TALL_CARD, SPACED_CARD)
+    styles = (BOXED_CARD, STACKED_BOXED_CARD, SPACED_CARD) if can_box else (TALL_CARD, SPACED_CARD)
     if not can_stack:
         styles = tuple(style for style in styles if style != TALL_CARD)
     for style in styles:
@@ -629,7 +631,7 @@ def fitted_task_id(task_id: str, width: int, glyphs: Glyphs) -> str:
         return fitted(task_id, width, glyphs)
     head = task_id[: width - len(tail) - len(glyphs.ellipsis)]
     word_end = head.rfind("-")
-    if word_end > len(head) // 2:
+    if word_end > 0 and len(head) - word_end <= MAX_ID_WORD_SNAP:
         head = head[:word_end]
     return f"{head.rstrip('-')}{glyphs.ellipsis}{tail}"
 
@@ -1940,11 +1942,7 @@ def task_view_lines(
     now: datetime,
 ) -> list[list[Part]]:
     task = snapshot.tasks[row.task_id]
-    lines: list[list[Part]] = [
-        *heading_lines(row, width, snapshot, glyphs, now),
-        [(glyphs.horizontal * width, STYLE_PLAIN, FAINT_COLOR)],
-        *field_lines(task_fields(row, snapshot, glyphs, now), width),
-    ]
+    lines: list[list[Part]] = field_lines(task_fields(row, snapshot, glyphs, now), width)
     sections = [
         (
             "Stop reason",
@@ -1981,13 +1979,18 @@ def task_view_segments(
     if row is None:
         state.view = VIEW_BOARD
         return board_view_segments(snapshot, width, height, state, glyphs, now)
+    header_lines: list[list[Part]] = [
+        *heading_lines(row, width - 1, snapshot, glyphs, now),
+        [(glyphs.horizontal * (width - 1), STYLE_PLAIN, FAINT_COLOR)],
+    ]
     lines = task_view_lines(row, width - 1, snapshot, glyphs, now)
-    body_height = max(1, height - 1)
+    body_height = max(1, height - 1 - len(header_lines))
     if state.is_following:
         state.task_scroll = len(lines)
     state.task_scroll = max(0, min(state.task_scroll, len(lines) - body_height))
+    shown_lines = [*header_lines, *lines[state.task_scroll : state.task_scroll + body_height]]
     segments: list[Segment] = []
-    for offset, parts in enumerate(lines[state.task_scroll : state.task_scroll + body_height]):
+    for offset, parts in enumerate(shown_lines):
         segments += part_segments(offset, 0, parts)
     status_segments = status_line_segments(height - 1, width, state, row, glyphs, snapshot)
     if status_segments is not None:
