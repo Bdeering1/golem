@@ -1791,6 +1791,7 @@ def filter_input_segments(
     hints = (
         f"  {count_text} match{done_text}  {glyphs.enter_key} keep  esc clear",
         f"  {count_text}{done_text}  {glyphs.enter_key} keep  esc clear",
+        f"  {count_text}  {glyphs.enter_key} keep  esc clear",
         f"  {count_text}  esc clear",
     )
     hint = next((hint for hint in hints if len(query) + len(hint) < width), hints[-1])
@@ -2327,7 +2328,7 @@ def help_sections(glyphs: Glyphs) -> list[tuple[str, list[tuple[str, str]]]]:
                 (glyphs.spinner[0], "running"),
                 (glyphs.status_marks[ledger.STATUS_BLOCKED], "blocked by its gate"),
                 (glyphs.status_marks[ledger.STATUS_FAILED], "failed"),
-                (glyphs.status_marks[ledger.STATUS_FINISHED], "finished"),
+                (glyphs.status_marks[ledger.STATUS_FINISHED], "finished, to close"),
                 (glyphs.new_mark, "new, not picked up yet"),
                 ("1/2", "step in its chain"),
                 ("stuck", "overdue, still waiting"),
