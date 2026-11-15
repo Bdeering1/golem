@@ -635,7 +635,13 @@ def card_segments(
     title_color = color if is_changed else None
     title_style = STYLE_BOLD if is_loud and not is_done else STYLE_PLAIN
     return [
-        Segment(y, x, mark, STYLE_BOLD, MUTED_COLOR if is_done else color),
+        Segment(
+            y,
+            x,
+            mark,
+            STYLE_SELECTED if is_changed else STYLE_BOLD,
+            MUTED_COLOR if is_done else color,
+        ),
         Segment(y, x + CARD_INDENT, title, title_style, title_color),
         Segment(y + 1, x + CARD_INDENT, detail, STYLE_DIM),
         *part_segments(y + 1, x + width - parts_width(right_parts), right_parts),
