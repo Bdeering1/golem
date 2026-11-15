@@ -1258,12 +1258,12 @@ def hidden_side_options(
     nearest_first = hidden_columns[::-1] if is_left else hidden_columns
     column_count = len(nearest_first)
     shapes = [
-        (folded_count, is_farthest_short)
+        (folded_count, is_countless, is_farthest_short)
         for folded_count in range(column_count + 1)
-        for is_farthest_short in (False, True)
-        if folded_count < column_count or not is_farthest_short
+        for is_countless, is_farthest_short in ((False, False), (True, False), (False, True))
+        if folded_count < column_count or not (is_countless or is_farthest_short)
     ]
-    for folded_count, is_farthest_short in shapes:
+    for folded_count, is_countless, is_farthest_short in shapes:
         shown_columns = nearest_first[: column_count - folded_count]
         labels: list[list[Part]] = [
             [
@@ -1274,7 +1274,7 @@ def hidden_side_options(
                     STYLE_PLAIN,
                     board_column.color,
                 ),
-                (f" {len(column_rows)}", STYLE_DIM, None),
+                ("" if is_countless else f" {len(column_rows)}", STYLE_DIM, None),
             ]
             for index, (board_column, column_rows) in enumerate(shown_columns)
         ]
