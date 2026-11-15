@@ -1239,8 +1239,8 @@ def help_sections(glyphs: Glyphs) -> list[tuple[str, list[tuple[str, str]]]]:
         (
             "Move",
             [
-                (f"{glyphs.column_keys} h l Tab", "switch column"),
-                (f"{glyphs.select_keys} j k", "select task"),
+                (f"{glyphs.left}{glyphs.right} h l Tab", "switch column"),
+                (f"{glyphs.up}{glyphs.down} j k", "select task"),
                 ("g G", "first, last"),
                 ("PgUp PgDn", "page"),
                 ("1-4", "jump to column"),
