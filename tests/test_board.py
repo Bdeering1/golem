@@ -34,7 +34,7 @@ MERGED_PULL_REQUEST = {"url": "https://github.com/owner/repository/pull/2", "sta
 def frame_lines(tasks, width, height, state, glyphs=board.UNICODE_GLYPHS):
     snapshot = board.board_snapshot(tasks, NOW)
     lines = [[" "] * width for _ in range(height)]
-    board.fit_state_to_layout(snapshot.rows, width, height, state)
+    board.fit_state_to_layout(snapshot, width, height, state)
     for segment in board.board_frame(snapshot, width, height, state, glyphs):
         for offset, character in enumerate(segment.text):
             lines[segment.y][segment.x + offset] = character
@@ -43,9 +43,19 @@ def frame_lines(tasks, width, height, state, glyphs=board.UNICODE_GLYPHS):
 
 def selected_text(tasks, state, width=WIDE_WIDTH, height=HEIGHT):
     snapshot = board.board_snapshot(tasks, NOW)
-    board.fit_state_to_layout(snapshot.rows, width, height, state)
+    board.fit_state_to_layout(snapshot, width, height, state)
     segments = board.board_frame(snapshot, width, height, state)
     return "".join(segment.text for segment in segments if segment.style == board.STYLE_SELECTED)
+
+
+def board_and_detail_lines(tasks, width=WIDE_WIDTH, height=HEIGHT, state=None):
+    state = state or board.BoardState()
+    lines = frame_lines(tasks, width, height, state)
+    snapshot = board.board_snapshot(tasks, NOW)
+    detail_top = (
+        height - 1 - board.snapshot_layout(snapshot, width, height, state).detail_line_count
+    )
+    return lines[: detail_top - 1], lines[detail_top:-1]
 
 
 def frame_text(tasks, width=WIDE_WIDTH, height=HEIGHT, state=None):
@@ -107,11 +117,12 @@ def test_board_shows_a_chain_as_one_card_with_its_step_and_list_detail():
         "child": support.task_record(ledger.STATUS_WAITING, task_id="child", after="root"),
     }
 
-    text = frame_text(tasks, state=board.BoardState(focus_index=2))
+    board_lines, _ = board_and_detail_lines(tasks, state=board.BoardState(focus_index=2))
+    board_text = "\n".join(board_lines)
 
-    assert "1/2" in text
-    assert "child" not in text
-    assert "no pull request yet" in text
+    assert "1/2" in board_text
+    assert "child" not in board_text
+    assert "no pull request yet" in board_text
 
 
 def test_board_shortens_card_text_and_shows_it_in_full_in_the_detail_pane():
@@ -123,15 +134,15 @@ def test_board_shortens_card_text_and_shows_it_in_full_in_the_detail_pane():
         )
     }
 
-    lines = frame_lines(tasks, WIDE_WIDTH, HEIGHT, board.BoardState(focus_index=1))
+    board_lines, detail_lines = board_and_detail_lines(tasks, state=board.BoardState(focus_index=1))
 
-    detail_line_count = board.detail_line_count(HEIGHT)
-    board_text = "\n".join(lines[: -detail_line_count - 1])
-    detail_pane = lines[-detail_line_count - 1 : -1]
-    assert f"{task_id[:20]}" in board_text
+    board_text = "\n".join(board_lines)
+    detail_text = "\n".join(detail_lines)
+    assert f"{task_id[:10]}" in board_text
     assert task_id not in board_text
-    assert detail_pane[0].startswith(task_id)
-    assert detail_pane[1:3] == [directory, "Polish the board more"]
+    assert detail_lines[0].startswith(task_id)
+    assert directory in detail_text
+    assert "Polish the board" in detail_text
 
 
 def test_board_detail_pane_keeps_the_end_of_a_long_directory():
@@ -139,9 +150,11 @@ def test_board_detail_pane_keeps_the_end_of_a_long_directory():
         "task": support.task_record(ledger.STATUS_RUNNING, cwd="/somewhere/deeply/nested/leaf")
     }
 
-    lines = frame_lines(tasks, NARROW_WIDTH, HEIGHT, board.BoardState(focus_index=1))
+    _, detail_lines = board_and_detail_lines(
+        tasks, NARROW_WIDTH, state=board.BoardState(focus_index=1)
+    )
 
-    assert "…/deeply/nested/leaf" in lines
+    assert "nested/leaf" in "".join(detail_lines)
 
 
 @pytest.mark.parametrize(
@@ -155,17 +168,21 @@ def test_board_detail_pane_keeps_the_end_of_a_long_directory():
 def test_board_shows_as_many_columns_as_fit(width, shown_titles, has_tabs):
     lines = frame_lines(statuses_tasks(), width, HEIGHT, board.BoardState())
 
-    header_line = lines[board.board_layout(width, HEIGHT, len(shown_titles)).header_y]
-    assert [title for title, *_ in board.BOARD_COLUMNS if title in header_line] == shown_titles
-    assert bool(lines[board.TAB_LINE_Y]) == has_tabs
+    header_line = lines[board.board_layout(width, HEIGHT, 3).header_y]
+    tab_line = lines[board.TAB_LINE_Y]
+    assert [
+        title for title, *_ in board.BOARD_COLUMNS if f"▌ {title}" in header_line
+    ] == shown_titles[:1]
+    assert all(title in header_line or title in tab_line for title in shown_titles)
+    assert (board.UNICODE_GLYPHS.right in tab_line) == has_tabs
 
 
 @pytest.mark.parametrize(
     ("width", "focus_index", "left_text", "right_text"),
     [
         pytest.param(46, 2, "← Queued 2", "Done 0 →", id="both-sides"),
-        pytest.param(28, 1, "← Queued 2", "Review 3  +1 →", id="folds-farthest"),
-        pytest.param(28, 0, "", "Running 1  Review 3  +1 →", id="right-only"),
+        pytest.param(40, 1, "← Queued 2  ▌ Running 1", "Review 3  +1 →", id="folds-farthest"),
+        pytest.param(28, 0, "▌ Queued 2", "Running 1  +2 →", id="right-only"),
     ],
 )
 def test_board_lists_hidden_columns_on_the_side_they_scroll_in_from(
