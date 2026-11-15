@@ -164,11 +164,11 @@ NOTHING_NEEDS_YOU_TEXT = "Nothing needs you right now"
 WAITING_DIRECTORY_TEXT = "waiting for directory:"
 WAITING_TEXT = "waiting:"
 THREAD_STATE_TEXTS = {"thread unsettled": "thread open, no PR"}
-SHORT_REASON_TEXTS = {"thread open, no PR": "no PR"}
+SHORT_REASON_TEXTS = {"thread open, no PR": "thread, no PR"}
 EMPTY_BOARD_LINES = ("No tasks yet", "Queue one with", 'golem run <id> "<prompt>"')
 UNAVAILABLE_ACTION_TEXTS = {
     ACTION_PICKUP: "Only blocked, failed or finished tasks can be picked up",
-    ACTION_WATCH: "This task hasn't started, so it has no log yet",
+    ACTION_WATCH: "This task has no log yet",
     ACTION_OPEN_PULL_REQUEST: "This task has no pull request",
     ACTION_RETRY: "Only failed, cancelled or blocked tasks can be retried",
     ACTION_CLOSE: "Only finished tasks in Review can be closed",
@@ -461,8 +461,10 @@ def detail_line_count(height: int) -> int:
     return TALL_DETAIL_LINE_COUNT if height >= TALL_HEIGHT else DETAIL_LINE_COUNT
 
 
-def card_style(row_count: int, body_height: int, *, can_box: bool) -> CardStyle:
+def card_style(row_count: int, body_height: int, *, can_box: bool, can_stack: bool) -> CardStyle:
     styles = (BOXED_CARD, TALL_CARD, SPACED_CARD) if can_box else (TALL_CARD, SPACED_CARD)
+    if not can_stack:
+        styles = tuple(style for style in styles if style != TALL_CARD)
     for style in styles:
         if row_count * style.pitch - (style.pitch - style.height) <= body_height:
             return style
@@ -527,7 +529,11 @@ def board_layout(
     body_top = header_y + 2 + spacer_row_count
     body_height = footer_y - detail_height - body_top
     can_box = min(span_width for _, span_width in spans) >= MIN_BOXED_CARD_WIDTH
-    styles = tuple(card_style(size, body_height, can_box=can_box) for size in column_sizes)
+    done_index = len(BOARD_COLUMNS) - 1
+    styles = tuple(
+        card_style(size, body_height, can_box=can_box, can_stack=index != done_index)
+        for index, size in enumerate(column_sizes)
+    )
     if line_count:
         shown_indices = range(first_index, first_index + fit_count)
         used_height = max(
@@ -621,8 +627,11 @@ def fitted_task_id(task_id: str, width: int, glyphs: Glyphs) -> str:
     tail = task_id[task_id.rfind("-") :] if "-" in task_id else ""
     if len(task_id) <= width or not tail or len(tail) > width // 2:
         return fitted(task_id, width, glyphs)
-    head = task_id[: width - len(tail) - len(glyphs.ellipsis)].rstrip("-")
-    return f"{head}{glyphs.ellipsis}{tail}"
+    head = task_id[: width - len(tail) - len(glyphs.ellipsis)]
+    word_end = head.rfind("-")
+    if word_end > len(head) // 2:
+        head = head[:word_end]
+    return f"{head.rstrip('-')}{glyphs.ellipsis}{tail}"
 
 
 def duration_text(seconds: float) -> str:
@@ -758,7 +767,9 @@ def card_detail(
                 (time_text, short_reason),
             )
         ]
-        return next((option for option in options if len(option) <= width), options[-1])
+        return next(
+            (option for option in [*options, short_reason] if len(option) <= width), options[-1]
+        )
     if not timed_facts:
         return reason
     if width - len(timed_facts) - len(separator) < MIN_CARD_REASON_WIDTH:
@@ -843,7 +854,7 @@ def card_segments(
     glyphs, now, changed_task_ids = context.glyphs, context.now, context.changed_task_ids
     color, mark_color = card_colors(row, context, is_selected=is_selected)
     right_parts = card_badge_parts(row, context)
-    right_width = parts_width(right_parts) + (1 if right_parts else 0)
+    right_width = parts_width(right_parts) + (2 if right_parts else 0)
     title = fitted_task_id(row.task_id, width - CARD_INDENT, glyphs)
     detail_width = width - CARD_INDENT - right_width
     time_text, reason, short_reason, repository = card_facts(row, context)
@@ -1082,23 +1093,23 @@ def hidden_side_options(
     nearest_first = hidden_columns[::-1] if is_left else hidden_columns
     column_count = len(nearest_first)
     shapes = [
-        (folded_count, is_farthest_named)
+        (folded_count, is_farthest_short)
         for folded_count in range(column_count + 1)
-        for is_farthest_named in (False, True)
-        if folded_count < column_count or not is_farthest_named
+        for is_farthest_short in (False, True)
+        if folded_count < column_count or not is_farthest_short
     ]
-    for folded_count, is_farthest_named in shapes:
+    for folded_count, is_farthest_short in shapes:
         shown_columns = nearest_first[: column_count - folded_count]
         labels: list[list[Part]] = [
             [
-                (board_column.title, STYLE_PLAIN, board_column.color),
                 (
-                    ""
-                    if is_farthest_named and index == len(shown_columns) - 1
-                    else f" {len(column_rows)}",
-                    STYLE_DIM,
-                    None,
+                    board_column.title[0]
+                    if is_farthest_short and index == len(shown_columns) - 1
+                    else board_column.title,
+                    STYLE_PLAIN,
+                    board_column.color,
                 ),
+                (f" {len(column_rows)}", STYLE_DIM, None),
             ]
             for index, (board_column, column_rows) in enumerate(shown_columns)
         ]
@@ -1166,9 +1177,8 @@ def summary_options(snapshot: BoardSnapshot, glyphs: Glyphs, now: datetime) -> l
     counts = {board_column.title: len(column_rows) for board_column, column_rows in columns.items()}
     review_statuses = [row.status for row in columns[BOARD_COLUMNS[2]]]
     running_count = counts[display.COLUMN_RUNNING]
-    running_mark = (
-        status_mark(ledger.STATUS_RUNNING, glyphs, now) if running_count else glyphs.spinner[0]
-    )
+    running_mark = status_mark(ledger.STATUS_RUNNING, glyphs, now) if running_count else ""
+
     items = [
         (running_mark, running_count, "running", ledger.STATUS_RUNNING, True),
         (
@@ -1208,9 +1218,16 @@ def summary_options(snapshot: BoardSnapshot, glyphs: Glyphs, now: datetime) -> l
             continue
         mark_color = display.STATUS_COLORS[status] if count else MUTED_COLOR
         count_style = STYLE_PLAIN if count else STYLE_DIM
-        worded += [(f"  {mark} ", STYLE_PLAIN, mark_color), (f"{count} {label}", count_style, None)]
-        tight += [(f" {mark} ", STYLE_PLAIN, mark_color), (f"{count} {label}", count_style, None)]
-        numbered += [(f" {mark}", STYLE_PLAIN, mark_color), (str(count), count_style, None)]
+        mark_text = f"{mark} " if mark else ""
+        worded += [
+            (f"  {mark_text}", STYLE_PLAIN, mark_color),
+            (f"{count} {label}", count_style, None),
+        ]
+        tight += [
+            (f" {mark_text}", STYLE_PLAIN, mark_color),
+            (f"{count} {label}", count_style, None),
+        ]
+        numbered += [(f" {mark_text}", STYLE_PLAIN, mark_color), (str(count), count_style, None)]
     return [worded, tight, numbered, []]
 
 
@@ -1263,7 +1280,7 @@ def detail_segments(
     if row is not None and not is_id_in_rule(row.task_id, line_width):
         id_lines = textwrap.wrap(row.task_id, text_width)
         if len(id_lines) + len(lines) > line_count:
-            id_lines = [fitted_task_id(row.task_id, text_width, context.glyphs)]
+            id_lines = []
         lines = [*((line, STYLE_BOLD) for line in id_lines), *lines][:line_count]
     rule_y = footer_y - 1 - max(1, len(lines))
     segments = detail_title_segments(rule_y, line_width, row, context)
@@ -1446,7 +1463,8 @@ def available_actions(snapshot: BoardSnapshot, row: display.ListRow | None) -> l
     actions: list[str] = []
     if row.status in PICKUP_STATUSES:
         actions.append(ACTION_PICKUP)
-    if row.status not in ledger.NOT_STARTED_STATUSES:
+    session_id = snapshot.tasks[row.task_id]["session_id"]
+    if row.status == ledger.STATUS_RUNNING or progress_log.progress_path(session_id).exists():
         actions.append(ACTION_WATCH)
     if chain_pull_requests(snapshot, row.task_id):
         actions.append(ACTION_OPEN_PULL_REQUEST)
@@ -1618,7 +1636,7 @@ def narrow_footer_segments(
             quit_hint,
         ],
         [move_hint, ("/", "filter"), done_hint(state), help_hint, quit_hint],
-        [(move_hint[0], ""), ("/", "filter"), ("a", "done"), help_hint, quit_hint],
+        [(move_hint[0], ""), ("/", "filter"), ("n", "next"), help_hint, quit_hint],
         [move_hint, ("/", "filter"), help_hint, quit_hint],
         [("/", "filter"), done_hint(state), help_hint, quit_hint],
         [move_hint, help_hint, quit_hint],
@@ -1685,8 +1703,19 @@ def footer_segments(
             *filter_hint,
             move_hint,
             *open_hint,
+            next_hint,
             *action_hints,
             toggle_hint,
+            *filter_key_hint,
+            help_hint,
+            quit_hint,
+        ],
+        [
+            *filter_hint,
+            move_hint,
+            *open_hint,
+            next_hint,
+            *action_hints,
             *filter_key_hint,
             help_hint,
             quit_hint,
@@ -1895,7 +1924,7 @@ def task_view_lines(
     ]
     sections = [
         (
-            "Stopped",
+            "Stop reason",
             task.get("gate_stop_reason", "") or task.get("setup_failure_reason", ""),
             STYLE_PLAIN,
             "",
@@ -1955,7 +1984,11 @@ def task_view_segments(
         if row.status == ledger.STATUS_RUNNING
         else []
     )
-    step_hint = [(glyphs.column_keys, "task")]
+    column_row_count = len(
+        rows_by_column(snapshot.rows, is_showing_all=state.is_showing_all)[state.focus_index][1]
+    )
+    task_number = min(state.selected_indices[state.focus_index], column_row_count - 1) + 1
+    step_hint = [(glyphs.column_keys, f"task {task_number} of {column_row_count}")]
     key_sets = [
         [*scroll_hints, *step_hint, *follow_hint, *action_hints, ("esc", "back"), *position_hints],
         [*scroll_hints, *step_hint, *follow_hint, *action_hints, ("esc", "back")],
@@ -2013,7 +2046,7 @@ def help_sections(glyphs: Glyphs) -> list[tuple[str, list[tuple[str, str]]]]:
                 (glyphs.status_marks[ledger.STATUS_BLOCKED], "blocked by its gate"),
                 (glyphs.status_marks[ledger.STATUS_FAILED], "failed"),
                 (glyphs.status_marks[ledger.STATUS_FINISHED], "finished"),
-                (glyphs.new_mark, "new, not opened yet"),
+                (glyphs.new_mark, "new, not picked up yet"),
             ],
         ),
     ]
@@ -2252,12 +2285,15 @@ def apply_help_key(state: BoardState, key: int, page_size: int) -> None:
 
 
 def select_next_attention(state: BoardState, snapshot: BoardSnapshot) -> None:
+    now = datetime.now().astimezone()
     columns = rows_by_column(snapshot.rows, is_showing_all=state.is_showing_all)
     positions = [
         (column_index, row_index)
         for column_index, (_, column_rows) in enumerate(columns)
         for row_index, row in enumerate(column_rows)
-        if row.status in STOPPED_STATUSES or is_new_for_review(snapshot, row)
+        if row.status in STOPPED_STATUSES
+        or is_new_for_review(snapshot, row)
+        or is_stuck(row, snapshot.tasks[row.task_id], now)
     ]
     if not positions:
         flash(state, NOTHING_NEEDS_YOU_TEXT)
