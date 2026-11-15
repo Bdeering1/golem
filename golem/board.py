@@ -612,14 +612,29 @@ def fit_state_to_layout(
         ),
         len(columns) - layout.fit_count,
     )
+    unfiltered_columns = rows_by_column(
+        snapshot.unfiltered_rows, is_showing_all=state.is_showing_all
+    )
     for column_index, (_, column_rows) in enumerate(columns):
         column_task_ids = [row.task_id for row in column_rows]
         selected_task_id = state.selected_task_ids[column_index]
         selected_index = min(
             max(state.selected_indices[column_index], 0), max(0, len(column_rows) - 1)
         )
+        unfiltered_task_ids = [row.task_id for row in unfiltered_columns[column_index][1]]
         if selected_task_id in column_task_ids:
             selected_index = column_task_ids.index(selected_task_id)
+        elif selected_task_id in unfiltered_task_ids:
+            selected_order = unfiltered_task_ids.index(selected_task_id)
+            selected_index = next(
+                (
+                    index
+                    for index, task_id in enumerate(column_task_ids)
+                    if task_id in unfiltered_task_ids
+                    and unfiltered_task_ids.index(task_id) > selected_order
+                ),
+                selected_index,
+            )
         visible_count = layout.visible_card_count(column_index, len(column_rows))
         scroll_offset = min(state.scroll_offsets[column_index], selected_index)
         scroll_offset = max(scroll_offset, selected_index - visible_count + 1)
@@ -2365,6 +2380,7 @@ def help_sections(glyphs: Glyphs, *, is_task_view: bool) -> list[tuple[str, list
                 (glyphs.status_marks[ledger.STATUS_BLOCKED], "blocked by its gate"),
                 (glyphs.status_marks[ledger.STATUS_FAILED], "failed"),
                 (glyphs.status_marks[ledger.STATUS_FINISHED], "finished, to close"),
+                (glyphs.status_marks[ledger.STATUS_CANCELLED], "cancelled"),
                 (glyphs.new_mark, "new, not picked up yet"),
                 ("1/2", "step in its chain"),
                 ("stuck", "overdue, still waiting"),
