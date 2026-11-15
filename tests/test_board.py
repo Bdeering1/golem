@@ -123,7 +123,7 @@ def test_board_shows_a_chain_as_one_card_with_its_step_and_list_detail():
 
     assert "1/2" in board_text
     assert "child" not in board_text
-    assert "no pull request yet" in board_text
+    assert "no pull request" in board_text
 
 
 def chain_tasks():

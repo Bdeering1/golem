@@ -72,6 +72,7 @@ NOT_A_TERMINAL_MESSAGE = "golem: board needs a terminal; use golem list"
 HELP_CLOSE_HINT = " esc closes "
 MIN_CARD_REASON_WIDTH = 10
 MIN_CARD_REPOSITORY_WIDTH = 6
+MAX_SHOWN_QUERY_WIDTH = 16
 CONFIRM_ANSWER_TEXT = " yes  n no"
 CONFIRM_SHORT_ANSWER_TEXT = "/N"
 HELP_SECTION_GAP = 4
@@ -918,6 +919,13 @@ def card_detail(
         shortest_reason = short_reason
         for pattern, replacement in SHORTEST_REASON_PATTERNS:
             shortest_reason = pattern.sub(replacement, shortest_reason)
+        time_width = len(f"{time_text}{separator}") if time_text else 0
+        reason_width = width - time_width - len(separator) - len(repository)
+        cut_reason_facts = (
+            [(time_text, fitted_words(short_reason, reason_width, glyphs), repository)]
+            if repository and reason_width >= MIN_CARD_REASON_WIDTH
+            else []
+        )
         shortest_facts = separator.join(part for part in (time_text, shortest_reason) if part)
         repository_width = width - len(shortest_facts) - len(separator)
         is_repository_cuttable = repository_width >= min(len(repository), MIN_CARD_REPOSITORY_WIDTH)
@@ -932,6 +940,8 @@ def card_detail(
                 (time_text, reason, repository),
                 (time_text, short_reason, repository),
                 (time_text, compact_reason, repository),
+                (time_text, shortest_reason, repository),
+                *cut_reason_facts,
                 *cut_repository_facts,
                 (time_text, reason),
                 (time_text, short_reason),
@@ -1155,7 +1165,7 @@ def boxed_card_segments(
     )
     right_parts = [] if is_slim else badge_parts
     title_width = content_width - parts_width(border_parts)
-    title = fitted_task_id(chain_name(context.snapshot.tasks, row.task_id), title_width, glyphs)
+    title = fitted_task_id(chain_name(context.snapshot.tasks, row.task_id), title_width - 1, glyphs)
     is_changed = row.task_id in changed_task_ids
     title_style = card_title_style(row, context, is_selected=is_selected)
     top_parts: list[Part] = [
@@ -1201,7 +1211,7 @@ def boxed_card_segments(
         Segment(y + 2, x + 2, fitted_words(detail, content_width, glyphs), STYLE_DIM)
     ]
     if is_slim:
-        slim_width = status_width - 2
+        slim_width = status_width - (2 if content_height else 3)
         slim_detail = fitted_words(
             card_detail(facts, slim_width, glyphs, is_live=is_live_card(row, context)),
             slim_width,
@@ -1552,7 +1562,11 @@ def summary_options(snapshot: BoardSnapshot, glyphs: Glyphs, now: datetime) -> l
 def title_segments(
     width: int, snapshot: BoardSnapshot, state: BoardState, glyphs: Glyphs, now: datetime
 ) -> list[Segment]:
-    right_text = f"/{state.filter_text}" if state.filter_text else display.clock_time(now)
+    right_text = (
+        shown_query(state.filter_text, MAX_SHOWN_QUERY_WIDTH, glyphs)
+        if state.filter_text
+        else display.clock_time(now)
+    )
     right_style = STYLE_BOLD if state.filter_text else STYLE_DIM
     right_color = BOARD_COLUMNS[1].color if state.filter_text else None
     if state.stale_snapshot_time is not None:
@@ -1675,33 +1689,42 @@ def clipped_lines(lines: list[str], line_count: int, width: int, glyphs: Glyphs)
     return shown_lines
 
 
-def detail_meta_parts(
-    row: display.ListRow, width: int, tasks: ledger.Tasks, glyphs: Glyphs
-) -> list[Part]:
+def labelled_parts(facts: list[tuple[str, str]], gap: str) -> list[Part]:
+    parts: list[Part] = []
+    for label, value in facts:
+        parts += [(f"{gap}{label} ", STYLE_DIM, None), (value, STYLE_PLAIN, None)]
+    return parts
+
+
+def detail_meta_lines(
+    row: display.ListRow, width: int, tasks: ledger.Tasks, glyphs: Glyphs, *, can_wrap: bool
+) -> list[list[Part]]:
     directory = display.display_directory(row.directory)
-    backend_fact = ("Backend", tasks[row.task_id]["backend"])
+    backend_fact: tuple[str, str] = ("Backend", tasks[row.task_id]["backend"])
     full_step = step_text(row, tasks)
     name_width = len(Path(row.directory).name)
     options = [
         (META_GAP, full_step, len(directory)),
         ("  ", full_step, len(directory)),
         ("  ", full_step, name_width),
-        ("  ", row.step, name_width),
+        *([] if can_wrap else [("  ", row.step, name_width)]),
     ]
     for gap, step, minimum_width in options:
-        facts = [("Step", step), backend_fact] if step else [backend_fact]
-        facts_width = sum(len(f"{gap}{label} {value}") for label, value in facts)
-        directory_width = width - facts_width
+        facts: list[tuple[str, str]] = [("Step", step), backend_fact] if step else [backend_fact]
+        directory_width = width - parts_width(labelled_parts(facts, gap))
         if directory_width < minimum_width:
             continue
-        parts: list[Part] = [
-            (tail_shortened_directory(directory, directory_width, glyphs), STYLE_PLAIN, None)
+        shown_directory = tail_shortened_directory(directory, directory_width, glyphs)
+        return [[(shown_directory, STYLE_PLAIN, None), *labelled_parts(facts, gap)]]
+    if can_wrap:
+        facts_parts = labelled_parts([("Step", full_step), backend_fact], META_GAP)
+        facts_parts[0] = (facts_parts[0][0].lstrip(), *facts_parts[0][1:])
+        directory_parts: list[Part] = [
+            (tail_shortened_directory(directory, width, glyphs), STYLE_PLAIN, None)
         ]
-        for label, value in facts:
-            parts += [(f"{gap}{label} ", STYLE_DIM, None), (value, STYLE_PLAIN, None)]
-        return parts
+        return [directory_parts, facts_parts]
     fallback = f"{Path(row.directory).name}  {backend_fact[1]}"
-    return [(fitted(fallback, width, glyphs), STYLE_DIM, None)]
+    return [[(fitted(fallback, width, glyphs), STYLE_DIM, None)]]
 
 
 def activity_lines(activity: list[str], width: int, row_count: int, glyphs: Glyphs) -> list[str]:
@@ -1717,10 +1740,6 @@ def activity_lines(activity: list[str], width: int, row_count: int, glyphs: Glyp
     if shown_count == len(texts) or shown_count > 1:
         return wrapped_lines
     return [fitted(text, width, glyphs) for text in texts][-row_count:]
-
-
-def plain_markdown_text(text: str) -> str:
-    return MARKDOWN_EMPHASIS_PATTERN.sub("", MARKDOWN_HEADING_PATTERN.sub("", text))
 
 
 def summary_sentences(result: str) -> list[str]:
@@ -1790,6 +1809,8 @@ def detail_lines(
     if not meta_count:
         return lines
     spare_count = line_count - meta_count - len(primary_lines)
+    meta_lines = detail_meta_lines(row, width, snapshot.tasks, glyphs, can_wrap=spare_count > 0)
+    spare_count -= len(meta_lines) - meta_count
     if spare_count and primary_lines and line_count > DETAIL_LINE_COUNT:
         lines.append([])
         spare_count -= 1
@@ -1798,7 +1819,7 @@ def detail_lines(
     prompt_lines = paragraph_lines(" ".join(prompt.split()), width)
     shown_prompt = clipped_lines(prompt_lines, spare_count, width, glyphs)
     prompt_parts: list[list[Part]] = [[(line, STYLE_DIM, None)] for line in shown_prompt]
-    return [*lines, *prompt_parts, detail_meta_parts(row, width, snapshot.tasks, glyphs)]
+    return [*lines, *prompt_parts, *meta_lines]
 
 
 def task_heading_parts(
@@ -1980,10 +2001,16 @@ def match_count_parts(snapshot: BoardSnapshot, state: BoardState) -> tuple[str, 
     return count_text, f", {done_count} in Done"
 
 
+def shown_query(filter_text: str, width: int, glyphs: Glyphs) -> str:
+    query = f"/{filter_text}"
+    if len(query) <= width:
+        return query
+    return f"/{glyphs.ellipsis}{filter_text[len(query) - width + len(glyphs.ellipsis) :]}"
+
+
 def filter_input_segments(
     y: int, width: int, state: BoardState, snapshot: BoardSnapshot, glyphs: Glyphs
 ) -> list[Segment]:
-    query = f"/{state.filter_text}{glyphs.cursor}"
     count_text, done_text = match_count_parts(snapshot, state)
     hints = (
         f"  {count_text} match{done_text}  {glyphs.enter_key} keep  esc clear",
@@ -1991,6 +2018,8 @@ def filter_input_segments(
         f"  {count_text}  {glyphs.enter_key} keep  esc clear",
         f"  {count_text}  esc clear",
     )
+    query_width = width - len(hints[-1]) - len(glyphs.cursor) - 1
+    query = f"{shown_query(state.filter_text, query_width, glyphs)}{glyphs.cursor}"
     hint = next((hint for hint in hints if len(query) + len(hint) < width), hints[-1])
     return [
         Segment(y, 0, query, STYLE_BOLD, BOARD_COLUMNS[1].color),
@@ -2048,8 +2077,9 @@ def narrow_footer_segments(
     help_hint, quit_hint = ("?", "help"), ("q", "quit")
     if state.filter_text:
         count_text, done_text = match_count_parts(snapshot, state)
-        filter_hint = (f"/{state.filter_text}", count_text + done_text)
-        short_filter_hint = (f"/{state.filter_text}", count_text)
+        query = shown_query(state.filter_text, MAX_SHOWN_QUERY_WIDTH, glyphs)
+        filter_hint = (query, count_text + done_text)
+        short_filter_hint = (query, count_text)
         done_count = sum(row.column == display.COLUMN_DONE for row in snapshot.rows)
         done_hints = [("a", f"{done_count} in Done")] if done_text else []
         filter_sets = [
@@ -2105,7 +2135,10 @@ def footer_segments(
     count_text, done_text = match_count_parts(snapshot, state)
     toggle_hint = done_hint(state)
     filter_hint = (
-        [(f"/{state.filter_text}", count_text + done_text), ("esc", "clear")]
+        [
+            (shown_query(state.filter_text, MAX_SHOWN_QUERY_WIDTH, glyphs), count_text + done_text),
+            ("esc", "clear"),
+        ]
         if state.filter_text
         else []
     )
@@ -2388,18 +2421,29 @@ def field_lines(fields: list[tuple[str, str]], width: int) -> list[list[Part]]:
     return lines
 
 
-def activity_view_text(activity: list[str], glyphs: Glyphs, *, is_showing_tools: bool) -> str:
-    lines: list[str] = []
+def activity_view_lines(
+    activity: list[str], width: int, glyphs: Glyphs, *, is_showing_tools: bool
+) -> list[list[Part]]:
+    lines: list[list[Part]] = []
     for is_tool, group in itertools.groupby(
         activity, key=lambda line: line.startswith(TOOL_LINE_PREFIX)
     ):
         group_lines = list(group)
         if is_tool and not is_showing_tools:
             noun = "tool call" if len(group_lines) == 1 else "tool calls"
-            lines.append(f"{glyphs.tool} {len(group_lines)} {noun}")
-            continue
-        lines += [activity_text(line, glyphs) for line in group_lines]
-    return "\n".join(lines)
+            group_lines = [f"{TOOL_LINE_PREFIX}{len(group_lines)} {noun}"]
+        style = STYLE_DIM if is_tool else STYLE_PLAIN
+        for line in group_lines:
+            lines += wrapped_lines(activity_text(line, glyphs), width, style, "  ")
+    return lines
+
+
+def result_lines(result: str, width: int) -> list[list[Part]]:
+    lines: list[list[Part]] = []
+    for paragraph in MARKDOWN_EMPHASIS_PATTERN.sub("", result.strip()).splitlines():
+        style = STYLE_BOLD if MARKDOWN_HEADING_PATTERN.match(paragraph) else STYLE_PLAIN
+        lines += wrapped_lines(MARKDOWN_HEADING_PATTERN.sub("", paragraph), width, style)
+    return lines
 
 
 def section_lines(
@@ -2414,12 +2458,11 @@ def section_lines(
 
 
 def text_section_lines(
-    title: str, text: str, width: int, glyphs: Glyphs, style: str = STYLE_PLAIN
+    title: str, body_lines: list[list[Part]], width: int, glyphs: Glyphs
 ) -> list[list[Part]]:
-    if not text.strip():
+    if not any(text.strip() for line in body_lines for text, _, _ in line):
         return []
-    hanging_indent = "  " if style == STYLE_DIM else ""
-    return section_lines(title, wrapped_lines(text, width, style, hanging_indent), width, glyphs)
+    return section_lines(title, body_lines, width, glyphs)
 
 
 def task_view_lines(
@@ -2433,17 +2476,22 @@ def task_view_lines(
     is_showing_tools: bool,
 ) -> list[list[Part]]:
     task = snapshot.tasks[row.task_id]
-    activity = activity_view_text(activity_entries, glyphs, is_showing_tools=is_showing_tools)
+    activity = activity_view_lines(
+        activity_entries, width, glyphs, is_showing_tools=is_showing_tools
+    )
     if not activity and row.status == ledger.STATUS_RUNNING:
-        activity = NO_ACTIVITY_TEXT
+        activity = wrapped_lines(NO_ACTIVITY_TEXT, width, STYLE_DIM)
     stop_reason = task.get("gate_stop_reason", "") or task.get("setup_failure_reason", "")
     fields = field_lines(task_fields(row, snapshot, glyphs, now), width)
+    prompt = task.get("prompt", "")
     return [
-        *text_section_lines("Stop reason", stop_reason, width, glyphs),
-        *text_section_lines("Result", plain_markdown_text(task.get("result", "")), width, glyphs),
+        *text_section_lines(
+            "Stop reason", wrapped_lines(stop_reason, width, STYLE_PLAIN), width, glyphs
+        ),
+        *text_section_lines("Result", result_lines(task.get("result", ""), width), width, glyphs),
         *section_lines("Details", fields, width, glyphs),
-        *text_section_lines("Prompt", task.get("prompt", ""), width, glyphs),
-        *text_section_lines("Activity", activity, width, glyphs, style=STYLE_DIM),
+        *text_section_lines("Prompt", wrapped_lines(prompt, width, STYLE_PLAIN), width, glyphs),
+        *text_section_lines("Activity", activity, width, glyphs),
     ]
 
 
