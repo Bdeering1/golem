@@ -11,7 +11,7 @@ import pexpect
 import pyte
 import pytest
 
-from golem import board, cli, display, ledger
+from golem import board, cli, display, ledger, progress_log
 from tests import support
 
 TODAY = date(2030, 3, 10)
@@ -118,8 +118,12 @@ def test_board_shortens_card_text_and_shows_it_in_full_in_the_detail_pane():
 
     lines = frame_lines(tasks, WIDE_WIDTH, HEIGHT, board.BoardState(focus_index=1))
 
-    assert "a-very-long-task-identi…" in "\n".join(lines)
-    assert lines[-4:-1] == [f"{task_id}  running", directory, "Polish the board more"]
+    board_text = "\n".join(lines[: -board.DETAIL_PANE_LINE_COUNT - 1])
+    detail_pane = lines[-board.DETAIL_PANE_LINE_COUNT - 1 : -1]
+    assert f"{task_id[:20]}" in board_text
+    assert task_id not in board_text
+    assert detail_pane[0].startswith(task_id)
+    assert detail_pane[1:3] == [directory, "Polish the board more"]
 
 
 def test_board_detail_pane_keeps_the_end_of_a_long_directory():
@@ -168,16 +172,31 @@ def test_board_lists_hidden_columns_on_the_side_they_scroll_in_from(
     assert tab_line.endswith(right_text)
 
 
+@pytest.mark.parametrize("width", [WIDE_WIDTH, 40, NARROW_WIDTH, 12])
+def test_board_footer_shortens_to_fit_and_keeps_help_and_quit(width):
+    footer = frame_lines(statuses_tasks(), width, HEIGHT, board.BoardState())[-1]
+
+    assert len(footer) < width
+    assert {"?", "q"} <= set(footer.split())
+
+
 @pytest.mark.parametrize(
-    ("width", "footer"),
-    [
-        (WIDE_WIDTH, "←→ column  ↑↓ select  a show done  q quit"),
-        (40, "←→ col  ↑↓ sel  a done  q quit"),
-        (NARROW_WIDTH, "←→  ↑↓  a  q"),
-    ],
+    ("seconds", "text"),
+    [(30, "<1m"), (7 * 60, "7m"), (3 * 3600 + 600, "3h 10m"), (2 * 86400 + 3600, "2d 1h")],
 )
-def test_board_footer_shortens_to_fit(width, footer):
-    assert frame_lines(statuses_tasks(), width, HEIGHT, board.BoardState())[-1] == footer
+def test_board_durations_read_at_a_glance(seconds, text):
+    assert board.duration_text(seconds) == text
+
+
+def test_board_running_card_shows_the_latest_agent_activity(ledger_path):
+    tasks = {"task": support.task_record(ledger.STATUS_RUNNING, started_at=NOW.isoformat())}
+    progress_path = progress_log.progress_path(tasks["task"]["session_id"])
+    progress_path.parent.mkdir(parents=True, exist_ok=True)
+    progress_path.write_text("Reading the auth module\n[tool] Edit app/auth/reset.py\n")
+
+    text = frame_text(tasks, state=board.BoardState(focus_index=1))
+
+    assert "Edit app/auth/reset.py" in text
 
 
 def test_board_selection_moves_within_a_column_and_scrolls_to_stay_visible():
@@ -189,8 +208,8 @@ def test_board_selection_moves_within_a_column_and_scrolls_to_stay_visible():
     board.apply_key(state, ord("k"))
     scrolled_up_text = frame_text(running_tasks(), state=state)
 
-    assert f"{board.UNICODE_GLYPHS.heavy_vertical} task-09" in bottom_text
-    assert f"{board.UNICODE_GLYPHS.heavy_vertical} task-08" in scrolled_up_text
+    assert f"{board.UNICODE_GLYPHS.selected_card_bar} task-09" in bottom_text
+    assert f"{board.UNICODE_GLYPHS.selected_card_bar} task-08" in scrolled_up_text
 
 
 def test_board_selection_stays_on_its_task_when_a_task_is_added_above_it():
@@ -202,7 +221,7 @@ def test_board_selection_stays_on_its_task_when_a_task_is_added_above_it():
 
     text = frame_text(tasks | {"task-00": added_task}, state=state)
 
-    assert "task-02  running" in text
+    assert f"{board.UNICODE_GLYPHS.selected_card_bar} task-02" in text
 
 
 def test_board_moves_focus_off_done_when_it_hides():
@@ -435,3 +454,24 @@ def test_board_keeps_unicode_rules_when_the_terminal_declares_rep(pty_board, tmp
     running_board = pty_board(environment={"TERMINFO": str(tmp_path)})
 
     assert any(line.startswith("──") for line in running_board.screen.display)
+
+
+def test_board_closes_a_finished_chain_only_after_confirmation(pty_board, ledger_path):
+    tasks = {"done": support.task_record(ledger.STATUS_FINISHED, task_id="done")}
+    running_board = pty_board(tasks=tasks)
+
+    running_board.send("3c")
+    running_board.wait_for_text("Close done?")
+    running_board.send("y")
+
+    running_board.wait_until(lambda: "closed_at" in ledger.load_tasks()["done"])
+
+
+def test_board_opens_a_task_and_returns_to_the_board(pty_board):
+    running_board = pty_board(tasks={"task": support.task_record(ledger.STATUS_RUNNING)})
+
+    running_board.send("2\r")
+    running_board.wait_for_text("Backend")
+    running_board.send("\x1b")
+
+    running_board.wait_for_text("q quit")
