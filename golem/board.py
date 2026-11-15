@@ -199,6 +199,7 @@ EMPTY_COLUMN_TEXTS = {
 }
 NO_MATCHES_TEXT = "No matches"
 NO_ACTIVITY_TEXT = "No activity yet"
+IDLE_CARD_TEXT = "no activity yet"
 GATE_CHECK_TEXT = "rechecking the gate…"
 CLOSE_ALL_DECLINED_TEXT = "Didn't close any tasks"
 LEDGER_ERROR_TEXT = "Can't read the ledger, showing the last good state: "
@@ -996,8 +997,11 @@ def is_live_card(row: display.ListRow, context: FrameContext) -> bool:
     return row.status in LIVE_STATUSES and not is_stuck(row, task, context.now)
 
 
-def card_badge_parts(row: display.ListRow, context: FrameContext) -> list[Part]:
-    parts: list[Part] = [(row.step, STYLE_DIM, None)] if row.step else []
+def card_badge_parts(
+    row: display.ListRow, context: FrameContext, *, is_named: bool = False
+) -> list[Part]:
+    step = step_text(row, context.snapshot.tasks) if is_named else row.step
+    parts: list[Part] = [(step, STYLE_DIM, None)] if step else []
     if is_new_for_review(context.snapshot, row):
         parts += [
             (" " if parts else "", STYLE_PLAIN, None),
@@ -1085,6 +1089,8 @@ def card_segments(
         detail_text_width,
         glyphs,
     )
+    if is_tall and row.status == ledger.STATUS_RUNNING and not detail:
+        detail = IDLE_CARD_TEXT
     is_warning = is_stuck(row, context.snapshot.tasks[row.task_id], now)
     stuck_ages = (time_text, coarse_time_text(time_text.removeprefix(STUCK_PREFIX)))
     warning_text = next(
@@ -1157,7 +1163,14 @@ def boxed_card_segments(
     horizontal = glyphs.heavy_horizontal if is_selected else glyphs.horizontal
     vertical = glyphs.heavy_vertical if is_selected else glyphs.vertical
     content_width = width - BOX_BORDER_WIDTH
-    badge_parts = card_badge_parts(row, context)
+    name = chain_name(context.snapshot.tasks, row.task_id)
+    facts = card_facts(row, context)
+    status_time = status_line_time(row, context, facts)
+    badge_parts = card_badge_parts(row, context, is_named=True)
+    status_line_width = len(f"  {row.status} {glyphs.separator} {status_time} ")
+    used_width = len(name) + 3 if is_slim else status_line_width
+    if used_width + parts_width(badge_parts) > content_width:
+        badge_parts = card_badge_parts(row, context)
     border_parts: list[Part] = (
         [(" ", STYLE_PLAIN, None), *badge_parts, (" ", STYLE_PLAIN, None)]
         if is_slim and badge_parts
@@ -1165,7 +1178,7 @@ def boxed_card_segments(
     )
     right_parts = [] if is_slim else badge_parts
     title_width = content_width - parts_width(border_parts)
-    title = fitted_task_id(chain_name(context.snapshot.tasks, row.task_id), title_width - 1, glyphs)
+    title = fitted_task_id(name, title_width - 1, glyphs)
     is_changed = row.task_id in changed_task_ids
     title_style = card_title_style(row, context, is_selected=is_selected)
     top_parts: list[Part] = [
@@ -1175,11 +1188,9 @@ def boxed_card_segments(
         *border_parts,
         (corners[1], STYLE_PLAIN, frame_color),
     ]
-    facts = card_facts(row, context)
     time_text, reason, short_reason, repository = facts
     is_warning = is_stuck(row, context.snapshot.tasks[row.task_id], now)
     status_width = content_width - parts_width(right_parts) - (1 if right_parts else 0)
-    status_time = status_line_time(row, context, facts)
     time_part = f" {glyphs.separator} {status_time}" if status_time else ""
     status_options = [
         (f" {row.status}", time_part),
@@ -1207,6 +1218,8 @@ def boxed_card_segments(
         glyphs,
         is_live=is_live_card(row, context),
     )
+    if row.status == ledger.STATUS_RUNNING and not detail:
+        detail = IDLE_CARD_TEXT
     detail_line_segments = [
         Segment(y + 2, x + 2, fitted_words(detail, content_width, glyphs), STYLE_DIM)
     ]
@@ -1641,12 +1654,11 @@ def detail_title_segments(
     context: FrameContext,
 ) -> list[Segment]:
     snapshot, glyphs, now = context.snapshot, context.glyphs, context.now
-    rule = glyphs.horizontal
-    segments = [Segment(rule_y, 0, rule * line_width, color=FAINT_COLOR)]
+    title_width = min(line_width, CARD_INDENT + MAX_TASK_VIEW_WIDTH + 2)
+    segments = [Segment(rule_y, 0, glyphs.horizontal * title_width, color=FAINT_COLOR)]
     if row is None:
         return [*segments, Segment(rule_y, CARD_INDENT, " No task selected ", STYLE_DIM)]
     task = snapshot.tasks[row.task_id]
-    title_width = min(line_width, CARD_INDENT + MAX_TASK_VIEW_WIDTH + 2)
     color, _ = card_colors(row, context, is_selected=True)
     label, when = status_label_and_when(row, task, now)
     status_text = f" {status_mark(row.status, glyphs, now)} {label}"
@@ -1717,7 +1729,9 @@ def detail_meta_lines(
         shown_directory = tail_shortened_directory(directory, directory_width, glyphs)
         return [[(shown_directory, STYLE_PLAIN, None), *labelled_parts(facts, gap)]]
     if can_wrap:
-        facts_parts = labelled_parts([("Step", full_step), backend_fact], META_GAP)
+        backend_width = parts_width(labelled_parts([backend_fact], META_GAP))
+        shown_step = fitted(full_step, width - len("Step ") - backend_width, glyphs)
+        facts_parts = labelled_parts([("Step", shown_step), backend_fact], META_GAP)
         facts_parts[0] = (facts_parts[0][0].lstrip(), *facts_parts[0][1:])
         directory_parts: list[Part] = [
             (tail_shortened_directory(directory, width, glyphs), STYLE_PLAIN, None)
@@ -2018,7 +2032,7 @@ def filter_input_segments(
         f"  {count_text}  {glyphs.enter_key} keep  esc clear",
         f"  {count_text}  esc clear",
     )
-    query_width = width - len(hints[-1]) - len(glyphs.cursor) - 1
+    query_width = width - len(hints[-2]) - len(glyphs.cursor) - 1
     query = f"{shown_query(state.filter_text, query_width, glyphs)}{glyphs.cursor}"
     hint = next((hint for hint in hints if len(query) + len(hint) < width), hints[-1])
     return [
