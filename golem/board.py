@@ -1431,12 +1431,16 @@ def summary_options(snapshot: BoardSnapshot, glyphs: Glyphs, now: datetime) -> l
             (f" {mark_text}", STYLE_PLAIN, mark_color),
             (f"{count} {label}", count_style, None),
         ]
+        bare_count_text = str(count) if mark else f"{count} {label}"
         for closing_label, closing in closing_options.items():
             count_text = (
-                f"{count} {closing_label}" if status == ledger.STATUS_FINISHED else str(count)
+                f"{count} {closing_label}" if status == ledger.STATUS_FINISHED else bare_count_text
             )
             closing += [(f" {mark}", STYLE_PLAIN, mark_color), (count_text, count_style, None)]
-        numbered += [(f" {mark_text}", STYLE_PLAIN, mark_color), (str(count), count_style, None)]
+        numbered += [
+            (f" {mark_text}", STYLE_PLAIN, mark_color),
+            (bare_count_text, count_style, None),
+        ]
     return [worded, tight, *closing_options.values(), numbered, []]
 
 
