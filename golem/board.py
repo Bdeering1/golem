@@ -50,7 +50,7 @@ INTERRUPTED_EXIT_STATUS = 130
 MIN_COLOR_COUNT = 256
 MUTED_COLOR = 245
 FAINT_COLOR = 239
-REMEMBERED_COLOR = 237
+REMEMBERED_COLOR = 240
 SELECTION_BACKGROUND = 238
 SELECTED_MUTED_COLOR = 250
 SELECTED_TITLE_COLOR = 255
@@ -1963,17 +1963,6 @@ def footer_segments(
             help_hint,
             quit_hint,
         ],
-        [
-            *filter_hint,
-            move_hint,
-            *open_hint,
-            next_hint,
-            *action_hints,
-            *toggle_hints,
-            *filter_key_hint,
-            help_hint,
-            quit_hint,
-        ],
         hintless_move_set,
         *(next_or_toggle_sets[::-1] if state.is_showing_all else next_or_toggle_sets),
         [*filter_hint, move_hint, *open_hint, next_hint, *action_hints, help_hint, quit_hint],
@@ -2242,7 +2231,7 @@ def task_view_segments(
         return board_view_segments(snapshot, width, height, state, glyphs, now)
     header_lines: list[list[Part]] = [
         *heading_lines(row, width - 1, snapshot, glyphs, now),
-        [(glyphs.horizontal * (width - 1), STYLE_PLAIN, FAINT_COLOR)],
+        [(glyphs.horizontal * (width - 1), STYLE_PLAIN, display.STATUS_COLORS[row.status])],
     ]
     lines = task_view_lines(row, width - 1, snapshot, glyphs, now)
     body_height = max(1, height - 1 - len(header_lines))
@@ -2343,6 +2332,8 @@ def help_sections(glyphs: Glyphs) -> list[tuple[str, list[tuple[str, str]]]]:
                 ("1/2", "step in its chain"),
                 ("stuck", "overdue, still waiting"),
                 ("bold name", "running or needs you"),
+                (glyphs.remembered_marker, f"where {glyphs.left}{glyphs.right} lands"),
+                (f"{glyphs.left} {glyphs.right}", "more columns hidden"),
             ],
         ),
     ]
