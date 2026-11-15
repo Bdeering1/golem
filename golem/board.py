@@ -1618,7 +1618,7 @@ def available_actions(snapshot: BoardSnapshot, row: display.ListRow | None) -> l
         actions.append(ACTION_RERUN_GATE)
     if row.column == display.COLUMN_REVIEW and row.status == ledger.STATUS_FINISHED:
         actions.append(ACTION_CLOSE)
-    if row.column == display.COLUMN_REVIEW and closable_task_ids(snapshot):
+    if closable_task_ids(snapshot):
         actions.append(ACTION_CLOSE_ALL)
     if row.status in CANCEL_STATUSES:
         actions.append(ACTION_CANCEL)
