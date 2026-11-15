@@ -405,7 +405,7 @@ def test_board_switches_columns_after_resizing_to_one_column(pty_board):
     running_board = pty_board()
 
     running_board.resize(NARROW_WIDTH)
-    running_board.wait_until(lambda: "to review" not in running_board.text())
+    running_board.wait_until(lambda: "queued" not in running_board.screen.display[0])
     running_board.send("lll")
 
     running_board.wait_until(lambda: running_board.is_focused("Review"))

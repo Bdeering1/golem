@@ -116,7 +116,8 @@ EMPTY_COLUMN_TEXTS = {
     display.COLUMN_REVIEW: "Nothing to review",
     display.COLUMN_DONE: "Nothing done yet",
 }
-EMPTY_BOARD_LINES = ("No tasks yet", 'Queue one with  golem run <id> "<prompt>"')
+EMPTY_BOARD_LINES = ("No tasks yet", "Queue one with", 'golem run <id> "<prompt>"')
+REASON_LINE_COUNT = 2
 UNAVAILABLE_ACTION_TEXTS = {
     ACTION_PICKUP: "Only blocked, failed or finished tasks can be picked up",
     ACTION_WATCH: "Only running tasks can be watched",
@@ -166,6 +167,7 @@ class BoardSnapshot(NamedTuple):
     rows: list[display.ListRow]
     tasks: ledger.Tasks
     activity: dict[str, list[str]]
+    unfiltered_rows: list[display.ListRow]
 
 
 class FrameContext(NamedTuple):
@@ -324,7 +326,7 @@ def board_snapshot(tasks: ledger.Tasks, now: datetime) -> BoardSnapshot:
         for row in rows
         if row.status == ledger.STATUS_RUNNING
     }
-    return BoardSnapshot(rows, tasks, activity)
+    return BoardSnapshot(rows, tasks, activity, rows)
 
 
 def is_matching(row: display.ListRow, task: ledger.Task, query: str) -> bool:
@@ -674,7 +676,7 @@ def tab_segments(
 
 
 def summary_options(snapshot: BoardSnapshot, glyphs: Glyphs, now: datetime) -> list[list[Part]]:
-    columns = dict(rows_by_column(snapshot.rows, is_showing_all=True))
+    columns = dict(rows_by_column(snapshot.unfiltered_rows, is_showing_all=True))
     counts = {board_column.title: len(column_rows) for board_column, column_rows in columns.items()}
     review_rows = columns[BOARD_COLUMNS[2]]
     stopped_count = sum(row.status in STOPPED_STATUSES for row in review_rows)
@@ -694,7 +696,7 @@ def summary_options(snapshot: BoardSnapshot, glyphs: Glyphs, now: datetime) -> l
         (
             glyphs.status_marks[ledger.STATUS_FINISHED],
             len(review_rows) - stopped_count,
-            "to review",
+            "finished",
             display.STATUS_COLORS[ledger.STATUS_FINISHED],
         ),
         (
@@ -756,7 +758,7 @@ def detail_segments(
         lines = detail_lines(row, line_width, line_count, snapshot, glyphs, now)
     rule_y = footer_y - 1 - line_count
     segments = [Segment(rule_y, 0, glyphs.horizontal * line_width, color=FAINT_COLOR)]
-    for line_offset, parts in enumerate(lines, start=1):
+    for line_offset, parts in enumerate(lines[:line_count], start=1):
         segments += part_segments(rule_y + line_offset, 0, parts)
     return segments
 
@@ -782,6 +784,19 @@ def task_heading_parts(
     ]
 
 
+def heading_lines(
+    row: display.ListRow, width: int, snapshot: BoardSnapshot, glyphs: Glyphs, now: datetime
+) -> list[list[Part]]:
+    heading_parts = task_heading_parts(row, sys.maxsize, snapshot, glyphs, now)
+    if parts_width(heading_parts) <= width:
+        return [heading_parts]
+    (task_id, id_style, id_color), (status_text, status_style, status_color), facts = heading_parts
+    return [
+        [(fitted(task_id, width, glyphs), id_style, id_color)],
+        [(status_text.lstrip(), status_style, status_color), facts],
+    ]
+
+
 def detail_lines(
     row: display.ListRow,
     line_width: int,
@@ -792,19 +807,26 @@ def detail_lines(
 ) -> list[list[Part]]:
     directory = display.display_directory(row.directory)
     lines: list[list[Part]] = [
-        task_heading_parts(row, line_width, snapshot, glyphs, now),
+        *heading_lines(row, line_width, snapshot, glyphs, now),
         [(tail_shortened_directory(directory, line_width, glyphs), STYLE_DIM, None)],
     ]
     task = snapshot.tasks[row.task_id]
     reason = row_reason(row, snapshot)
-    if reason:
-        lines.append([(fitted(reason, line_width, glyphs), STYLE_PLAIN, None)])
+    if reason and line_width > len(glyphs.ellipsis) + 1 and len(lines) < line_count:
+        reason_lines = textwrap.wrap(
+            reason,
+            line_width,
+            max_lines=min(REASON_LINE_COUNT, line_count - len(lines)),
+            placeholder=f" {glyphs.ellipsis}",
+        )
+        reason_parts: list[list[Part]] = [[(line, STYLE_PLAIN, None)] for line in reason_lines]
+        lines += reason_parts
     remaining_count = line_count - len(lines)
     activity = snapshot.activity.get(row.task_id, [])
     if activity:
         activity_parts: list[list[Part]] = [
             [(fitted(activity_text(line, glyphs), line_width, glyphs), STYLE_DIM, None)]
-            for line in activity[-remaining_count:]
+            for line in activity[len(activity) - max(0, remaining_count) :]
         ]
         return lines + activity_parts
     prompt = " ".join(task.get("prompt", "").split())
@@ -900,7 +922,8 @@ def footer_segments(
 ) -> list[Segment]:
     if state.is_filtering:
         query = f"/{state.filter_text}{glyphs.cursor}"
-        hint = f"  {len(snapshot.rows)} shown  {glyphs.enter_key} keep  esc clear"
+        shown_count = f"{len(snapshot.rows)}/{len(snapshot.unfiltered_rows)}"
+        hint = f"  {shown_count} match  {glyphs.enter_key} keep  esc clear"
         return [
             Segment(y, 0, query, STYLE_BOLD, BOARD_COLUMNS[1].color),
             Segment(y, len(query), hint, STYLE_DIM),
@@ -910,7 +933,8 @@ def footer_segments(
         return status_segments
     action_hints = footer_action_hints(snapshot, row)
     open_hint = [(glyphs.enter_key, "open")] if row is not None else []
-    filter_hint = [(f"/{state.filter_text}", "esc clears")] if state.filter_text else []
+    match_text = f"{len(snapshot.rows)}/{len(snapshot.unfiltered_rows)}"
+    filter_hint = [(f"/{state.filter_text}", match_text)] if state.filter_text else []
     done_hint = ("a", "hide done" if state.is_showing_all else "show done")
     key_sets = [
         [
@@ -923,9 +947,27 @@ def footer_segments(
             ("?", "help"),
             ("q", "quit"),
         ],
+        [
+            *filter_hint,
+            (glyphs.column_keys, ""),
+            (glyphs.select_keys, ""),
+            *open_hint,
+            *action_hints,
+            ("?", "help"),
+            ("q", "quit"),
+        ],
         [*filter_hint, *open_hint, *action_hints, ("?", "help"), ("q", "quit")],
-        [*open_hint, *[(key, "") for key, _ in action_hints], ("?", "help"), ("q", "quit")],
-        [("?", "help"), ("q", "quit")],
+        [
+            *filter_hint,
+            (glyphs.column_keys, ""),
+            (glyphs.select_keys, ""),
+            *open_hint,
+            *[(key, "") for key, _ in action_hints],
+            ("?", "help"),
+            ("q", "quit"),
+        ],
+        [*filter_hint, *open_hint, *[(key, "") for key, _ in action_hints], ("?", ""), ("q", "")],
+        [*filter_hint, ("?", ""), ("q", "")],
         [("?", ""), ("q", "")],
     ]
     return key_hint_segments(y, width, key_sets)
@@ -1037,16 +1079,8 @@ def task_view_lines(
         for pull_request in chain_pull_requests(snapshot, row.task_id)
     ]
     label_width = max(len(label) for label, _ in fields) + 2
-    heading_parts = task_heading_parts(row, sys.maxsize, snapshot, glyphs, now)
-    heading_lines = [heading_parts]
-    if parts_width(heading_parts) > width:
-        task_id, (status_text, status_style, status_color), facts = heading_parts
-        heading_lines = [
-            [(fitted(task_id[0], width, glyphs), task_id[1], task_id[2])],
-            [(status_text.lstrip(), status_style, status_color), facts],
-        ]
     lines: list[list[Part]] = [
-        *heading_lines,
+        *heading_lines(row, width, snapshot, glyphs, now),
         [(glyphs.horizontal * width, STYLE_PLAIN, FAINT_COLOR)],
     ]
     for label, value in fields:
@@ -1499,7 +1533,7 @@ def board_loop(screen: curses.window, *, is_color: bool, glyphs: Glyphs) -> int:
     task_ledger_path = ledger.ledger_path()
     state = BoardState()
     shown_source_key: tuple[LedgerStat, tuple[LedgerStat, ...], date] | None = None
-    snapshot = BoardSnapshot([], {}, {})
+    snapshot = BoardSnapshot([], {}, {}, [])
     shown_size = screen.getmaxyx()
     while True:
         now = datetime.now().astimezone()
