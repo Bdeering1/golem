@@ -26,6 +26,7 @@ HIDDEN_COLUMN_MARGIN = 2
 COLUMN_GAP = 2
 RAIL_WIDTH = 1
 REVIEW_SHARE_PERCENT = 40
+MAX_REVIEW_SHARE_COLUMN_COUNT = 3
 MIN_REVIEW_NEIGHBOUR_WIDTH = 22
 CARD_INDENT = 2
 BOX_BORDER_WIDTH = 4
@@ -513,7 +514,7 @@ def column_spans(
     total_width = width - left_margin - right_margin - (fit_count - 1) * COLUMN_GAP
     widths = [total_width // fit_count] * fit_count
     review_offset = REVIEW_COLUMN_INDEX - first_index
-    if is_split and 0 <= review_offset < fit_count:
+    if 1 < fit_count <= MAX_REVIEW_SHARE_COLUMN_COUNT and 0 <= review_offset < fit_count:
         review_width = max(
             widths[0],
             min(
@@ -547,7 +548,7 @@ def board_layout(
     header_y = TAB_LINE_Y + spacer_row_count
     footer_y = height - (2 if fit_count == 1 else 1)
     line_count = detail_line_count(height)
-    detail_height = line_count + 1 if line_count else 0
+    detail_height = line_count + 1 + spacer_row_count if line_count else 0
     body_top = header_y + 2 + spacer_row_count
     body_height = footer_y - detail_height - body_top
     can_box = min(span_width for _, span_width in spans) >= MIN_BOXED_CARD_WIDTH
@@ -1892,6 +1893,7 @@ def footer_segments(
         ],
         [*filter_hint, *open_hint, *action_hints, *filter_key_hint, help_hint, quit_hint],
         [*filter_hint, *open_hint, *action_hints, help_hint, quit_hint],
+        [*filter_hint[:2], *open_hint, *action_hints, help_hint, quit_hint],
         [*filter_hint, *open_hint, *[(key, "") for key, _ in action_hints], help_hint, quit_hint],
         [*filter_hint, *action_hints, help_hint, quit_hint],
         [*filter_hint, *[(key, "") for key, _ in action_hints], help_hint, quit_hint],
