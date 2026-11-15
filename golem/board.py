@@ -48,6 +48,7 @@ TERMINFO_SOURCE_NAME = "terminal.terminfo"
 BOARD_TITLE = "golem"
 NOT_A_TERMINAL_MESSAGE = "golem: board needs a terminal; use golem list"
 HELP_CLOSE_HINT = " any key closes "
+HELP_SECTION_GAP = 4
 RETURN_PROMPT = "golem: press Enter to return to the board"
 GOLEM_COMMAND = (sys.executable, "-m", "golem")
 OPEN_COMMAND = "open"
@@ -1016,7 +1017,7 @@ def task_view_lines(
         ("Directory", display.display_directory(row.directory)),
         ("Worktree", display.display_directory(task.get("worktree", ""))),
         ("Backend", task["backend"]),
-        ("Scheduled", moment_text(due_at, now)),
+        ("Due", moment_text(due_at, now)),
         ("Started", moment_text(task.get("started_at"), now)),
         ("Finished", moment_text(task.get("finished_at"), now)),
         ("Gate", task.get("gate", "")),
@@ -1036,8 +1037,16 @@ def task_view_lines(
         for pull_request in chain_pull_requests(snapshot, row.task_id)
     ]
     label_width = max(len(label) for label, _ in fields) + 2
+    heading_parts = task_heading_parts(row, sys.maxsize, snapshot, glyphs, now)
+    heading_lines = [heading_parts]
+    if parts_width(heading_parts) > width:
+        task_id, (status_text, status_style, status_color), facts = heading_parts
+        heading_lines = [
+            [(fitted(task_id[0], width, glyphs), task_id[1], task_id[2])],
+            [(status_text.lstrip(), status_style, status_color), facts],
+        ]
     lines: list[list[Part]] = [
-        task_heading_parts(row, width, snapshot, glyphs, now),
+        *heading_lines,
         [(glyphs.horizontal * width, STYLE_PLAIN, FAINT_COLOR)],
     ]
     for label, value in fields:
@@ -1143,17 +1152,37 @@ def help_sections(glyphs: Glyphs) -> list[tuple[str, list[tuple[str, str]]]]:
     ]
 
 
+type HelpRow = tuple[str, str, bool]
+
+
+def help_columns(
+    sections: list[tuple[str, list[tuple[str, str]]]], width: int, height: int, column_width: int
+) -> list[list[HelpRow]]:
+    section_rows: list[list[HelpRow]] = [
+        [(title, "", True), *[(key, label, False) for key, label in bindings]]
+        for title, bindings in sections
+    ]
+    side_by_side_width = len(sections) * (column_width + HELP_SECTION_GAP) - HELP_SECTION_GAP + 4
+    if side_by_side_width <= width:
+        return section_rows
+    spacer: list[HelpRow] = [("", "", False)]
+    is_spaced = sum(map(len, section_rows)) + len(section_rows) - 1 + 2 <= height - 1
+    single_column: list[HelpRow] = []
+    for index, rows in enumerate(section_rows):
+        single_column += (spacer if index and is_spaced else []) + rows
+    return [single_column]
+
+
 def help_view_segments(width: int, height: int, glyphs: Glyphs) -> list[Segment]:
-    rows: list[tuple[str, str, bool]] = []
-    for section_index, (title, bindings) in enumerate(help_sections(glyphs)):
-        if section_index:
-            rows.append(("", "", False))
-        rows.append((title, "", True))
-        rows += [(key, label, False) for key, label in bindings]
-    key_width = max(len(key) for key, _, is_title in rows if not is_title) + 3
-    inner_width = key_width + max(len(label) for _, label, _ in rows) + 2
-    box_width = min(width, inner_width + 4)
-    box_height = min(height - 1, len(rows) + 4)
+    sections = help_sections(glyphs)
+    bindings = [binding for _, section_bindings in sections for binding in section_bindings]
+    key_width = max(len(key) for key, _ in bindings) + 3
+    column_width = key_width + max(len(label) for _, label in bindings)
+    columns = help_columns(sections, width, height, column_width)
+    content_height = max(map(len, columns))
+    padding = 1 if content_height + 4 <= height - 1 else 0
+    box_width = min(width, len(columns) * (column_width + HELP_SECTION_GAP) - HELP_SECTION_GAP + 4)
+    box_height = min(height - 1, content_height + 2 + 2 * padding)
     left = max(0, (width - box_width) // 2)
     top = max(0, (height - 1 - box_height) // 2)
     corners = glyphs.corners
@@ -1176,16 +1205,19 @@ def help_view_segments(width: int, height: int, glyphs: Glyphs) -> list[Segment]
             Segment(top + offset, left, glyphs.vertical + " " * (box_width - 2), STYLE_DIM),
             Segment(top + offset, left + box_width - 1, glyphs.vertical, STYLE_DIM),
         ]
-    for offset, (key, label, is_title) in enumerate(rows[: box_height - 4], start=2):
-        if is_title:
-            segments.append(
-                Segment(top + offset, left + 2, key, STYLE_BOLD, BOARD_COLUMNS[1].color)
-            )
-            continue
-        segments += [
-            Segment(top + offset, left + 2, key, STYLE_BOLD),
-            Segment(top + offset, left + 2 + key_width, label, STYLE_PLAIN),
-        ]
+    first_row_y = top + 1 + padding
+    for column_index, rows in enumerate(columns):
+        x = left + 2 + column_index * (column_width + HELP_SECTION_GAP)
+        for offset, (key, label, is_title) in enumerate(rows[: box_height - 2 - 2 * padding]):
+            if is_title:
+                segments.append(
+                    Segment(first_row_y + offset, x, key, STYLE_BOLD, BOARD_COLUMNS[1].color)
+                )
+                continue
+            segments += [
+                Segment(first_row_y + offset, x, key, STYLE_BOLD),
+                Segment(first_row_y + offset, x + key_width, label, STYLE_PLAIN),
+            ]
     return segments
 
 
