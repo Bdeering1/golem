@@ -27,7 +27,6 @@ COLUMN_GAP = 2
 RAIL_WIDTH = 1
 REVIEW_SHARE_PERCENT = 40
 MAX_REVIEW_SHARE_COLUMN_COUNT = 3
-MIN_REVIEW_NEIGHBOUR_WIDTH = 22
 CARD_INDENT = 2
 BOX_BORDER_WIDTH = 4
 MIN_BOXED_CARD_WIDTH = 30
@@ -519,7 +518,7 @@ def column_spans(
             widths[0],
             min(
                 total_width * REVIEW_SHARE_PERCENT // 100,
-                total_width - (fit_count - 1) * MIN_REVIEW_NEIGHBOUR_WIDTH,
+                total_width - (fit_count - 1) * MIN_BOXED_CARD_WIDTH,
             ),
         )
         other_width = (total_width - review_width) // (fit_count - 1)
@@ -558,11 +557,12 @@ def board_layout(
         for index, size in enumerate(column_sizes)
     )
     shown_indices = range(first_index, first_index + fit_count)
-    if any(styles[index] == DENSE_CARD for index in shown_indices):
-        styles = tuple(
-            DENSE_CARD if index in shown_indices and style == SPACED_CARD else style
-            for index, style in enumerate(styles)
-        )
+    for packed_style, spaced_style in ((DENSE_CARD, SPACED_CARD), (STACKED_BOXED_CARD, BOXED_CARD)):
+        if any(styles[index] == packed_style for index in shown_indices):
+            styles = tuple(
+                packed_style if index in shown_indices and style == spaced_style else style
+                for index, style in enumerate(styles)
+            )
     if line_count:
         used_height = max(
             column_used_height(column_sizes[index], styles[index], body_height)
@@ -939,12 +939,20 @@ def card_segments(
     detail_facts = ("" if is_tall else time_text, reason, short_reason, repository)
     detail_y = y + 2 if is_tall else y + 1
     detail_text_width = width - CARD_INDENT if is_tall else detail_width
-    detail = card_detail(
-        detail_facts,
+    detail = fitted_words(
+        card_detail(detail_facts, detail_text_width, glyphs, is_live=is_live),
         detail_text_width,
         glyphs,
-        is_live=is_live,
     )
+    is_warning = is_stuck(row, context.snapshot.tasks[row.task_id], now)
+    stuck_ages = (time_text, coarse_time_text(time_text.removeprefix(STUCK_PREFIX)))
+    warning_text = next(
+        (age for age in stuck_ages if is_warning and age and detail.startswith(age)), ""
+    )
+    detail_parts: list[Part] = [
+        (warning_text, STYLE_PLAIN, mark_color),
+        (detail.removeprefix(warning_text), STYLE_DIM, None),
+    ]
     is_changed = row.task_id in changed_task_ids
     title_color = color if is_changed else (SELECTED_TITLE_COLOR if is_selected else None)
     background = SELECTION_BACKGROUND if is_selected else None
@@ -958,7 +966,6 @@ def card_segments(
         time_part = f" {glyphs.separator} {time_text}" if time_text else ""
         status_parts = [(row.status, STYLE_PLAIN, mark_color), (time_part, STYLE_DIM, None)]
         if is_status_implied(row, context):
-            is_warning = is_stuck(row, context.snapshot.tasks[row.task_id], now)
             status_parts = [
                 (time_text, STYLE_PLAIN, mark_color) if is_warning else (time_text, STYLE_DIM, None)
             ]
@@ -982,12 +989,7 @@ def card_segments(
                 title_color,
             ),
             *part_segments(y + 1, x + CARD_INDENT, status_parts),
-            Segment(
-                detail_y,
-                x + CARD_INDENT,
-                fitted_words(detail, detail_text_width, glyphs),
-                STYLE_DIM,
-            ),
+            *part_segments(detail_y, x + CARD_INDENT, detail_parts),
             *part_segments(y + 1, x + width - parts_width(right_parts), right_parts),
         ],
         background,
@@ -1498,8 +1500,8 @@ def detail_lines(
             *paragraph_lines(activity_text(activity[-1], glyphs), wrap_width),
         ]
     primary_count = min(len(primary_lines), PRIMARY_LINE_COUNT, line_count)
-    prompt_count = min(len(prompt_lines), 1, line_count - primary_count)
-    meta_count = min(1, line_count - primary_count - prompt_count)
+    meta_count = min(1, line_count - primary_count)
+    prompt_count = min(len(prompt_lines), 1, line_count - primary_count - meta_count)
     spare_count = line_count - primary_count - prompt_count - meta_count
     extra_primary_count = min(len(primary_lines) - primary_count, spare_count)
     primary_count += extra_primary_count
