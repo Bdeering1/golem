@@ -179,6 +179,7 @@ NO_ACTIVITY_TEXT = "No activity yet"
 GATE_CHECK_TEXT = "rechecking the gate…"
 NO_CHANGE_TEXT = "No change"
 LEDGER_ERROR_TEXT = "Can't read the ledger, showing the last good state: "
+STALE_TEXT = "stale"
 NOTHING_NEEDS_YOU_TEXT = "Nothing needs you right now"
 WAITING_DIRECTORY_TEXT = "waiting for directory:"
 BUSY_DIRECTORY_TEXT = "dir busy:"
@@ -410,6 +411,7 @@ class BoardState:
     is_showing_help: bool = False
     help_scroll: int = 0
     help_scroll_limit: int = 0
+    is_ledger_stale: bool = False
     focus_before_done: int = 0
     changed_until: dict[str, float] = field(default_factory=dict[str, float])
     gate_checks: dict[str, subprocess.Popen[str]] = field(
@@ -1399,6 +1401,9 @@ def title_segments(
     right_text = f"/{state.filter_text}" if state.filter_text else display.clock_time(now)
     right_style = STYLE_BOLD if state.filter_text else STYLE_DIM
     right_color = BOARD_COLUMNS[1].color if state.filter_text else None
+    if state.is_ledger_stale:
+        right_text, right_style = STALE_TEXT, STYLE_BOLD
+        right_color = display.STATUS_COLORS[ledger.STATUS_FAILED]
     title_parts: list[Part] = [(BOARD_TITLE, STYLE_BOLD, None)]
     summaries = summary_options(snapshot, glyphs, now)
     options = [(option, right_text) for option in summaries[:-1]]
@@ -2871,8 +2876,10 @@ def board_loop(screen: curses.window, *, is_color: bool, glyphs: Glyphs) -> int:
                 snapshot = board_snapshot(ledger.load_tasks(), now)
             except (ValueError, KeyError, TypeError) as error:
                 flash(state, f"{LEDGER_ERROR_TEXT}{error}")
+                state.is_ledger_stale = True
                 shown_source_key = source_key
                 continue
+            state.is_ledger_stale = False
             if is_first_load:
                 state.focus_index = attention_column_index(snapshot.rows)
             else:
