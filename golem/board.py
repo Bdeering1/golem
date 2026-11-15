@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from types import FrameType
 
 MIN_COLUMN_WIDTH = 20
+MAX_TWO_LINE_FOOTER_COLUMN_COUNT = 2
 HIDDEN_COLUMN_MARGIN = 2
 COLUMN_GAP = 2
 RAIL_WIDTH = 1
@@ -550,7 +551,7 @@ def board_layout(
     spans = column_spans(width, fit_count, column_count, first_index)
     spacer_row_count = 1 if height >= SPACED_HEIGHT else 0
     header_y = TAB_LINE_Y + spacer_row_count
-    footer_y = height - (2 if fit_count == 1 else 1)
+    footer_y = height - (2 if fit_count <= MAX_TWO_LINE_FOOTER_COLUMN_COUNT else 1)
     line_count = detail_line_count(height)
     detail_height = line_count + 1 + spacer_row_count if line_count else 0
     body_top = header_y + 2 + spacer_row_count
@@ -1871,19 +1872,21 @@ def narrow_footer_segments(
             [short_filter_hint, ("esc", "")],
         ]
         return action_segments + key_hint_segments(y + 1, width, filter_sets)
+    is_done_on_action_line = any(segment.text == done_hint(state)[0] for segment in action_segments)
+    navigation_done_hint = ("n", "next") if is_done_on_action_line else done_hint(state)
     navigation_sets = [
         [
             (glyphs.column_keys, "column"),
             (glyphs.select_keys, "select"),
             ("/", "filter"),
-            done_hint(state),
+            navigation_done_hint,
             help_hint,
             quit_hint,
         ],
-        [move_hint, ("/", "filter"), done_hint(state), help_hint, quit_hint],
+        [move_hint, ("/", "filter"), navigation_done_hint, help_hint, quit_hint],
         [(move_hint[0], ""), ("/", "filter"), ("n", "next"), help_hint, quit_hint],
         [move_hint, ("/", "filter"), help_hint, quit_hint],
-        [("/", "filter"), done_hint(state), help_hint, quit_hint],
+        [("/", "filter"), navigation_done_hint, help_hint, quit_hint],
         [move_hint, help_hint, quit_hint],
         [help_hint, quit_hint],
         [("?", ""), ("q", "")],
@@ -2077,7 +2080,7 @@ def board_view_segments(
             row,
             context,
         )
-    if layout.fit_count == 1:
+    if layout.fit_count <= MAX_TWO_LINE_FOOTER_COLUMN_COUNT:
         return segments + narrow_footer_segments(
             layout.footer_y, width, state, snapshot, row, glyphs
         )
