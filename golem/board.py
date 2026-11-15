@@ -225,6 +225,7 @@ class Glyphs(NamedTuple):
     heavy_vertical: str
     cursor: str
     new_mark: str
+    idle_mark: str
 
 
 class BoardSnapshot(NamedTuple):
@@ -334,6 +335,7 @@ UNICODE_GLYPHS = Glyphs(
     heavy_vertical="┃",
     cursor="▏",
     new_mark="●",
+    idle_mark="○",
 )
 ASCII_GLYPHS = Glyphs(
     horizontal="-",
@@ -364,6 +366,7 @@ ASCII_GLYPHS = Glyphs(
     heavy_vertical="#",
     cursor="_",
     new_mark="*",
+    idle_mark="o",
 )
 
 
@@ -1209,7 +1212,7 @@ def summary_options(snapshot: BoardSnapshot, glyphs: Glyphs, now: datetime) -> l
     review_statuses = [row.status for row in columns[BOARD_COLUMNS[2]]]
     running_count = counts[display.COLUMN_RUNNING]
     running_mark = (
-        status_mark(ledger.STATUS_RUNNING, glyphs, now) if running_count else glyphs.spinner[0]
+        status_mark(ledger.STATUS_RUNNING, glyphs, now) if running_count else glyphs.idle_mark
     )
 
     items = [
@@ -1671,8 +1674,13 @@ def narrow_footer_segments(
         count_text, done_text = match_count_parts(snapshot, state)
         filter_hint = (f"/{state.filter_text}", count_text + done_text)
         short_filter_hint = (f"/{state.filter_text}", count_text)
+        done_count = sum(row.column == display.COLUMN_DONE for row in snapshot.rows)
+        done_hints = [("a", f"{done_count} in Done")] if done_text else []
         filter_sets = [
             [filter_hint, ("esc", "clear"), help_hint, quit_hint],
+            [short_filter_hint, *done_hints, ("esc", "clear"), help_hint, quit_hint],
+            [short_filter_hint, *done_hints, ("esc", "clear"), ("?", ""), ("q", "")],
+            [short_filter_hint, *done_hints, ("esc", "clear")],
             [short_filter_hint, ("esc", "clear"), help_hint, quit_hint],
             [short_filter_hint, ("esc", "clear"), ("?", ""), ("q", "")],
             [short_filter_hint, ("esc", "")],
@@ -1724,7 +1732,7 @@ def footer_segments(
         else []
     )
     toggle_hints = [toggle_hint]
-    if done_text:
+    if state.filter_text and done_text:
         filter_hint.append(toggle_hint)
         toggle_hints = []
     filter_key_hint = [] if state.filter_text else [("/", "filter")]
