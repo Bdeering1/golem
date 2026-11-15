@@ -177,7 +177,7 @@ EMPTY_COLUMN_TEXTS = {
 NO_MATCHES_TEXT = "No matches"
 NO_ACTIVITY_TEXT = "No activity yet"
 GATE_CHECK_TEXT = "rechecking the gate…"
-NO_CHANGE_TEXT = "No change"
+CLOSE_ALL_DECLINED_TEXT = "Didn't close any tasks"
 LEDGER_ERROR_TEXT = "Can't read the ledger, showing the last good state: "
 STALE_TEXT = "stale"
 UNREADABLE_LEDGER_TEXT = "ledger unreadable"
@@ -2829,7 +2829,12 @@ def handle_action_key(
         if key == ord("y") and row is not None:
             run_action(screen, state, snapshot, action, row)
             return True
-        flash(state, NO_CHANGE_TEXT)
+        declined_text = (
+            f"Didn't {ACTION_LABELS[action]} {row.task_id}"
+            if action != ACTION_CLOSE_ALL and row is not None
+            else CLOSE_ALL_DECLINED_TEXT
+        )
+        flash(state, declined_text)
         return True
     key_actions = [action for action, char in ACTION_KEYS.items() if ord(char) == key]
     if not key_actions or row is None:
