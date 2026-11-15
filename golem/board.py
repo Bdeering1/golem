@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 MIN_COLUMN_WIDTH = 20
 HIDDEN_COLUMN_MARGIN = 2
 COLUMN_GAP = 2
+RAIL_WIDTH = 1
 REVIEW_SHARE_PERCENT = 40
 MIN_REVIEW_NEIGHBOUR_WIDTH = 22
 CARD_INDENT = 2
@@ -504,7 +505,7 @@ def column_spans(
     width: int, fit_count: int, column_count: int, first_index: int
 ) -> tuple[tuple[int, int], ...]:
     is_split = fit_count > 1
-    left_margin = HIDDEN_COLUMN_MARGIN if is_split and first_index > 0 else 0
+    left_margin = HIDDEN_COLUMN_MARGIN if is_split and first_index > 0 else RAIL_WIDTH
     has_right_hidden = first_index + fit_count < column_count
     right_margin = HIDDEN_COLUMN_MARGIN if is_split and has_right_hidden else 0
     total_width = width - left_margin - right_margin - (fit_count - 1) * COLUMN_GAP
@@ -953,7 +954,15 @@ def card_segments(
             status_parts = [
                 (time_text, STYLE_PLAIN, mark_color) if is_warning else (time_text, STYLE_DIM, None)
             ]
-    return highlighted(
+    rail = (
+        [
+            Segment(y + offset, x - RAIL_WIDTH, glyphs.focus_marker, color=color)
+            for offset in range(line_count)
+        ]
+        if is_selected
+        else []
+    )
+    return rail + highlighted(
         [
             *fill,
             Segment(y, x, status_mark(row.status, glyphs, now), mark_style, mark_color),
@@ -1059,7 +1068,15 @@ def column_segments(
     x, column_width = layout.column_spans[column_index - state.first_column_index]
     is_focused = column_index == state.focus_index
     rule = glyphs.heavy_horizontal if is_focused else glyphs.horizontal
-    segments = [Segment(layout.header_y + 1, x, rule * column_width, color=board_column.color)]
+    rule_x = 0 if layout.fit_count == 1 else x
+    segments = [
+        Segment(
+            layout.header_y + 1,
+            rule_x,
+            rule * (column_width + x - rule_x),
+            color=board_column.color,
+        )
+    ]
     visible_columns = rows_by_column(context.snapshot.rows, is_showing_all=state.is_showing_all)
     if not any(rows for _, rows in visible_columns):
         return segments
@@ -1468,7 +1485,10 @@ def detail_lines(
             f" {glyphs.separator} ".join(short_reason.splitlines()), wrap_width
         )
     if activity:
-        primary_lines = [fitted(activity_text(line, glyphs), width, glyphs) for line in activity]
+        primary_lines = [
+            *(fitted(activity_text(line, glyphs), width, glyphs) for line in activity[:-1]),
+            *paragraph_lines(activity_text(activity[-1], glyphs), wrap_width),
+        ]
     primary_count = min(len(primary_lines), PRIMARY_LINE_COUNT, line_count)
     prompt_count = min(len(prompt_lines), 1, line_count - primary_count)
     meta_count = min(1, line_count - primary_count - prompt_count)
@@ -1707,6 +1727,7 @@ def narrow_footer_segments(
             y,
             width,
             [
+                [*open_hint, *action_hints, done_hint(state)],
                 [*open_hint, *footer_action_hints(snapshot, row, is_complete=True)],
                 [*open_hint, *action_hints],
                 action_hints,

@@ -479,7 +479,7 @@ def test_board_keeps_unicode_rules_when_the_terminal_declares_rep(pty_board, tmp
 
     running_board = pty_board(environment={"TERMINFO": str(tmp_path)})
 
-    assert any(line.startswith("──") for line in running_board.screen.display)
+    assert any(line.lstrip().startswith("──") for line in running_board.screen.display)
 
 
 def test_board_closes_a_finished_chain_only_after_confirmation(pty_board, ledger_path):
