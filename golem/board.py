@@ -968,8 +968,7 @@ def card_segments(
     glyphs, now, changed_task_ids = context.glyphs, context.now, context.changed_task_ids
     color, mark_color = card_colors(row, context, is_selected=is_selected)
     right_parts = card_badge_parts(row, context)
-    badge_gap = 2 if row.step else 1
-    right_width = parts_width(right_parts) + (badge_gap if right_parts else 0)
+    right_width = parts_width(right_parts) + (1 if right_parts else 0)
     title = fitted_task_id(row.task_id, width - CARD_INDENT, glyphs)
     detail_width = width - CARD_INDENT - right_width
     time_text, reason, short_reason, repository = card_facts(row, context)
@@ -1901,10 +1900,9 @@ def footer_segments(
         toggle_hints = []
     filter_key_hint = [] if state.filter_text else [("/", "filter")]
     column_hint, select_hint = (glyphs.column_keys, "column"), (glyphs.select_keys, "select")
-    move_hint = (f"{glyphs.column_keys}{glyphs.select_keys}", "move")
     help_hint, quit_hint = ("?", "help"), ("q", "quit")
     next_hint = ("n", "next")
-    hintless_move_set = [
+    arrowless_set = [
         *filter_hint,
         *open_hint,
         next_hint,
@@ -1917,7 +1915,6 @@ def footer_segments(
     next_or_toggle_sets = [
         [
             *filter_hint,
-            move_hint,
             *open_hint,
             next_hint,
             *action_hints,
@@ -1927,7 +1924,6 @@ def footer_segments(
         ],
         [
             *filter_hint,
-            move_hint,
             *open_hint,
             *action_hints,
             *toggle_hints,
@@ -1961,27 +1957,9 @@ def footer_segments(
             help_hint,
             quit_hint,
         ],
-        hintless_move_set,
+        arrowless_set,
         *(next_or_toggle_sets[::-1] if state.is_showing_all else next_or_toggle_sets),
-        [*filter_hint, move_hint, *open_hint, next_hint, *action_hints, help_hint, quit_hint],
-        [
-            *filter_hint,
-            (move_hint[0], ""),
-            *open_hint,
-            next_hint,
-            *action_hints,
-            help_hint,
-            quit_hint,
-        ],
-        [
-            *filter_hint,
-            move_hint,
-            *open_hint,
-            *action_hints,
-            *filter_key_hint,
-            help_hint,
-            quit_hint,
-        ],
+        [*filter_hint, *open_hint, next_hint, *action_hints, help_hint, quit_hint],
         [*filter_hint, *open_hint, *action_hints, *filter_key_hint, help_hint, quit_hint],
         [*filter_hint, *open_hint, *action_hints, help_hint, quit_hint],
         [*filter_hint[:2], *open_hint, *action_hints, help_hint, quit_hint],
