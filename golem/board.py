@@ -156,8 +156,10 @@ PATH_PREFIX_PATTERN = re.compile(r"[~/]\S*/")
 SHORT_REASON_PATTERNS = (
     (re.compile(r"^(?:fatal|error): "), ""),
     (re.compile(r"a branch named '[^']+' already exists"), "branch already exists"),
+    (re.compile(r"(\d+) failed, (\d+) passed"), r"\1 fail/\2 pass"),
 )
-DURATION_PART_PATTERN = re.compile(r"\d+[a-z]")
+DURATION_PART_PATTERN = re.compile(r"(\d+)([a-z])")
+DURATION_UNIT_SIZES = {"m": 60, "h": 24}
 LOUD_STATUSES = {*STOPPED_STATUSES, ledger.STATUS_RUNNING}
 PICKUP_STATUSES = {ledger.STATUS_BLOCKED, ledger.STATUS_FAILED, ledger.STATUS_FINISHED}
 CANCEL_STATUSES = {ledger.STATUS_SCHEDULED, ledger.STATUS_WAITING}
@@ -798,9 +800,12 @@ def card_facts(row: display.ListRow, context: FrameContext) -> tuple[str, str, s
 
 def coarse_time_text(time_text: str) -> str:
     words = time_text.split()
-    if len(words) > 1 and all(DURATION_PART_PATTERN.fullmatch(word) for word in words[-2:]):
-        return " ".join(words[:-1])
-    return time_text
+    matches = [DURATION_PART_PATTERN.fullmatch(word) for word in words[-2:]]
+    if len(words) <= 1 or None in matches:
+        return time_text
+    (count, unit), (part_count, part_unit) = (match.groups() for match in matches if match)
+    is_rounding_up = int(part_count) * 2 >= DURATION_UNIT_SIZES.get(part_unit, sys.maxsize)
+    return " ".join([*words[:-2], f"{int(count) + is_rounding_up}{unit}"])
 
 
 def card_detail(
@@ -833,10 +838,10 @@ def card_detail(
         ]
         if short_reason.startswith(BUSY_DIRECTORY_TEXT) and time_text:
             busy_text = short_reason.replace(BUSY_DIRECTORY_TEXT, SHORT_BUSY_TEXT)
+            directory_name = short_reason.removeprefix(BUSY_DIRECTORY_TEXT).strip()
             options += [
-                separator.join((coarse_time_text(time_text.removeprefix(STUCK_PREFIX)), busy_text)),
-                busy_text,
-                separator.join((time_text, BUSY_DIRECTORY_TEXT.rstrip(":"))),
+                separator.join((time_text, busy_text)),
+                separator.join((time_text, directory_name)),
             ]
         return next((option for option in options if len(option) <= width), options[-1])
     if not timed_facts:
@@ -1501,7 +1506,9 @@ def detail_lines(
         ]
     primary_count = min(len(primary_lines), PRIMARY_LINE_COUNT, line_count)
     meta_count = min(1, line_count - primary_count)
-    prompt_count = min(len(prompt_lines), 1, line_count - primary_count - meta_count)
+    prompt_count = min(
+        len(prompt_lines), 0 if activity else 1, line_count - primary_count - meta_count
+    )
     spare_count = line_count - primary_count - prompt_count - meta_count
     extra_primary_count = min(len(primary_lines) - primary_count, spare_count)
     primary_count += extra_primary_count
@@ -2301,6 +2308,8 @@ def help_view_segments(width: int, height: int, glyphs: Glyphs, state: BoardStat
     if state.help_scroll_limit:
         scroll_hint = f" {glyphs.up}{glyphs.down} scroll"
         close_hints = [
+            f"{scroll_hint}  spc page  esc close ",
+            f" {glyphs.up}{glyphs.down} spc scroll  esc close ",
             f"{scroll_hint}  esc close ",
             f"{scroll_hint} ",
             "",
