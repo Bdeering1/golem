@@ -1655,6 +1655,8 @@ def narrow_footer_segments(
             for offset, line in enumerate(flash_lines)
         ]
     action_segments = status_line_segments(y, width, state, row, glyphs, snapshot) or []
+    if state.pending_action is not None and action_segments:
+        return action_segments
     if not action_segments:
         open_hint = [(glyphs.enter_key, "open")] if row is not None else []
         action_hints = footer_action_hints(snapshot, row)
