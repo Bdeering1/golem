@@ -38,6 +38,7 @@ PRIMARY_LINE_COUNT = 2
 MARK_ONLY_WIDTH = 3
 MAX_WORD_SNAP = 3
 DAYS_PER_YEAR = 365
+MIN_WHOLE_HOURS = 6
 MIN_DETAIL_HEIGHT = 20
 MIN_SUMMARY_HEIGHT = 14
 TICK_MILLISECONDS = 250
@@ -676,6 +677,8 @@ def duration_text(seconds: float) -> str:
         return f"{minutes}m"
     days, hours = divmod(hours, 24)
     if not days:
+        if hours >= MIN_WHOLE_HOURS:
+            return f"{round(hours + minutes / 60)}h"
         return f"{hours}h {minutes}m" if minutes else f"{hours}h"
     if days >= DAYS_PER_YEAR:
         return f"{days // DAYS_PER_YEAR}y"
@@ -1110,6 +1113,11 @@ def column_segments(
             is_focused and scroll_offset + card_index == state.selected_indices[column_index]
         )
         card_y = layout.body_top + card_index * style.pitch
+        if not is_focused and scroll_offset + card_index == state.selected_indices[column_index]:
+            segments += [
+                Segment(card_y + offset, x - RAIL_WIDTH, glyphs.focus_marker, color=FAINT_COLOR)
+                for offset in range(style.height)
+            ]
         if style.is_boxed:
             segments += boxed_card_segments(
                 card_y, x, column_width, row, context, is_selected=is_selected
@@ -1430,7 +1438,7 @@ def detail_title_segments(
         [(status_text, STYLE_PLAIN, color), (f"{when_text_part} ", STYLE_DIM, None)],
         [
             (status_text[:2], STYLE_PLAIN, color),
-            (f" {short_when} " if when else " ", STYLE_DIM, None),
+            (f" {short_when or label} ", STYLE_DIM, None),
         ],
     ]
     if when and not when.endswith(" ago") and when != short_when:
@@ -1870,10 +1878,9 @@ def footer_segments(
         [
             *filter_hint,
             move_hint,
-            *open_hint,
             next_hint,
             *action_hints,
-            *[(key, label.removeprefix("show ")) for key, label in toggle_hints],
+            *toggle_hints,
             *filter_key_hint,
             help_hint,
             quit_hint,
