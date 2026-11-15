@@ -536,8 +536,13 @@ def board_layout(
         card_style(size, body_height, can_box=can_box, can_stack=index != done_index)
         for index, size in enumerate(column_sizes)
     )
+    shown_indices = range(first_index, first_index + fit_count)
+    if any(styles[index] == DENSE_CARD for index in shown_indices):
+        styles = tuple(
+            DENSE_CARD if index in shown_indices and style == SPACED_CARD else style
+            for index, style in enumerate(styles)
+        )
     if line_count:
-        shown_indices = range(first_index, first_index + fit_count)
         used_height = max(
             column_used_height(column_sizes[index], styles[index], body_height)
             for index in shown_indices
@@ -774,8 +779,8 @@ def card_detail(
                 (time_text, short_reason),
             )
         ]
-        if not is_time_kept:
-            options.append(short_reason)
+        dependency = short_reason.removeprefix(WAITING_TEXT).strip()
+        options.append(separator.join((time_text, dependency)) if is_time_kept else short_reason)
         return next((option for option in options if len(option) <= width), options[-1])
     if not timed_facts:
         return reason
