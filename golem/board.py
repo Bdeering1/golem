@@ -649,6 +649,8 @@ def fit_state_to_layout(
         scroll_offset = min(scroll_offset, max(0, len(column_rows) - visible_count))
         if column_index != state.focus_index:
             scroll_offset = 0
+            if selected_index >= visible_count:
+                selected_index = 0
         state.selected_indices[column_index] = selected_index
         state.selected_task_ids[column_index] = (
             column_task_ids[selected_index] if column_task_ids else None
@@ -895,10 +897,9 @@ def card_detail(
         return next((option for option in options if len(option) <= width), options[-1])
     if not timed_facts:
         return reason
-    for facts_text in (timed_facts, time_text):
-        reason_width = width - len(facts_text) - len(separator)
-        if facts_text and reason_width >= MIN_CARD_REASON_WIDTH:
-            return f"{facts_text}{separator}{fitted(reason, reason_width, glyphs)}"
+    reason_width = width - len(timed_facts) - len(separator)
+    if reason_width >= MIN_CARD_REASON_WIDTH:
+        return f"{timed_facts}{separator}{fitted(reason, reason_width, glyphs)}"
     return fitted_facts
 
 
