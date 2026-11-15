@@ -678,7 +678,7 @@ def duration_text(seconds: float) -> str:
     days, hours = divmod(hours, 24)
     if not days:
         if hours >= MIN_WHOLE_HOURS:
-            return f"{round(hours + minutes / 60)}h"
+            return f"{hours}h"
         return f"{hours}h {minutes}m" if minutes else f"{hours}h"
     if days >= DAYS_PER_YEAR:
         return f"{days // DAYS_PER_YEAR}y"
@@ -756,7 +756,7 @@ def row_reason(row: display.ListRow, snapshot: BoardSnapshot) -> str:
 def short_age_text(timestamp: str | None, now: datetime) -> str:
     if timestamp is None:
         return ""
-    return coarse_time_text(duration_text(seconds_since(timestamp, now)))
+    return duration_text(seconds_since(timestamp, now)).split()[0]
 
 
 def short_pull_request_text(pull_requests: list[ledger.PullRequest]) -> str:
@@ -808,7 +808,10 @@ def coarse_time_text(time_text: str) -> str:
     if len(words) <= 1 or None in matches:
         return time_text
     (count, unit), (part_count, part_unit) = (match.groups() for match in matches if match)
-    is_rounding_up = int(part_count) * 2 >= DURATION_UNIT_SIZES.get(part_unit, sys.maxsize)
+    is_countdown = bool(words[:-2])
+    is_rounding_up = is_countdown and int(part_count) * 2 >= DURATION_UNIT_SIZES.get(
+        part_unit, sys.maxsize
+    )
     return " ".join([*words[:-2], f"{int(count) + is_rounding_up}{unit}"])
 
 
@@ -1167,9 +1170,7 @@ def header_row_segments(
     if state.first_column_index:
         left_color = columns[state.first_column_index - 1][0].color
         segments.append(Segment(layout.header_y, 0, glyphs.left, STYLE_BOLD, left_color))
-    if last_index < len(columns) - 1:
-        right_color = columns[last_index + 1][0].color
-        segments.append(Segment(layout.header_y, width - 1, glyphs.right, STYLE_BOLD, right_color))
+    header_end = 0
     for offset, (column_x, _) in enumerate(layout.column_spans):
         column_index = state.first_column_index + offset
         board_column, column_rows = columns[column_index]
@@ -1177,6 +1178,17 @@ def header_row_segments(
             board_column, len(column_rows), glyphs, is_focused=column_index == state.focus_index
         )
         segments += part_segments(layout.header_y, column_x, header_parts)
+        header_end = column_x + parts_width(header_parts)
+    if last_index < len(columns) - 1:
+        hidden_column, hidden_rows = columns[last_index + 1]
+        hidden_parts: list[Part] = [
+            (hidden_column.title, STYLE_PLAIN, hidden_column.color),
+            (f" {len(hidden_rows)} ", STYLE_DIM, None),
+            (glyphs.right, STYLE_BOLD, hidden_column.color),
+        ]
+        if header_end + COLUMN_GAP + parts_width(hidden_parts) > width:
+            hidden_parts = hidden_parts[-1:]
+        segments += part_segments(layout.header_y, width - parts_width(hidden_parts), hidden_parts)
     return segments
 
 
