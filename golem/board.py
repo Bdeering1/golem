@@ -96,6 +96,11 @@ ACTION_CLOSE_ALL = "close-all"
 ESCAPE_KEY = 27
 CONTROL_D = 4
 CONTROL_U = 21
+ESCAPE_SEQUENCE_KEYS = {
+    **dict.fromkeys(("[1~", "[7~", "[H", "OH"), curses.KEY_HOME),
+    **dict.fromkeys(("[4~", "[8~", "[F", "OF"), curses.KEY_END),
+}
+ESCAPE_SEQUENCE_FINAL_KEYS = range(0x40, 0x7F)
 ENTER_KEYS = {ord("\n"), ord("\r"), curses.KEY_ENTER}
 LEFT_KEYS = {ord("h"), curses.KEY_LEFT}
 RIGHT_KEYS = {ord("l"), curses.KEY_RIGHT}
@@ -1321,15 +1326,17 @@ def detail_segments(
     line_width = width - 1
     text_width = line_width - CARD_INDENT
     lines: list[tuple[str, str]] = []
-    if row is not None:
-        lines = detail_lines(row, text_width, line_count, context.snapshot, context.glyphs)
     is_id_in_title = row is not None and is_id_in_rule(row.task_id, line_width)
+    id_lines: list[str] = []
     if row is not None and not is_id_in_title:
         id_lines = textwrap.wrap(row.task_id, text_width)
-        is_id_in_title = len(id_lines) + len(lines) > line_count
+        is_id_in_title = line_count - len(id_lines) < PRIMARY_LINE_COUNT
         if is_id_in_title:
             id_lines = []
-        lines = [*((line, STYLE_BOLD) for line in id_lines), *lines][:line_count]
+    if row is not None:
+        content_count = line_count - len(id_lines)
+        content = detail_lines(row, text_width, content_count, context.snapshot, context.glyphs)
+        lines = [*((line, STYLE_BOLD) for line in id_lines), *content]
     rule_y = footer_y - 1 - max(1, len(lines))
     segments = detail_title_segments(rule_y, line_width, row, context, is_id_shown=is_id_in_title)
     for line_offset, (text, style) in enumerate(lines, start=1):
@@ -1777,6 +1784,17 @@ def footer_segments(
         [
             *filter_hint,
             move_hint,
+            *open_hint,
+            next_hint,
+            *action_hints,
+            *toggle_hints,
+            *filter_key_hint,
+            help_hint,
+            quit_hint,
+        ],
+        [
+            *filter_hint,
+            (move_hint[0], ""),
             *open_hint,
             next_hint,
             *action_hints,
@@ -2725,7 +2743,7 @@ def board_loop(screen: curses.window, *, is_color: bool, glyphs: Glyphs) -> int:
             screen.clear()
         shown_snapshot = filtered_snapshot(snapshot, state)
         draw_board(screen, shown_snapshot, state, is_color=is_color, glyphs=glyphs)
-        pressed_key = screen.getch()
+        pressed_key = read_key(screen)
         if pressed_key in {-1, curses.KEY_RESIZE}:
             continue
         state.flash_until = 0.0
@@ -2735,6 +2753,22 @@ def board_loop(screen: curses.window, *, is_color: bool, glyphs: Glyphs) -> int:
             shown_source_key = None
             continue
         apply_key(state, pressed_key, shown_snapshot, shown_size[0])
+
+
+def read_key(screen: curses.window) -> int:
+    key = screen.getch()
+    if key != ESCAPE_KEY:
+        return key
+    screen.timeout(0)
+    sequence = ""
+    while (char := screen.getch()) != -1:
+        sequence += chr(char)
+        if len(sequence) > 1 and char in ESCAPE_SEQUENCE_FINAL_KEYS:
+            break
+    screen.timeout(TICK_MILLISECONDS)
+    if not sequence:
+        return ESCAPE_KEY
+    return ESCAPE_SEQUENCE_KEYS.get(sequence, -1)
 
 
 def is_terminal() -> bool:
