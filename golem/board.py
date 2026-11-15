@@ -872,10 +872,11 @@ def card_detail(
         return next((option for option in options if len(option) <= width), options[-1])
     if not timed_facts:
         return reason
-    reason_width = width - len(timed_facts) - len(separator)
-    if reason_width < MIN_CARD_REASON_WIDTH:
-        return fitted_facts
-    return f"{timed_facts}{separator}{fitted(reason, reason_width, glyphs)}"
+    for facts_text in (timed_facts, time_text):
+        reason_width = width - len(facts_text) - len(separator)
+        if facts_text and reason_width >= MIN_CARD_REASON_WIDTH:
+            return f"{facts_text}{separator}{fitted(reason, reason_width, glyphs)}"
+    return fitted_facts
 
 
 def is_stuck(row: display.ListRow, task: ledger.Task, now: datetime) -> bool:
