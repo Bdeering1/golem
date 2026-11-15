@@ -1390,6 +1390,7 @@ def summary_options(snapshot: BoardSnapshot, glyphs: Glyphs, now: datetime) -> l
     ]
     worded: list[Part] = []
     tight: list[Part] = []
+    closing_options: dict[str, list[Part]] = {"to close": [], "close": []}
     numbered: list[Part] = []
     for mark, count, label, status, is_always_shown in items:
         if not count and not is_always_shown:
@@ -1405,8 +1406,13 @@ def summary_options(snapshot: BoardSnapshot, glyphs: Glyphs, now: datetime) -> l
             (f" {mark_text}", STYLE_PLAIN, mark_color),
             (f"{count} {label}", count_style, None),
         ]
+        for closing_label, closing in closing_options.items():
+            count_text = (
+                f"{count} {closing_label}" if status == ledger.STATUS_FINISHED else str(count)
+            )
+            closing += [(f" {mark}", STYLE_PLAIN, mark_color), (count_text, count_style, None)]
         numbered += [(f" {mark_text}", STYLE_PLAIN, mark_color), (str(count), count_style, None)]
-    return [worded, tight, numbered, []]
+    return [worded, tight, *closing_options.values(), numbered, []]
 
 
 def title_segments(
