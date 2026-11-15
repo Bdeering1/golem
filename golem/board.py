@@ -925,7 +925,22 @@ def card_badge_parts(row: display.ListRow, context: FrameContext) -> list[Part]:
 
 def is_status_implied(row: display.ListRow, context: FrameContext) -> bool:
     is_done = row.column == display.COLUMN_DONE and row.status == ledger.STATUS_FINISHED
-    return is_done or is_stuck(row, context.snapshot.tasks[row.task_id], context.now)
+    is_running = row.status == ledger.STATUS_RUNNING
+    return is_done or is_running or is_stuck(row, context.snapshot.tasks[row.task_id], context.now)
+
+
+def is_repository_on_status_line(row: display.ListRow, reason: str) -> bool:
+    return row.status == ledger.STATUS_RUNNING and bool(reason)
+
+
+def status_line_time(
+    row: display.ListRow, context: FrameContext, facts: tuple[str, str, str, str]
+) -> str:
+    time_text, reason, _, repository = facts
+    status_time = status_time_text(row, context, time_text)
+    if not is_repository_on_status_line(row, reason):
+        return status_time
+    return f"{status_time} {context.glyphs.separator} {repository}"
 
 
 def card_colors(
@@ -972,9 +987,12 @@ def card_segments(
     right_width = parts_width(right_parts) + (1 if right_parts else 0)
     title = fitted_task_id(row.task_id, width - CARD_INDENT, glyphs)
     detail_width = width - CARD_INDENT - right_width
-    time_text, reason, short_reason, repository = card_facts(row, context)
+    facts = card_facts(row, context)
+    time_text, reason, short_reason, repository = facts
     is_live = is_live_card(row, context)
-    detail_facts = ("" if is_tall else time_text, reason, short_reason, repository)
+    is_repository_moved = is_tall and is_repository_on_status_line(row, reason)
+    detail_repository = "" if is_repository_moved else repository
+    detail_facts = ("" if is_tall else time_text, reason, short_reason, detail_repository)
     detail_y = y + 2 if is_tall else y + 1
     detail_text_width = width - CARD_INDENT if is_tall else detail_width
     detail = fitted_words(
@@ -1001,7 +1019,7 @@ def card_segments(
     mark_style = STYLE_BADGE if is_changed else STYLE_BOLD
     status_parts: list[Part] = []
     if is_tall:
-        status_time = status_time_text(row, context, time_text)
+        status_time = status_line_time(row, context, facts)
         time_part = f" {glyphs.separator} {status_time}" if status_time else ""
         status_parts = [(row.status, STYLE_PLAIN, mark_color), (time_part, STYLE_DIM, None)]
         if is_status_implied(row, context):
@@ -1060,11 +1078,12 @@ def boxed_card_segments(
         (title, title_style, color if is_changed else None),
         (f" {horizontal * (content_width - len(title))}{corners[1]}", STYLE_PLAIN, frame_color),
     ]
-    time_text, reason, short_reason, repository = card_facts(row, context)
+    facts = card_facts(row, context)
+    time_text, reason, short_reason, repository = facts
     is_warning = is_stuck(row, context.snapshot.tasks[row.task_id], now)
     right_parts = card_badge_parts(row, context)
     status_width = content_width - parts_width(right_parts) - (1 if right_parts else 0)
-    status_time = status_time_text(row, context, time_text)
+    status_time = status_line_time(row, context, facts)
     time_part = f" {glyphs.separator} {status_time}" if status_time else ""
     status_options = [
         (f" {row.status}", time_part),
@@ -1087,7 +1106,7 @@ def boxed_card_segments(
         (time_part, STYLE_PLAIN, frame_color) if is_warning else (time_part, STYLE_DIM, None),
     ]
     detail = card_detail(
-        ("", reason, short_reason, repository),
+        ("", reason, short_reason, "" if is_repository_on_status_line(row, reason) else repository),
         content_width,
         glyphs,
         is_live=is_live_card(row, context),
