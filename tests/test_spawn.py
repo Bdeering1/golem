@@ -29,7 +29,7 @@ def test_launch_agent_executor_uses_only_saved_environment(
 
     assert len(processes) == 1
     processes[0].wait()
-    assert support.read_task(ledger_path)["status"] == ledger.STATUS_NEEDS_REVIEW
+    assert support.read_task(ledger_path)["status"] == ledger.STATUS_FINISHED
     assert fake_commands["claude-lang"].read_text(encoding="utf-8") == f"{support.SAVED_LANG}\n"
     assert fake_commands["claude-lc-time"].read_text(encoding="utf-8") == f"{support.CHILD_LANG}\n"
     assert fake_commands["claude-unrelated"].read_text(encoding="utf-8") == ""

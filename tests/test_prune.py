@@ -1,14 +1,14 @@
 import contextlib
 import io
 import itertools
-import os
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import override
 
 import pytest
 
-from golem import cli, ledger, locks, prune
+from golem import cli, ledger, locks
 from tests import support
 
 SIBLING_CHILD_ID = "sibling-child"
@@ -34,107 +34,56 @@ MERGED_PULL_REQUEST: ledger.PullRequest = {
     "url": "merged",
     "state": ledger.PULL_REQUEST_STATE_MERGED,
 }
-CLOSED_PULL_REQUEST: ledger.PullRequest = {
-    "url": "closed",
-    "state": ledger.PULL_REQUEST_STATE_CLOSED,
-}
 OPEN_PULL_REQUEST: ledger.PullRequest = {"url": "open", "state": ledger.PULL_REQUEST_STATE_OPEN}
 
 
-@pytest.mark.parametrize(
-    ("prune_args", "is_done_removed"), [(["prune"], False), (["prune", "--yes"], True)]
-)
-def test_prune_without_terminal_deletes_done_tasks_only_when_confirmed(
-    ledger_path, monkeypatch, prune_args, is_done_removed
-):
-    statuses = [
-        ledger.STATUS_SCHEDULED,
-        ledger.STATUS_WAITING,
-        ledger.STATUS_RUNNING,
-        ledger.STATUS_NEEDS_REVIEW,
-        ledger.STATUS_FAILED,
-        ledger.STATUS_CANCELLED,
-        ledger.STATUS_DONE,
-    ]
-    support.write_tasks(
-        ledger_path, {status: support.task_record(status, task_id=status) for status in statuses}
+CLOSED_AT = datetime(2030, 3, 9, tzinfo=UTC).isoformat()
+
+
+def done_task(task_id: str = support.TASK_ID, **fields: object) -> ledger.Task:
+    return support.task_record(
+        ledger.STATUS_FINISHED, task_id=task_id, closed_at=CLOSED_AT, **fields
     )
+
+
+def finished_days_ago(days: int) -> str:
+    return (datetime.now(UTC) - timedelta(days=days)).isoformat()
+
+
+@pytest.mark.parametrize(
+    ("prune_args", "removed_ids"),
+    [
+        (["prune"], {ledger.STATUS_CANCELLED, "merged"}),
+        (["prune", "--yes"], {ledger.STATUS_CANCELLED, "merged", "closed"}),
+    ],
+)
+def test_prune_without_terminal_asks_for_done_chains_without_finished_prs(
+    ledger_path, monkeypatch, capsys, prune_args, removed_ids
+):
+    tasks = {status: support.task_record(status, task_id=status) for status in ledger.ALL_STATUSES}
+    tasks["merged"] = support.task_record(
+        ledger.STATUS_FINISHED, task_id="merged", pull_requests=[MERGED_PULL_REQUEST]
+    )
+    tasks["closed"] = done_task("closed")
+    support.write_tasks(ledger_path, tasks)
     monkeypatch.setattr(sys, "stdin", io.StringIO("y\n"))
 
     assert cli.main(prune_args) == 0
 
-    removed_ids = (
-        {ledger.STATUS_CANCELLED, ledger.STATUS_DONE}
-        if is_done_removed
-        else {ledger.STATUS_CANCELLED}
-    )
-    assert set(ledger.load_tasks()) == set(statuses) - removed_ids
-
-
-MISSING_CWD = "/nonexistent/golem-task"
+    assert set(ledger.load_tasks()) == set(tasks) - removed_ids
+    assert ("--yes to prune them" in capsys.readouterr().err) is ("closed" not in removed_ids)
 
 
 @pytest.mark.parametrize(
-    ("fields", "idle_days", "is_removed"),
+    ("fields", "is_removed"),
     [
-        pytest.param({"pull_requests": [MERGED_PULL_REQUEST]}, 0, True, id="merged-pr"),
-        pytest.param({"pull_requests": [CLOSED_PULL_REQUEST]}, 0, True, id="closed-pr"),
-        pytest.param({"pull_requests": [OPEN_PULL_REQUEST]}, None, False, id="open-pr"),
-        pytest.param(
-            {"pull_requests": [MERGED_PULL_REQUEST, OPEN_PULL_REQUEST]},
-            None,
-            False,
-            id="open-and-merged-pr",
-        ),
-        pytest.param(
-            {"pull_requests": [OPEN_PULL_REQUEST], "cwd": MISSING_CWD},
-            None,
-            False,
-            id="open-pr-missing-directory",
-        ),
-        pytest.param({"cwd": MISSING_CWD}, 0, True, id="missing-directory"),
-        pytest.param({"pull_requests": []}, prune.PRUNE_IDLE_DAYS, True, id="no-pr-idle-session"),
-        pytest.param(
-            {"pull_requests": []}, prune.PRUNE_IDLE_DAYS - 1, False, id="no-pr-active-session"
-        ),
-        pytest.param({"pull_requests": []}, None, True, id="no-pr-missing-transcript"),
-        pytest.param({}, prune.PRUNE_IDLE_DAYS - 1, False, id="unchecked-active-session"),
+        pytest.param({"pull_requests": [MERGED_PULL_REQUEST]}, True, id="merged-pr"),
+        pytest.param({"pull_requests": [OPEN_PULL_REQUEST]}, False, id="open-pr"),
+        pytest.param({"finished_at": finished_days_ago(7)}, True, id="no-pr-old"),
     ],
 )
-def test_prune_decides_done_tasks_by_stored_pull_requests_then_directory_then_idle_time(
-    ledger_path, fields, idle_days, is_removed
-):
-    support.write_task(ledger_path, ledger.STATUS_DONE, **fields)
-    if idle_days is not None:
-        support.write_transcript(support.read_task(ledger_path)["session_id"], idle_days)
-
-    assert cli.main(["prune", "--yes"]) == 0
-
-    assert (support.TASK_ID not in ledger.load_tasks()) is is_removed
-
-
-@pytest.mark.parametrize(
-    ("idle_days", "is_removed"),
-    [
-        pytest.param(prune.PRUNE_IDLE_DAYS, True, id="idle-conversation"),
-        pytest.param(prune.PRUNE_IDLE_DAYS - 1, False, id="active-conversation"),
-        pytest.param(None, True, id="missing-rollout"),
-    ],
-)
-def test_prune_uses_codex_conversation_idle_time(ledger_path, tmp_path, idle_days, is_removed):
-    codex_home = tmp_path / "saved-codex-home"
-    support.write_task(
-        ledger_path,
-        ledger.STATUS_DONE,
-        backend=ledger.BACKEND_CODEX,
-        thread_id="codex-thread",
-        environment={"PATH": os.environ["PATH"], "CODEX_HOME": str(codex_home)},
-    )
-    if idle_days is not None:
-        rollout_name = "rollout-2030-01-01T00-00-00-codex-thread.jsonl"
-        support.write_idle_file(
-            codex_home / "sessions" / "2030" / "01" / "01" / rollout_name, idle_days
-        )
+def test_prune_deletes_only_done_chains(ledger_path, fields, is_removed):
+    support.write_task(ledger_path, ledger.STATUS_FINISHED, **fields)
 
     assert cli.main(["prune", "--yes"]) == 0
 
@@ -142,7 +91,7 @@ def test_prune_uses_codex_conversation_idle_time(ledger_path, tmp_path, idle_day
 
 
 def test_prune_keeps_done_task_with_attached_pickup(ledger_path):
-    support.write_task(ledger_path, ledger.STATUS_DONE, pull_requests=[MERGED_PULL_REQUEST])
+    support.write_task(ledger_path, ledger.STATUS_FINISHED, pull_requests=[MERGED_PULL_REQUEST])
     pickup_lock_file = locks.acquire_lock(locks.directory_lock_path(str(Path.cwd())))
     assert pickup_lock_file is not None
     try:
@@ -166,7 +115,7 @@ def test_prune_applies_each_answer_in_turn(ledger_path, monkeypatch, answers, re
     task_ids = ["first", "second", "third"]
     support.write_tasks(
         ledger_path,
-        {task_id: support.task_record(ledger.STATUS_DONE, task_id=task_id) for task_id in task_ids},
+        {task_id: done_task(task_id) for task_id in task_ids},
     )
     monkeypatch.setattr(sys, "stdin", TerminalInput(answers))
 
@@ -184,7 +133,7 @@ def test_prune_interrupted_at_prompt_deletes_nothing(ledger_path, monkeypatch):
         ledger_path,
         {
             support.TASK_ID: support.task_record(ledger.STATUS_CANCELLED),
-            support.SIBLING_ID: support.task_record(ledger.STATUS_DONE, task_id=support.SIBLING_ID),
+            support.SIBLING_ID: done_task(support.SIBLING_ID),
         },
     )
     monkeypatch.setattr(sys, "stdin", TerminalInput("y\n", interrupt))
@@ -197,7 +146,7 @@ def test_prune_interrupted_at_prompt_deletes_nothing(ledger_path, monkeypatch):
 def write_chain(ledger_path, statuses):
     task_ids = [support.PARENT_ID, support.CHILD_ID, support.GRANDCHILD_ID][: len(statuses)]
     tasks = {
-        task_id: support.task_record(status, task_id=task_id)
+        task_id: support.task_record(status, task_id=task_id, closed_at=CLOSED_AT)
         for task_id, status in zip(task_ids, statuses, strict=True)
     }
     for parent_id, task_id in itertools.pairwise(task_ids):
@@ -213,7 +162,9 @@ def write_chain(ledger_path, statuses):
     ],
 )
 def test_prune_asks_once_per_chain(ledger_path, monkeypatch, capsys, answers, remaining_ids):
-    write_chain(ledger_path, [ledger.STATUS_DONE, ledger.STATUS_DONE, ledger.STATUS_CANCELLED])
+    write_chain(
+        ledger_path, [ledger.STATUS_FINISHED, ledger.STATUS_FINISHED, ledger.STATUS_CANCELLED]
+    )
     monkeypatch.setattr(sys, "stdin", TerminalInput(answers))
 
     assert cli.main(["prune"]) == 0
@@ -221,47 +172,19 @@ def test_prune_asks_once_per_chain(ledger_path, monkeypatch, capsys, answers, re
     prompt = capsys.readouterr().out
     assert prompt.count("Remove ") == 1
     assert (
-        f"{support.PARENT_ID}, {support.CHILD_ID} ({ledger.STATUS_DONE}, no transcript)" in prompt
+        f"{support.PARENT_ID}, {support.CHILD_ID}, {support.GRANDCHILD_ID} (Done, closed)" in prompt
     )
     assert set(ledger.load_tasks()) == remaining_ids
 
 
 def test_prune_keeps_cancelled_parent_of_declined_task(ledger_path, monkeypatch, capsys):
-    write_chain(ledger_path, [ledger.STATUS_CANCELLED, ledger.STATUS_DONE])
+    write_chain(ledger_path, [ledger.STATUS_CANCELLED, ledger.STATUS_FINISHED])
     monkeypatch.setattr(sys, "stdin", TerminalInput("n\n"))
 
     assert cli.main(["prune"]) == 0
 
     assert "no longer eligible" not in capsys.readouterr().err
     assert set(ledger.load_tasks()) == {support.PARENT_ID, support.CHILD_ID}
-
-
-def test_prune_offers_only_eligible_tasks_in_chain(ledger_path, monkeypatch, capsys):
-    write_chain(ledger_path, [ledger.STATUS_DONE, ledger.STATUS_DONE, ledger.STATUS_DONE])
-    support.write_transcript(f"{support.PARENT_ID}-session", 0)
-    monkeypatch.setattr(sys, "stdin", TerminalInput("y\n"))
-
-    assert cli.main(["prune"]) == 0
-
-    prompt = capsys.readouterr().out
-    assert (
-        f"Remove {support.CHILD_ID}, {support.GRANDCHILD_ID} ({ledger.STATUS_DONE}, no transcript)?"
-        in prompt
-    )
-    assert set(ledger.load_tasks()) == {support.PARENT_ID}
-
-
-def test_prune_shows_each_reason_when_chain_reasons_differ(ledger_path, monkeypatch, capsys):
-    write_chain(ledger_path, [ledger.STATUS_DONE, ledger.STATUS_DONE])
-    support.write_transcript(f"{support.PARENT_ID}-session", prune.PRUNE_IDLE_DAYS)
-    monkeypatch.setattr(sys, "stdin", TerminalInput("y\n"))
-
-    assert cli.main(["prune"]) == 0
-
-    prompt = capsys.readouterr().out
-    assert f"{support.PARENT_ID} ({ledger.STATUS_DONE}, idle {prune.PRUNE_IDLE_DAYS}d)" in prompt
-    assert f"{support.CHILD_ID} ({ledger.STATUS_DONE}, no transcript)" in prompt
-    assert not ledger.load_tasks()
 
 
 @pytest.mark.parametrize(
@@ -277,13 +200,13 @@ def test_prune_applies_all_and_quit_per_chain(
     support.write_tasks(
         ledger_path,
         {
-            support.PARENT_ID: support.task_record(ledger.STATUS_DONE, task_id=support.PARENT_ID),
+            support.PARENT_ID: done_task(support.PARENT_ID),
             support.CHILD_ID: support.task_record(
-                ledger.STATUS_DONE, task_id=support.CHILD_ID, after=support.PARENT_ID
+                ledger.STATUS_FINISHED, task_id=support.CHILD_ID, after=support.PARENT_ID
             ),
-            support.SIBLING_ID: support.task_record(ledger.STATUS_DONE, task_id=support.SIBLING_ID),
+            support.SIBLING_ID: done_task(support.SIBLING_ID),
             SIBLING_CHILD_ID: support.task_record(
-                ledger.STATUS_DONE, task_id=SIBLING_CHILD_ID, after=support.SIBLING_ID
+                ledger.STATUS_FINISHED, task_id=SIBLING_CHILD_ID, after=support.SIBLING_ID
             ),
             support.TASK_ID: support.task_record(ledger.STATUS_CANCELLED),
         },
@@ -296,16 +219,18 @@ def test_prune_applies_all_and_quit_per_chain(
     assert set(ledger.load_tasks()) == remaining_ids
 
 
-def test_prune_keeps_parent_of_remaining_task(ledger_path):
+def test_prune_never_offers_review_chain(ledger_path):
     support.write_tasks(
         ledger_path,
         {
-            support.PARENT_ID: support.task_record(ledger.STATUS_DONE, task_id=support.PARENT_ID),
+            support.PARENT_ID: support.task_record(
+                ledger.STATUS_FINISHED, task_id=support.PARENT_ID
+            ),
             support.CHILD_ID: support.task_record(
                 ledger.STATUS_CANCELLED, task_id=support.CHILD_ID, after=support.PARENT_ID
             ),
             support.GRANDCHILD_ID: support.task_record(
-                ledger.STATUS_DONE, task_id=support.GRANDCHILD_ID, after=support.CHILD_ID
+                ledger.STATUS_CANCELLED, task_id=support.GRANDCHILD_ID, after=support.CHILD_ID
             ),
             support.SIBLING_ID: support.task_record(
                 ledger.STATUS_FAILED, task_id=support.SIBLING_ID, after=support.PARENT_ID
@@ -319,7 +244,7 @@ def test_prune_keeps_parent_of_remaining_task(ledger_path):
 
 
 def test_prune_releases_worktree_after_its_last_task(owned_worktree):
-    worktree = owned_worktree()
+    worktree = owned_worktree(ledger.STATUS_CANCELLED)
 
     assert cli.main(["prune", "--yes"]) == 0
 
@@ -361,9 +286,7 @@ def add_dependent_task(ledger_path, exit_stack):
 
 def replace_task(ledger_path, exit_stack):
     tasks = support.read_tasks(ledger_path)
-    tasks[support.TASK_ID] = support.task_record(
-        ledger.STATUS_DONE, session_id="replacement-session"
-    )
+    tasks[support.TASK_ID] = done_task(session_id="replacement-session")
     support.write_tasks(ledger_path, tasks)
 
 
@@ -374,10 +297,8 @@ def test_prune_keeps_only_task_that_changes_while_prompting(
     support.write_tasks(
         ledger_path,
         {
-            support.TASK_ID: support.task_record(ledger.STATUS_DONE),
-            support.SIBLING_ID: support.task_record(
-                ledger.STATUS_DONE, task_id=support.SIBLING_ID, cwd=str(tmp_path)
-            ),
+            support.TASK_ID: done_task(),
+            support.SIBLING_ID: done_task(support.SIBLING_ID, cwd=str(tmp_path)),
         },
     )
 

@@ -65,13 +65,12 @@ def statuses_tasks():
 
 
 @pytest.mark.parametrize(
-    ("pressed_keys", "done_ids"),
-    [("", {ledger.STATUS_DONE}), ("a", {ledger.STATUS_DONE, "merged"})],
+    ("pressed_keys", "done_columns"), [("", []), ("a", [("Done", {"merged"})])]
 )
-def test_board_columns_group_statuses_and_a_toggles_what_list_hides(pressed_keys, done_ids):
+def test_board_columns_group_statuses_and_a_toggles_done(pressed_keys, done_columns):
     tasks = statuses_tasks() | {
         "merged": support.task_record(
-            ledger.STATUS_DONE, task_id="merged", pull_requests=[MERGED_PULL_REQUEST]
+            ledger.STATUS_FINISHED, task_id="merged", pull_requests=[MERGED_PULL_REQUEST]
         )
     }
     rows = display.list_rows(tasks, TODAY)
@@ -84,8 +83,8 @@ def test_board_columns_group_statuses_and_a_toggles_what_list_hides(pressed_keys
     expected = [
         ("Queued", {ledger.STATUS_SCHEDULED, ledger.STATUS_WAITING}),
         ("Running", {ledger.STATUS_RUNNING}),
-        ("Review", {ledger.STATUS_NEEDS_REVIEW, ledger.STATUS_FAILED}),
-        ("Done", done_ids),
+        ("Review", {ledger.STATUS_BLOCKED, ledger.STATUS_FAILED, ledger.STATUS_FINISHED}),
+        *done_columns,
     ]
     assert [
         (board_column.title, {row.task_id for row in column_rows})
@@ -96,7 +95,7 @@ def test_board_columns_group_statuses_and_a_toggles_what_list_hides(pressed_keys
 def test_board_shows_a_chain_as_one_card_with_its_step_and_list_detail():
     tasks = {
         "root": support.task_record(
-            ledger.STATUS_NEEDS_REVIEW, task_id="root", gate_stop_reason="no pull request yet"
+            ledger.STATUS_BLOCKED, task_id="root", gate_stop_reason="no pull request yet"
         ),
         "child": support.task_record(ledger.STATUS_WAITING, task_id="child", after="root"),
     }
@@ -105,7 +104,7 @@ def test_board_shows_a_chain_as_one_card_with_its_step_and_list_detail():
 
     assert "1/2" in text
     assert "child" not in text
-    assert display.list_detail(tasks["root"], TODAY) in text
+    assert "no pull request yet" in text
 
 
 def test_board_shortens_card_text_and_shows_it_in_full_in_the_detail_pane():
@@ -119,7 +118,7 @@ def test_board_shortens_card_text_and_shows_it_in_full_in_the_detail_pane():
 
     lines = frame_lines(tasks, WIDE_WIDTH, HEIGHT, board.BoardState(focus_index=1))
 
-    assert "a-very-long-tas…" in "\n".join(lines)
+    assert "a-very-long-task-identi…" in "\n".join(lines)
     assert lines[-4:-1] == [f"{task_id}  running", directory, "Polish the board more"]
 
 
@@ -136,7 +135,7 @@ def test_board_detail_pane_keeps_the_end_of_a_long_directory():
 @pytest.mark.parametrize(
     ("width", "shown_titles", "has_tabs"),
     [
-        pytest.param(WIDE_WIDTH, ["Queued", "Running", "Review", "Done"], False, id="all-fit"),
+        pytest.param(WIDE_WIDTH, ["Queued", "Running", "Review"], False, id="all-fit"),
         pytest.param(46, ["Queued", "Running"], True, id="two-fit"),
         pytest.param(NARROW_WIDTH, ["Queued"], True, id="one-fits"),
     ],
@@ -144,7 +143,7 @@ def test_board_detail_pane_keeps_the_end_of_a_long_directory():
 def test_board_shows_as_many_columns_as_fit(width, shown_titles, has_tabs):
     lines = frame_lines(statuses_tasks(), width, HEIGHT, board.BoardState())
 
-    header_y = board.board_layout(width, HEIGHT).header_y
+    header_y = board.board_layout(width, HEIGHT, len(shown_titles) + has_tabs).header_y
     header_line = lines[header_y]
     assert [title for title, *_ in board.BOARD_COLUMNS if title in header_line] == shown_titles
     assert (header_y > board.TITLE_LINE_COUNT and bool(lines[board.TITLE_LINE_COUNT])) == has_tabs
@@ -153,15 +152,16 @@ def test_board_shows_as_many_columns_as_fit(width, shown_titles, has_tabs):
 @pytest.mark.parametrize(
     ("width", "focus_index", "left_text", "right_text"),
     [
-        pytest.param(46, 2, "← Queued 2", "Done 1 →", id="both-sides"),
-        pytest.param(28, 1, "← Queued 2", "Review 2  +1 →", id="folds-farthest"),
-        pytest.param(28, 0, "", "Running 1  Review 2  +1 →", id="right-only"),
+        pytest.param(46, 2, "← Queued 2", "Done 0 →", id="both-sides"),
+        pytest.param(28, 1, "← Queued 2", "Review 3  +1 →", id="folds-farthest"),
+        pytest.param(28, 0, "", "Running 1  Review 3  +1 →", id="right-only"),
     ],
 )
 def test_board_lists_hidden_columns_on_the_side_they_scroll_in_from(
     width, focus_index, left_text, right_text
 ):
-    lines = frame_lines(statuses_tasks(), width, HEIGHT, board.BoardState(focus_index=focus_index))
+    state = board.BoardState(focus_index=focus_index, is_showing_all=True)
+    lines = frame_lines(statuses_tasks(), width, HEIGHT, state)
 
     tab_line = lines[board.TITLE_LINE_COUNT]
     assert tab_line.startswith(left_text)
@@ -171,8 +171,8 @@ def test_board_lists_hidden_columns_on_the_side_they_scroll_in_from(
 @pytest.mark.parametrize(
     ("width", "footer"),
     [
-        (WIDE_WIDTH, "←→ column  ↑↓ select  a show finished  q quit"),
-        (40, "←→ col  ↑↓ sel  a finished  q quit"),
+        (WIDE_WIDTH, "←→ column  ↑↓ select  a show done  q quit"),
+        (40, "←→ col  ↑↓ sel  a done  q quit"),
         (NARROW_WIDTH, "←→  ↑↓  a  q"),
     ],
 )
@@ -203,6 +203,15 @@ def test_board_selection_stays_on_its_task_when_a_task_is_added_above_it():
     text = frame_text(tasks | {"task-00": added_task}, state=state)
 
     assert "task-02  running" in text
+
+
+def test_board_moves_focus_off_done_when_it_hides():
+    state = board.BoardState(focus_index=3, is_showing_all=True)
+
+    board.apply_key(state, ord("a"))
+    frame_text({}, state=state)
+
+    assert state.focus_index == 2
 
 
 def test_board_marks_empty_columns():
@@ -371,10 +380,10 @@ def test_board_switches_columns_after_resizing_to_one_column(pty_board):
     running_board = pty_board()
 
     running_board.resize(NARROW_WIDTH)
-    running_board.wait_until(lambda: "Done 1" not in running_board.text())
+    running_board.wait_until(lambda: "to review" not in running_board.text())
     running_board.send("lll")
 
-    running_board.wait_until(lambda: running_board.is_focused("Done"))
+    running_board.wait_until(lambda: running_board.is_focused("Review"))
 
 
 @pytest.mark.parametrize("keys", [ARROW_KEYS, LETTER_KEYS], ids=["arrows", "letters"])

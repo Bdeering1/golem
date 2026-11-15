@@ -3,6 +3,7 @@ import os
 import shutil
 import subprocess
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -274,10 +275,14 @@ def installed_launch_agent():
 @pytest.fixture
 def owned_worktree(git_repository, ledger_path):
     def create_worktree(
-        status: str = ledger.STATUS_DONE, *, released_at: str | None = None
+        status: str = ledger.STATUS_FINISHED,
+        *,
+        released_at: str | None = None,
+        is_opened: bool = True,
     ) -> Path:
         worktree = support.git_worktree(git_repository)
-        support.write_task(ledger_path, status, worktree=str(worktree))
+        opened_fields = {"opened_at": datetime.now(UTC).isoformat()} if is_opened else {}
+        support.write_task(ledger_path, status, worktree=str(worktree), **opened_fields)
         support.write_worktrees(
             support.golem_worktree_resource(git_repository, worktree, released_at=released_at)
         )

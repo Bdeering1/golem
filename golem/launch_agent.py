@@ -11,11 +11,13 @@ from pathlib import Path
 from golem import (
     branch_pull_requests,
     chains,
+    display,
     ledger,
     locks,
     notifications,
     progress_log,
     spawn,
+    t3_code,
     task_directories,
     usage_windows,
     worktree_cleanup,
@@ -177,6 +179,49 @@ def has_pending_tasks(tasks: ledger.Tasks) -> bool:
     )
 
 
+def thread_ids_to_refresh(tasks: ledger.Tasks) -> dict[str, str]:
+    thread_ids: dict[str, str] = {}
+    for chain_ids in chains.chain_id_sets(tasks):
+        if not chains.is_chain_finished(tasks, chain_ids):
+            continue
+        step_id = display.thread_deciding_step_id(tasks, chain_ids)
+        if step_id is None:
+            continue
+        thread_id = tasks[step_id].get("t3_code_thread_id")
+        if thread_id is not None:
+            thread_ids[step_id] = thread_id
+    return thread_ids
+
+
+def refresh_thread_states() -> None:
+    if not t3_code.is_running():
+        return
+    tasks = ledger.load_tasks()
+    thread_ids = thread_ids_to_refresh(tasks)
+    if not thread_ids:
+        return
+    thread_states: dict[str, ledger.ThreadState] = {}
+    try:
+        origin = t3_code.server_origin()
+        token = t3_code.issue_token()
+        for task_id, thread_id in thread_ids.items():
+            thread_state = t3_code.thread_state(origin, token, thread_id)
+            if thread_state is not None:
+                thread_states[task_id] = thread_state
+    except t3_code.T3_CODE_ERRORS as error:
+        print(f"golem: could not read T3 Code thread states: {error}", file=sys.stderr)
+    with ledger.locked_tasks() as locked_tasks_by_id:
+        for task_id, thread_state in thread_states.items():
+            task = locked_tasks_by_id.get(task_id)
+            if task is not None and task["session_id"] == tasks[task_id]["session_id"]:
+                task["t3_code_thread_state"] = thread_state
+
+
+def refresh_chain_states() -> None:
+    branch_pull_requests.refresh_pull_requests()
+    refresh_thread_states()
+
+
 def agent_usage_window_entries(
     environment: dict[str, str],
 ) -> list[usage_windows.UsageWindowEntry]:
@@ -190,7 +235,7 @@ def agent_usage_window_entries(
 def run_launch_agent() -> int:
     window_environment = {**os.environ, **ledger.load_settings().get("agent_environment", {})}
     window_entries = agent_usage_window_entries(window_environment)
-    pull_request_refresh = threading.Thread(target=branch_pull_requests.refresh_pull_requests)
+    pull_request_refresh = threading.Thread(target=refresh_chain_states)
     pull_request_refresh.start()
     worktree_cleanup.auto_remove_worktrees()
     processes = run_launch_agent_pass()

@@ -2,7 +2,7 @@ from golem import clients, ledger
 
 
 def can_start_dependents(task: ledger.Task) -> bool:
-    return task.get("status") in ledger.SUCCEEDED_STATUSES and "gate_stop_reason" not in task
+    return task.get("status") == ledger.STATUS_FINISHED and "gate_stop_reason" not in task
 
 
 def waiting_dependent_ids(tasks: ledger.Tasks, parent_id: str) -> list[str]:
@@ -39,34 +39,21 @@ def has_running_dependent(tasks: ledger.Tasks, parent_id: str) -> bool:
     )
 
 
-def has_unreviewed_dependent(tasks: ledger.Tasks, parent_id: str) -> bool:
-    return any(
-        dependent["status"] in ledger.UNREVIEWED_STATUSES and dependent.get("after") == parent_id
-        for dependent in tasks.values()
-    )
-
-
-def is_ready_for_review(tasks: ledger.Tasks, task_id: str) -> bool:
+def is_ready_to_open(tasks: ledger.Tasks, task_id: str) -> bool:
     task = tasks[task_id]
-    return task.get("status") == ledger.STATUS_NEEDS_REVIEW and (
-        "gate_stop_reason" in task or not has_unreviewed_dependent(tasks, task_id)
+    if ledger.is_counted_opened(tasks, task_id):
+        return False
+    if task.get("status") == ledger.STATUS_BLOCKED:
+        return True
+    return task.get("status") == ledger.STATUS_FINISHED and all(
+        tasks[dependent_id]["status"] in {ledger.STATUS_FAILED, ledger.STATUS_CANCELLED}
+        for dependent_id in dependent_task_ids(tasks, task_id)
     )
 
 
-def mark_ancestors_done(tasks: ledger.Tasks, task: ledger.Task) -> None:
-    ancestor = tasks.get(task.get("after", ""))
-    while ancestor is not None:
-        parent = ancestor
-        if parent.get("status") == ledger.STATUS_NEEDS_REVIEW:
-            parent["status"] = ledger.STATUS_DONE
-        ancestor = tasks.get(parent.get("after", ""))
-
-
-def mark_task_done(tasks: ledger.Tasks, task: ledger.Task) -> None:
-    if task.get("status") != ledger.STATUS_NEEDS_REVIEW:
-        return
-    task["status"] = ledger.STATUS_DONE
-    mark_ancestors_done(tasks, task)
+def is_chain_finished(tasks: ledger.Tasks, chain_ids: set[str]) -> bool:
+    statuses = {tasks[chain_id]["status"] for chain_id in chain_ids} - {ledger.STATUS_CANCELLED}
+    return statuses == {ledger.STATUS_FINISHED}
 
 
 def is_dependent_reservable(tasks: ledger.Tasks, parent_id: str) -> bool:
@@ -75,6 +62,8 @@ def is_dependent_reservable(tasks: ledger.Tasks, parent_id: str) -> bool:
     parent_status = tasks[parent_id]["status"]
     if parent_status == ledger.STATUS_CANCELLED:
         raise SystemExit(f"golem: parent task is cancelled: {parent_id}")
+    if ledger.has_closed_chain(tasks, parent_id):
+        raise SystemExit(f"golem: parent chain is closed: {parent_id}")
     return not can_start_dependents(tasks[parent_id]) or is_gate_pending(tasks, parent_id)
 
 
@@ -94,9 +83,10 @@ def is_gate_pending(tasks: ledger.Tasks, task_id: str) -> bool:
     if task is None:
         return False
     return (
-        task.get("status") == ledger.STATUS_NEEDS_REVIEW
+        task.get("status") == ledger.STATUS_FINISHED
         and "gate" in task
         and "gate_stop_reason" not in task
+        and not task.get("gate_released")
         and bool(waiting_dependent_ids(tasks, task_id))
     )
 
@@ -116,6 +106,18 @@ def chain_task_ids(tasks: ledger.Tasks, task_id: str) -> set[str]:
                 chain_ids.add(adjacent_id)
                 pending_ids.append(adjacent_id)
     return chain_ids
+
+
+def chain_id_sets(tasks: ledger.Tasks) -> list[set[str]]:
+    id_sets: list[set[str]] = []
+    listed_ids: set[str] = set()
+    for task_id in tasks:
+        if task_id in listed_ids:
+            continue
+        chain_ids = chain_task_ids(tasks, task_id)
+        listed_ids |= chain_ids
+        id_sets.append(chain_ids)
+    return id_sets
 
 
 def dependents_first_task_ids(tasks: ledger.Tasks, task_ids: list[str]) -> list[str]:

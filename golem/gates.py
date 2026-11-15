@@ -1,5 +1,6 @@
 import json
 import sys
+from datetime import UTC, datetime
 from typing import cast
 
 from golem import chains, launch_agent, ledger, locks, notifications, spawn
@@ -49,13 +50,14 @@ def run_pending_gate(task_id: str) -> None:
         current = locked_tasks_by_id.get(task_id)
         if current is None:
             return
-        if current.get("status") not in ledger.SUCCEEDED_STATUSES:
+        if current.get("status") != ledger.STATUS_FINISHED:
             return
+        current["status"] = ledger.STATUS_BLOCKED
         current["gate_stop_reason"] = stop_reason
         directory = ledger.task_directory(current)
         stopped_task = current.copy()
     claude_hooks.sync_hooks(directory)
-    notifications.notify_task(task_id, stopped_task, notifications.OUTCOME_GATE_STOPPED)
+    notifications.notify_task(task_id, stopped_task, notifications.OUTCOME_BLOCKED)
 
 
 def continue_task(task_id: str, *, is_forced: bool) -> int:
@@ -90,7 +92,9 @@ def release_gate_stop(task_id: str, *, stderr: int | None = None) -> bool:
         if "gate_stop_reason" not in task:
             return False
         del task["gate_stop_reason"]
-        task["status"] = ledger.STATUS_DONE
+        task["status"] = ledger.STATUS_FINISHED
+        task["finished_at"] = datetime.now(UTC).isoformat()
+        task["gate_released"] = True
     spawn.start_task_executor(task_id, task, stderr=stderr)
     return True
 

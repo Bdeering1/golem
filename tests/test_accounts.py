@@ -108,7 +108,7 @@ def test_remove_logs_out_and_deletes_account(add_account, fake_commands):
 
 def test_remove_refuses_while_unfinished_task_uses_account(add_account, ledger_path):
     add_account()
-    support.write_task(ledger_path, ledger.STATUS_NEEDS_REVIEW, account=1)
+    support.write_task(ledger_path, ledger.STATUS_FINISHED, account=1)
 
     with pytest.raises(SystemExit, match=support.TASK_ID):
         cli.main(["account", "remove", support.WORK_EMAIL])
@@ -149,7 +149,7 @@ def test_run_account_refuses_before_ledger_changes(
 ):
     add_account()
     add_account(support.WORK_EMAIL, "org-other", "Other")
-    support.write_task(ledger_path, ledger.STATUS_DONE)
+    support.write_task(ledger_path, ledger.STATUS_FINISHED)
     tasks = support.read_tasks(ledger_path)
 
     with pytest.raises(SystemExit) as error:
@@ -314,7 +314,7 @@ def test_claude_code_pickup_resumes_on_task_account(
     add_account, fake_commands, ledger_path, monkeypatch
 ):
     add_account()
-    support.write_task(ledger_path, ledger.STATUS_NEEDS_REVIEW, account=1)
+    support.write_task(ledger_path, ledger.STATUS_FINISHED, account=1)
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth")
 
     assert cli.main(["pickup", support.TASK_ID, "--client", "claude-code"]) == 0
@@ -343,7 +343,7 @@ def test_retry_refuses_removed_account_before_ledger_changes(installed_launch_ag
 
 def test_t3_code_pickup_creates_thread_on_account_instance(server, add_account, ledger_path):
     add_account()
-    support.write_task(ledger_path, ledger.STATUS_NEEDS_REVIEW, account=1)
+    support.write_task(ledger_path, ledger.STATUS_FINISHED, account=1)
 
     assert cli.main(["pickup", support.TASK_ID, "--client", "t3-code"]) == 0
 
@@ -355,7 +355,7 @@ def test_t3_code_pickup_creates_thread_on_account_instance(server, add_account, 
 
 def test_repeat_t3_code_pickup_updates_account_instance(server, add_account, ledger_path):
     add_account()
-    support.write_task(ledger_path, ledger.STATUS_NEEDS_REVIEW, account=1)
+    support.write_task(ledger_path, ledger.STATUS_FINISHED, account=1)
     (server.home / "thread-present").touch()
 
     assert cli.main(["pickup", support.TASK_ID, "--client", "t3-code"]) == 0

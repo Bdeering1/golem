@@ -207,7 +207,7 @@ def test_usage_limit_resume_skips_setup(
 
     assert len(setup_inputs(tmp_path)) == 1
     assert support.logged_claude_cwds(fake_commands) == [str(directory)] * 2
-    assert support.read_task(ledger_path)["status"] == ledger.STATUS_NEEDS_REVIEW
+    assert support.read_task(ledger_path)["status"] == ledger.STATUS_FINISHED
 
 
 def execute_with_busy_directory(directory, task_id, session_id):
@@ -286,7 +286,7 @@ def test_retry_runs_setup_again_only_after_failed_setup(
     assert is_prompt_passed(
         support.logged_claude_args(fake_commands), f"{support.PROMPT}\n\n{SETUP_SUFFIX}"
     )
-    assert support.read_task(ledger_path)["status"] == ledger.STATUS_NEEDS_REVIEW
+    assert support.read_task(ledger_path)["status"] == ledger.STATUS_FINISHED
 
 
 def test_setups_in_one_directory_run_one_at_a_time(

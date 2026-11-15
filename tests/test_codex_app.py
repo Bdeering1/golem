@@ -50,7 +50,7 @@ def set_app_lock_holder(monkeypatch, fake_commands, app: Path, link_count):
 def write_codex_task(ledger_path):
     support.write_task(
         ledger_path,
-        ledger.STATUS_NEEDS_REVIEW,
+        ledger.STATUS_FINISHED,
         backend=ledger.BACKEND_CODEX,
         thread_id=THREAD_ID,
     )
@@ -76,7 +76,7 @@ def test_pickup_opens_codex_thread_in_app(
         f"-b {codex_app.APP_BUNDLE_ID}",
         *[codex_app.thread_link(THREAD_ID)] * (link_count + 1),
     ]
-    assert support.read_task(ledger_path)["status"] == ledger.STATUS_DONE
+    assert support.read_task(ledger_path)["status"] == ledger.STATUS_FINISHED
 
 
 def remove_app(_monkeypatch, _fake_commands, app):
@@ -134,5 +134,5 @@ def test_failed_pickup_leaves_codex_task_needing_review(
     with pytest.raises(SystemExit, match=message):
         cli.main(["pickup", support.TASK_ID, "--client", clients.CODEX_APP_CLIENT])
 
-    assert support.read_task(ledger_path)["status"] == ledger.STATUS_NEEDS_REVIEW
+    assert support.read_task(ledger_path)["status"] == ledger.STATUS_FINISHED
     assert sent_links(fake_commands) == []

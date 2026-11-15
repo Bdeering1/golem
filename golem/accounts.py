@@ -262,10 +262,18 @@ def remove_account(value: str) -> tuple[int, Account]:
     number = resolved_account_number(value)
     if number == DEFAULT_ACCOUNT_NUMBER:
         raise SystemExit("golem: cannot remove the default Claude account")
+    tasks = ledger.load_tasks()
     unfinished_task_ids = [
         task_id
-        for task_id, task in ledger.load_tasks().items()
-        if task.get("account") == number and task.get("status") in ledger.UNREVIEWED_STATUSES
+        for task_id, task in tasks.items()
+        if task.get("account") == number
+        and (
+            task.get("status") in ledger.UNFINISHED_STATUSES
+            or (
+                task.get("status") == ledger.STATUS_FINISHED
+                and not ledger.is_counted_opened(tasks, task_id)
+            )
+        )
     ]
     if unfinished_task_ids:
         raise SystemExit(

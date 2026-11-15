@@ -54,7 +54,9 @@ def test_task_branches_cover_repository_and_nested_repositories(
     deep_path = nested_repository(nested_path, "deep", git_repository_template, DEEP_BRANCH)
     support.add_github_remote(deep_path, "deep")
     (git_repository / "nested-link").symlink_to(nested_path)
-    support.write_task(ledger_path, ledger.STATUS_DONE, cwd=str(git_repository), no_worktree=True)
+    support.write_task(
+        ledger_path, ledger.STATUS_FINISHED, cwd=str(git_repository), no_worktree=True
+    )
 
     assert branch_pull_requests.task_branches(support.TASK_ID) == [
         {"repository": REPOSITORY, "branch": FEATURE_BRANCH},
@@ -77,13 +79,13 @@ def test_refresh_stores_pull_requests_of_recorded_branches(ledger_path, write_pu
         ledger_path,
         {
             support.TASK_ID: support.task_record(
-                ledger.STATUS_DONE,
+                ledger.STATUS_FINISHED,
                 repository_branches=[
                     {"repository": REPOSITORY, "branch": FEATURE_BRANCH},
                     {"repository": NESTED_REPOSITORY, "branch": NESTED_BRANCH},
                 ],
             ),
-            "unrecorded": support.task_record(ledger.STATUS_DONE, task_id="unrecorded"),
+            "unrecorded": support.task_record(ledger.STATUS_FINISHED, task_id="unrecorded"),
         },
     )
     write_pull_requests(
@@ -133,7 +135,7 @@ def test_refresh_leaves_stored_pull_requests(
         monkeypatch.setenv("PATH", git_only_path(tmp_path))
     support.write_task(
         ledger_path,
-        ledger.STATUS_DONE,
+        ledger.STATUS_FINISHED,
         repository_branches=[{"repository": REPOSITORY, "branch": FEATURE_BRANCH}],
         pull_requests=stored,
     )
@@ -147,7 +149,7 @@ def test_refresh_leaves_stored_pull_requests(
 def test_refresh_finds_gh_on_task_path(ledger_path, write_pull_requests, monkeypatch, tmp_path):
     support.write_task(
         ledger_path,
-        ledger.STATUS_DONE,
+        ledger.STATUS_FINISHED,
         repository_branches=[{"repository": REPOSITORY, "branch": FEATURE_BRANCH}],
         environment={"PATH": os.environ["PATH"]},
     )
@@ -169,7 +171,7 @@ def test_refresh_finds_gh_on_task_path(ledger_path, write_pull_requests, monkeyp
     ],
 )
 def test_store_skips_task_changed_since_lookup(ledger_path, current_fields):
-    checked_task = support.task_record(ledger.STATUS_DONE)
+    checked_task = support.task_record(ledger.STATUS_FINISHED)
     support.write_tasks(ledger_path, {support.TASK_ID: {**checked_task, **current_fields}})
 
     branch_pull_requests.store_pull_requests(

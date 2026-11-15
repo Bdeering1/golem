@@ -17,6 +17,11 @@ TODAY = date(2030, 3, 10)
 OPEN_PULL_REQUEST = {"url": "https://github.com/owner/repository/pull/1", "state": "open"}
 MERGED_PULL_REQUEST = {"url": "https://github.com/owner/repository/pull/2", "state": "merged"}
 CLOSED_PULL_REQUEST = {"url": "https://github.com/owner/repository/pull/3", "state": "closed"}
+SECOND_MERGED_PULL_REQUEST = {
+    "url": "https://github.com/owner/repository/pull/4",
+    "state": "merged",
+}
+CLOSED_AT = datetime(2030, 3, 9, tzinfo=UTC).isoformat()
 
 
 @pytest.fixture
@@ -32,27 +37,27 @@ def toronto_time():
     time.tzset()
 
 
-def test_list_groups_visible_tasks_by_status_and_id(ledger_path, capsys):
+def test_list_rows_order_by_column_then_status_then_id():
     tasks = {
         "z-failed": support.task_record(ledger.STATUS_FAILED, task_id="z-failed"),
         "a-failed": support.task_record(ledger.STATUS_FAILED, task_id="a-failed"),
+        "blocked": support.task_record(ledger.STATUS_BLOCKED, task_id="blocked"),
         "scheduled": support.task_record(ledger.STATUS_SCHEDULED, task_id="scheduled"),
         "running": support.task_record(ledger.STATUS_RUNNING, task_id="running"),
-        "review": support.task_record(ledger.STATUS_NEEDS_REVIEW, task_id="review"),
-        "parent": support.task_record(ledger.STATUS_NEEDS_REVIEW, task_id="parent"),
+        "review": support.task_record(ledger.STATUS_FINISHED, task_id="review"),
+        "parent": support.task_record(ledger.STATUS_FINISHED, task_id="parent"),
         "waiting": support.task_record(ledger.STATUS_WAITING, task_id="waiting", after="parent"),
-        "done": support.task_record(ledger.STATUS_DONE, task_id="done"),
+        "done": support.task_record(ledger.STATUS_FINISHED, task_id="done", closed_at=CLOSED_AT),
         "cancelled": support.task_record(ledger.STATUS_CANCELLED, task_id="cancelled"),
     }
-    support.write_tasks(ledger_path, tasks)
 
-    output = support.list_output(capsys)
+    rows = display.list_rows(tasks, TODAY)
 
-    table = output.split("\n\n")[0]
-    assert [line.split()[0] for line in table.splitlines()[1:]] == [
-        "review",
+    assert [row.task_id for row in rows] == [
+        "blocked",
         "a-failed",
         "z-failed",
+        "review",
         "running",
         "scheduled",
         "waiting",
@@ -61,22 +66,18 @@ def test_list_groups_visible_tasks_by_status_and_id(ledger_path, capsys):
     ]
 
 
-def test_list_rows_show_each_chains_most_actionable_and_latest_task():
+def test_list_rows_show_each_chains_latest_task_among_equal_statuses():
     tasks = {
-        "lone": support.task_record(ledger.STATUS_DONE, task_id="lone"),
-        "root": support.task_record(ledger.STATUS_NEEDS_REVIEW, task_id="root"),
-        "branch-a": support.task_record(
-            ledger.STATUS_NEEDS_REVIEW, task_id="branch-a", after="root"
-        ),
-        "branch-b": support.task_record(
-            ledger.STATUS_NEEDS_REVIEW, task_id="branch-b", after="root"
-        ),
-        "leaf": support.task_record(ledger.STATUS_WAITING, task_id="leaf", after="branch-a"),
+        "lone": support.task_record(ledger.STATUS_FINISHED, task_id="lone"),
+        "root": support.task_record(ledger.STATUS_FINISHED, task_id="root"),
+        "branch-a": support.task_record(ledger.STATUS_FINISHED, task_id="branch-a", after="root"),
+        "branch-b": support.task_record(ledger.STATUS_FINISHED, task_id="branch-b", after="root"),
+        "leaf": support.task_record(ledger.STATUS_FINISHED, task_id="leaf", after="branch-a"),
     }
 
     rows = display.list_rows(tasks, TODAY)
 
-    assert [(row.task_id, row.step) for row in rows] == [("branch-b", "2/3"), ("lone", "")]
+    assert [(row.task_id, row.step) for row in rows] == [("leaf", "3/3"), ("lone", "")]
 
 
 @pytest.mark.parametrize(
@@ -96,19 +97,17 @@ def test_list_rows_show_each_chains_most_actionable_and_latest_task():
         ),
         pytest.param(
             ledger.STATUS_WAITING,
-            {"gate_stop_reason": "tests failed"},
-            ("parent", "1/2", ledger.STATUS_NEEDS_REVIEW),
-            id="gate-stopped",
+            {"gate_stop_reason": "tests failed", "status": ledger.STATUS_BLOCKED},
+            ("parent", "1/2", ledger.STATUS_BLOCKED),
+            id="blocked",
         ),
     ],
 )
-def test_list_rows_skip_needs_review_step_while_later_step_is_unfinished(
+def test_list_rows_show_the_step_earliest_in_status_order(
     dependent_status, parent_fields, expected
 ):
     tasks = {
-        "parent": support.task_record(
-            ledger.STATUS_NEEDS_REVIEW, task_id="parent", **parent_fields
-        ),
+        "parent": support.task_record(ledger.STATUS_FINISHED, task_id="parent") | parent_fields,
         "dependent": support.task_record(dependent_status, task_id="dependent", after="parent"),
     }
 
@@ -134,7 +133,7 @@ def test_list_rows_skip_needs_review_step_while_later_step_is_unfinished(
         ),
         pytest.param(ledger.STATUS_WAITING, {"after": "missing"}, "missing", id="waiting-after"),
         pytest.param(
-            ledger.STATUS_NEEDS_REVIEW,
+            ledger.STATUS_BLOCKED,
             {"gate_stop_reason": "tests failed\ndetails"},
             "tests failed",
             id="gate-reason",
@@ -145,23 +144,22 @@ def test_list_rows_skip_needs_review_step_while_later_step_is_unfinished(
             "missing; setup failed",
             id="status-value-and-reason",
         ),
-        pytest.param(ledger.STATUS_DONE, {}, "", id="no-detail"),
         pytest.param(
-            ledger.STATUS_DONE, {"pull_requests": [OPEN_PULL_REQUEST]}, "PR open", id="one-pr"
+            ledger.STATUS_FINISHED, {"pull_requests": [OPEN_PULL_REQUEST]}, "PR open", id="one-pr"
         ),
         pytest.param(
-            ledger.STATUS_DONE,
-            {"pull_requests": [MERGED_PULL_REQUEST, MERGED_PULL_REQUEST]},
+            ledger.STATUS_FINISHED,
+            {"pull_requests": [MERGED_PULL_REQUEST, SECOND_MERGED_PULL_REQUEST]},
             "2 PRs merged",
             id="prs-same-state",
         ),
         pytest.param(
-            ledger.STATUS_DONE,
+            ledger.STATUS_FINISHED,
             {"pull_requests": [MERGED_PULL_REQUEST, OPEN_PULL_REQUEST]},
             "2 PRs: 1 open, 1 merged",
             id="prs-different-states",
         ),
-        pytest.param(ledger.STATUS_DONE, {"pull_requests": []}, "no PR", id="no-pr-found"),
+        pytest.param(ledger.STATUS_FINISHED, {"pull_requests": []}, "no PR", id="no-pr-found"),
     ],
 )
 def test_list_rows_detail(toronto_time, status, fields, detail):
@@ -174,11 +172,15 @@ def test_list_abbreviates_only_home_and_its_descendants(ledger_path, capsys):
     home_directory = Path.home()
     prefix_directory = str(home_directory.with_name(f"{home_directory.name}-other"))
     tasks = {
-        "home": support.task_record(ledger.STATUS_DONE, task_id="home", cwd=str(home_directory)),
-        "descendant": support.task_record(
-            ledger.STATUS_DONE, task_id="descendant", cwd=str(home_directory / "project")
+        "home": support.task_record(
+            ledger.STATUS_FINISHED, task_id="home", cwd=str(home_directory)
         ),
-        "prefix": support.task_record(ledger.STATUS_DONE, task_id="prefix", cwd=prefix_directory),
+        "descendant": support.task_record(
+            ledger.STATUS_FINISHED, task_id="descendant", cwd=str(home_directory / "project")
+        ),
+        "prefix": support.task_record(
+            ledger.STATUS_FINISHED, task_id="prefix", cwd=prefix_directory
+        ),
     }
     support.write_tasks(ledger_path, tasks)
 
@@ -237,9 +239,9 @@ def test_list_shortens_directories_and_moves_detail_only_when_terminal_overflows
 ):
     home_directory = Path.home()
     tasks = {
-        "home": support.task_record(ledger.STATUS_DONE, task_id="home", cwd=str(home_directory)),
+        "home": support.task_record(ledger.STATUS_FAILED, task_id="home", cwd=str(home_directory)),
         "nested": support.task_record(
-            ledger.STATUS_NEEDS_REVIEW,
+            ledger.STATUS_BLOCKED,
             task_id="nested",
             cwd=str(home_directory / "project" / "leaf"),
             gate_stop_reason="gate",
@@ -298,7 +300,7 @@ def test_list_uses_distinct_status_colors_and_keeps_columns_aligned(
     ],
 )
 def test_list_suppresses_status_colors(ledger_path, capsys, monkeypatch, is_tty, term, no_color):
-    support.write_task(ledger_path, ledger.STATUS_DONE)
+    support.write_task(ledger_path, ledger.STATUS_FINISHED)
     monkeypatch.setenv("TERM", term)
     if no_color is None:
         monkeypatch.delenv("NO_COLOR", raising=False)
@@ -315,34 +317,39 @@ def test_list_suppresses_status_colors(ledger_path, capsys, monkeypatch, is_tty,
     ("list_args", "listed_ids", "footnote"),
     [
         pytest.param(
-            ["list"], ["none", "open", "partial-child"], "2 hidden; --all shows them", id="default"
+            ["list"],
+            ["none", "open", "partial-child"],
+            "2 done hidden; --all shows them",
+            id="default",
         ),
         pytest.param(
             ["list", "--all"],
-            ["finished-child", "merged", "none", "open", "partial-child"],
+            ["none", "open", "partial-child", "finished-child", "merged"],
             None,
             id="all",
         ),
     ],
 )
-def test_list_hides_done_chains_whose_pull_requests_are_all_finished(
-    ledger_path, capsys, list_args, listed_ids, footnote
-):
-    def done_task(task_id: str, **fields: object) -> ledger.Task:
-        return support.task_record(ledger.STATUS_DONE, task_id=task_id, **fields)
+def test_list_hides_done_chains(ledger_path, capsys, list_args, listed_ids, footnote):
+    def finished_task(task_id: str, **fields: object) -> ledger.Task:
+        return support.task_record(ledger.STATUS_FINISHED, task_id=task_id, **fields)
 
     support.write_tasks(
         ledger_path,
         {
-            "merged": done_task("merged", pull_requests=[MERGED_PULL_REQUEST]),
-            "open": done_task("open", pull_requests=[MERGED_PULL_REQUEST, OPEN_PULL_REQUEST]),
-            "none": done_task("none", pull_requests=[]),
-            "finished-parent": done_task("finished-parent", pull_requests=[MERGED_PULL_REQUEST]),
-            "finished-child": done_task(
+            "merged": finished_task("merged", pull_requests=[MERGED_PULL_REQUEST]),
+            "open": finished_task("open", pull_requests=[MERGED_PULL_REQUEST, OPEN_PULL_REQUEST]),
+            "none": finished_task("none", pull_requests=[]),
+            "finished-parent": finished_task(
+                "finished-parent", pull_requests=[MERGED_PULL_REQUEST]
+            ),
+            "finished-child": finished_task(
                 "finished-child", after="finished-parent", pull_requests=[CLOSED_PULL_REQUEST]
             ),
-            "partial-parent": done_task("partial-parent", pull_requests=[MERGED_PULL_REQUEST]),
-            "partial-child": done_task("partial-child", after="partial-parent"),
+            "partial-parent": finished_task("partial-parent", pull_requests=[MERGED_PULL_REQUEST]),
+            "partial-child": finished_task(
+                "partial-child", after="partial-parent", pull_requests=[OPEN_PULL_REQUEST]
+            ),
         },
     )
 
@@ -354,6 +361,89 @@ def test_list_hides_done_chains_whose_pull_requests_are_all_finished(
 
 
 def test_list_shows_only_hidden_footnote_when_every_row_is_hidden(ledger_path, capsys):
-    support.write_task(ledger_path, ledger.STATUS_DONE, pull_requests=[MERGED_PULL_REQUEST])
+    support.write_task(ledger_path, ledger.STATUS_FINISHED, pull_requests=[MERGED_PULL_REQUEST])
 
-    assert support.list_output(capsys) == "1 hidden; --all shows them\n"
+    assert support.list_output(capsys) == "1 done hidden; --all shows them\n"
+
+
+def finished_step(task_id: str, **fields: object) -> ledger.Task:
+    default_fields: dict[str, object] = {"finished_at": finished_at(days_ago=1)}
+    return support.task_record(ledger.STATUS_FINISHED, task_id=task_id, **(default_fields | fields))
+
+
+def finished_at(*, days_ago: int) -> str:
+    return datetime(2030, 3, 10 - days_ago, 12, tzinfo=UTC).isoformat()
+
+
+@pytest.mark.parametrize(
+    ("child_fields", "column", "reason"),
+    [
+        pytest.param({"closed_at": CLOSED_AT}, display.COLUMN_DONE, "closed", id="closed"),
+        pytest.param(
+            {"pull_requests": [MERGED_PULL_REQUEST, CLOSED_PULL_REQUEST]},
+            display.COLUMN_DONE,
+            "2 PRs: 1 merged, 1 closed",
+            id="prs-merged-or-closed",
+        ),
+        pytest.param(
+            {
+                "pull_requests": [OPEN_PULL_REQUEST],
+                "t3_code_thread_id": "thread",
+                "t3_code_thread_state": ledger.THREAD_STATE_SETTLED,
+                "finished_at": finished_at(days_ago=9),
+            },
+            display.COLUMN_REVIEW,
+            "PR open",
+            id="pr-ignores-thread-and-age",
+        ),
+        *(
+            pytest.param(
+                {"t3_code_thread_id": "thread", "t3_code_thread_state": state},
+                display.COLUMN_DONE,
+                f"thread {state}",
+                id=f"thread-{state}",
+            )
+            for state in (
+                ledger.THREAD_STATE_SETTLED,
+                ledger.THREAD_STATE_ARCHIVED,
+                ledger.THREAD_STATE_DELETED,
+            )
+        ),
+        pytest.param(
+            {"t3_code_thread_id": "thread", "t3_code_thread_state": ledger.THREAD_STATE_UNSETTLED},
+            display.COLUMN_REVIEW,
+            "thread unsettled",
+            id="thread-unsettled",
+        ),
+        pytest.param(
+            {"finished_at": finished_at(days_ago=7)},
+            display.COLUMN_DONE,
+            "no PR; finished 7d ago",
+            id="age",
+        ),
+        pytest.param(
+            {"finished_at": finished_at(days_ago=6)},
+            display.COLUMN_REVIEW,
+            "no PR; finished 6d ago",
+            id="young",
+        ),
+    ],
+)
+def test_finished_chain_column_and_reason(child_fields, column, reason):
+    tasks = {
+        "parent": finished_step("parent", finished_at=finished_at(days_ago=8)),
+        "child": finished_step("child", after="parent") | child_fields,
+    }
+
+    row = display.list_rows(tasks, TODAY)[0]
+
+    assert (row.status, row.column, row.detail) == (ledger.STATUS_FINISHED, column, reason)
+
+
+def test_finished_chain_counts_pull_request_shared_by_steps_once():
+    tasks = {
+        "parent": finished_step("parent", pull_requests=[OPEN_PULL_REQUEST]),
+        "child": finished_step("child", after="parent", pull_requests=[OPEN_PULL_REQUEST]),
+    }
+
+    assert display.list_rows(tasks, TODAY)[0].detail == "PR open"

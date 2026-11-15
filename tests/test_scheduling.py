@@ -29,8 +29,8 @@ def test_after_pending_parent_skips_usage_lookup(installed_launch_agent, ledger_
         None,
         ledger.STATUS_SCHEDULED,
         ledger.STATUS_RUNNING,
-        ledger.STATUS_NEEDS_REVIEW,
-        ledger.STATUS_DONE,
+        ledger.STATUS_BLOCKED,
+        ledger.STATUS_FINISHED,
     ],
 )
 def test_retry_refuses_unretryable_task_before_usage_lookup(ledger_path, monkeypatch, status):
@@ -143,7 +143,7 @@ def test_run_then_refuses_ids_without_changing_the_ledger(
     assert support.read_tasks(ledger_path) == tasks
 
 
-def finished_task(task_id, status=ledger.STATUS_DONE, **fields: object):
+def finished_task(task_id, status=ledger.STATUS_FINISHED, **fields: object):
     fields = {
         "pull_requests": [{"url": "merged", "state": ledger.PULL_REQUEST_STATE_MERGED}],
         **fields,
@@ -227,7 +227,7 @@ def test_run_replaces_finished_task_on_each_reserved_path(
 @pytest.mark.parametrize(
     ("fields", "is_unfinished_task_in_chain"),
     [
-        pytest.param({"status": ledger.STATUS_NEEDS_REVIEW}, False, id="not-done"),
+        pytest.param({"status": ledger.STATUS_BLOCKED}, False, id="blocked"),
         pytest.param({"pull_requests": [{"url": "open", "state": "open"}]}, False, id="open-pr"),
         pytest.param({"pull_requests": []}, False, id="no-pr"),
         pytest.param({"pull_requests": None}, True, id="unfinished-task-in-chain"),
@@ -279,20 +279,31 @@ def fail_usage_lookup(_environment: dict[str, str]) -> Never:
 
 
 @pytest.mark.parametrize(
-    ("parent_status", "child_fields", "next_reset_time", "error"),
+    ("parent", "child_fields", "next_reset_time", "error"),
     [
         pytest.param(
-            ledger.STATUS_CANCELLED, {}, None, "parent task is cancelled", id="cancelled-parent"
+            finished_task(support.PARENT_ID, ledger.STATUS_CANCELLED),
+            {},
+            None,
+            "parent task is cancelled",
+            id="cancelled-parent",
         ),
         pytest.param(
-            ledger.STATUS_DONE,
+            finished_task(support.PARENT_ID, closed_at="2030-03-10T12:00:00+00:00"),
+            {},
+            None,
+            "parent chain is closed",
+            id="closed-parent",
+        ),
+        pytest.param(
+            finished_task(support.PARENT_ID),
             {},
             fail_usage_lookup,
             re.escape(common.USAGE_ERROR),
             id="usage-lookup-fails",
         ),
         pytest.param(
-            ledger.STATUS_DONE,
+            finished_task(support.PARENT_ID),
             {"after": support.PARENT_ID},
             lambda _environment: None,
             f"task already exists: {support.CHILD_ID}",
@@ -304,7 +315,7 @@ def test_refused_run_after_keeps_finished_task_and_progress(
     installed_launch_agent,
     ledger_path,
     monkeypatch,
-    parent_status,
+    parent,
     child_fields,
     next_reset_time,
     error,
@@ -312,7 +323,7 @@ def test_refused_run_after_keeps_finished_task_and_progress(
     if next_reset_time is not None:
         monkeypatch.setattr(claude, "next_reset_time", next_reset_time)
     tasks = {
-        support.PARENT_ID: finished_task(support.PARENT_ID, parent_status),
+        support.PARENT_ID: parent,
         support.CHILD_ID: finished_task(support.CHILD_ID, **child_fields),
     }
     support.write_tasks(ledger_path, tasks)
@@ -400,7 +411,7 @@ def test_cancel_marks_task_cancelled_and_does_not_run_executor(
 
 @pytest.mark.parametrize(
     "status",
-    [ledger.STATUS_RUNNING, ledger.STATUS_NEEDS_REVIEW, ledger.STATUS_FAILED, ledger.STATUS_DONE],
+    [ledger.STATUS_RUNNING, ledger.STATUS_BLOCKED, ledger.STATUS_FAILED, ledger.STATUS_FINISHED],
 )
 def test_cancel_refuses_non_scheduled_tasks(ledger_path, status):
     support.write_task(ledger_path, status)
@@ -446,7 +457,7 @@ def test_retry_runs_failed_task_in_new_session(
         assert due_at == expected_due_at
     support.set_task_due_now(ledger_path)
     assert cli.main(["_execute", support.TASK_ID, retry["session_id"]]) == 0
-    assert support.read_task(ledger_path)["status"] == ledger.STATUS_NEEDS_REVIEW
+    assert support.read_task(ledger_path)["status"] == ledger.STATUS_FINISHED
     assert support.logged_claude_args(fake_commands) == support.expected_claude_args(retry)
 
 

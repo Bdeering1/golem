@@ -10,7 +10,7 @@ from tests import support
 @pytest.mark.parametrize(
     ("exit_code", "title"),
     [
-        pytest.param(0, f"golem: {support.TASK_ID} needs review", id="needs-review"),
+        pytest.param(0, f"golem: {support.TASK_ID} finished", id="finished"),
         pytest.param(1, f"golem: {support.TASK_ID} failed", id="failed"),
     ],
 )
@@ -48,7 +48,7 @@ def test_only_final_chain_task_notifies_when_ready_for_review(
 
     assert cli.main(["_execute", support.PARENT_ID, parent["session_id"]]) == 0
     assert [notification[-2] for notification in support.logged_osascript_calls(fake_commands)] == [
-        f"golem: {support.CHILD_ID} needs review"
+        f"golem: {support.CHILD_ID} finished"
     ]
 
 

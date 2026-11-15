@@ -50,7 +50,6 @@ UP_KEYS = {ord("k"), curses.KEY_UP}
 
 class BoardColumn(NamedTuple):
     title: str
-    statuses: tuple[str, ...]
     color: int
 
 
@@ -101,12 +100,11 @@ class BoardLayout(NamedTuple):
 
 type LedgerStat = tuple[int, int, int] | None
 
-REVIEW_STATUSES = (ledger.STATUS_NEEDS_REVIEW, ledger.STATUS_FAILED)
 BOARD_COLUMNS = (
-    BoardColumn("Queued", (ledger.STATUS_SCHEDULED, ledger.STATUS_WAITING), 208),
-    BoardColumn("Running", (ledger.STATUS_RUNNING,), 39),
-    BoardColumn("Review", REVIEW_STATUSES, 170),
-    BoardColumn("Done", (ledger.STATUS_DONE,), 34),
+    BoardColumn(display.COLUMN_QUEUED, 208),
+    BoardColumn(display.COLUMN_RUNNING, 39),
+    BoardColumn(display.COLUMN_REVIEW, 170),
+    BoardColumn(display.COLUMN_DONE, 34),
 )
 COLOR_PAIRS = {
     color: pair
@@ -141,28 +139,23 @@ def board_snapshot(tasks: ledger.Tasks, now: datetime) -> BoardSnapshot:
     )
 
 
+def visible_columns(*, is_showing_all: bool) -> tuple[BoardColumn, ...]:
+    return BOARD_COLUMNS if is_showing_all else BOARD_COLUMNS[:-1]
+
+
 def rows_by_column(
     rows: list[display.ListRow], *, is_showing_all: bool
 ) -> list[tuple[BoardColumn, list[display.ListRow]]]:
     return [
-        (
-            board_column,
-            [
-                row
-                for row in rows
-                if row.status in board_column.statuses and (is_showing_all or not row.is_hidden)
-            ],
-        )
-        for board_column in BOARD_COLUMNS
+        (board_column, [row for row in rows if row.column == board_column.title])
+        for board_column in visible_columns(is_showing_all=is_showing_all)
     ]
 
 
-def board_layout(width: int, height: int) -> BoardLayout:
-    fit_count = min(
-        len(BOARD_COLUMNS), max(1, (width + COLUMN_GAP) // (MIN_COLUMN_WIDTH + COLUMN_GAP))
-    )
+def board_layout(width: int, height: int, column_count: int) -> BoardLayout:
+    fit_count = min(column_count, max(1, (width + COLUMN_GAP) // (MIN_COLUMN_WIDTH + COLUMN_GAP)))
     column_width = (width - (fit_count - 1) * COLUMN_GAP) // fit_count
-    header_y = TITLE_LINE_COUNT + (TAB_LINE_COUNT if fit_count < len(BOARD_COLUMNS) else 0)
+    header_y = TITLE_LINE_COUNT + (TAB_LINE_COUNT if fit_count < column_count else 0)
     body_top = header_y + 3
     detail_body_height = height - 1 - DETAIL_PANE_LINE_COUNT - 1 - body_top
     is_detail_shown = detail_body_height >= CARD_HEIGHT
@@ -173,15 +166,16 @@ def board_layout(width: int, height: int) -> BoardLayout:
 def fit_state_to_layout(
     rows: list[display.ListRow], width: int, height: int, state: BoardState
 ) -> None:
-    layout = board_layout(width, height)
+    columns = rows_by_column(rows, is_showing_all=state.is_showing_all)
+    layout = board_layout(width, height, len(columns))
+    state.focus_index = min(state.focus_index, len(columns) - 1)
     state.first_column_index = min(
         max(
             state.focus_index - layout.fit_count + 1,
             min(state.first_column_index, state.focus_index),
         ),
-        len(BOARD_COLUMNS) - layout.fit_count,
+        len(columns) - layout.fit_count,
     )
-    columns = rows_by_column(rows, is_showing_all=state.is_showing_all)
     for column_index, (_, column_rows) in enumerate(columns):
         column_task_ids = [row.task_id for row in column_rows]
         selected_task_id = state.selected_task_ids[column_index]
@@ -381,7 +375,7 @@ def tab_segments(
 
 def title_segments(width: int, snapshot: BoardSnapshot, glyphs: Glyphs) -> list[Segment]:
     statuses = [row.status for row in snapshot.rows]
-    review_count = sum(status in REVIEW_STATUSES for status in statuses)
+    review_count = sum(row.column == display.COLUMN_REVIEW for row in snapshot.rows)
     summary = f"  {statuses.count(ledger.STATUS_RUNNING)} running {glyphs.separator} {review_count} to review"
     updated = f"updated {snapshot.updated_at}"
     segments = [Segment(0, 0, BOARD_TITLE, STYLE_BOLD)]
@@ -445,18 +439,18 @@ def detail_lines(
 
 
 def footer_segments(y: int, width: int, state: BoardState, glyphs: Glyphs) -> list[Segment]:
-    finished_action = "hide" if state.is_showing_all else "show"
+    done_action = "hide" if state.is_showing_all else "show"
     key_sets = [
         [
             (glyphs.column_keys, "column"),
             (glyphs.select_keys, "select"),
-            ("a", f"{finished_action} finished"),
+            ("a", f"{done_action} done"),
             ("q", "quit"),
         ],
         [
             (glyphs.column_keys, "col"),
             (glyphs.select_keys, "sel"),
-            ("a", "finished"),
+            ("a", "done"),
             ("q", "quit"),
         ],
         [(glyphs.column_keys, ""), (glyphs.select_keys, ""), ("a", ""), ("q", "")],
@@ -498,10 +492,10 @@ def board_frame(
     state: BoardState,
     glyphs: Glyphs = UNICODE_GLYPHS,
 ) -> list[Segment]:
-    layout = board_layout(width, height)
     columns = rows_by_column(snapshot.rows, is_showing_all=state.is_showing_all)
+    layout = board_layout(width, height, len(columns))
     segments = title_segments(width, snapshot, glyphs)
-    if layout.fit_count < len(BOARD_COLUMNS):
+    if layout.fit_count < len(columns):
         segments += tab_segments(TITLE_LINE_COUNT, width, columns, layout, state, glyphs)
     body_bottom = layout.body_top + layout.body_height
     for offset in range(layout.fit_count):
@@ -527,7 +521,8 @@ def apply_key(state: BoardState, key: int) -> None:
     if key in LEFT_KEYS:
         state.focus_index = max(state.focus_index - 1, 0)
     elif key in RIGHT_KEYS:
-        state.focus_index = min(state.focus_index + 1, len(BOARD_COLUMNS) - 1)
+        column_count = len(visible_columns(is_showing_all=state.is_showing_all))
+        state.focus_index = min(state.focus_index + 1, column_count - 1)
     elif key in DOWN_KEYS | UP_KEYS:
         state.selected_indices[state.focus_index] += 1 if key in DOWN_KEYS else -1
         state.selected_task_ids[state.focus_index] = None

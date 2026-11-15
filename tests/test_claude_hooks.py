@@ -36,8 +36,9 @@ def stop_gated_chain(ledger_path, fake_commands, tmp_path, original_settings):
 
 def finish_chain(ledger_path, parent):
     tasks = support.read_tasks(ledger_path)
-    tasks[support.PARENT_ID]["status"] = ledger.STATUS_DONE
+    tasks[support.PARENT_ID]["status"] = ledger.STATUS_FINISHED
     del tasks[support.PARENT_ID]["gate_stop_reason"]
+    tasks[support.PARENT_ID]["gate_released"] = True
     support.write_tasks(ledger_path, tasks)
     assert cli.main(["_execute", support.PARENT_ID, parent["session_id"]]) == 0
 
@@ -132,9 +133,9 @@ def test_remove_hooks_keeps_user_entry_sharing_a_group():
 @pytest.mark.parametrize(
     ("parent_status", "child_status", "is_needed"),
     [
-        (ledger.STATUS_DONE, ledger.STATUS_RUNNING, True),
-        (ledger.STATUS_DONE, ledger.STATUS_SCHEDULED, True),
-        (ledger.STATUS_DONE, ledger.STATUS_NEEDS_REVIEW, False),
+        (ledger.STATUS_FINISHED, ledger.STATUS_RUNNING, True),
+        (ledger.STATUS_FINISHED, ledger.STATUS_SCHEDULED, True),
+        (ledger.STATUS_FINISHED, ledger.STATUS_FINISHED, False),
         (ledger.STATUS_FAILED, ledger.STATUS_WAITING, False),
     ],
     ids=["follow-up-running", "follow-up-paused", "follow-up-finished", "parent-failed"],
@@ -182,7 +183,7 @@ def test_launch_agent_pass_removes_hooks_of_abandoned_follow_up(ledger_path):
         ledger_path,
         {
             support.PARENT_ID: support.task_record(
-                ledger.STATUS_DONE, task_id=support.PARENT_ID, gate="true"
+                ledger.STATUS_FINISHED, task_id=support.PARENT_ID, gate="true"
             ),
             support.CHILD_ID: support.task_record(
                 ledger.STATUS_RUNNING, task_id=support.CHILD_ID, after=support.PARENT_ID
@@ -221,7 +222,7 @@ def test_hook_commands_run_without_path_or_state_environment(ledger_path):
         ledger_path,
         {
             support.PARENT_ID: support.task_record(
-                ledger.STATUS_DONE, task_id=support.PARENT_ID, gate="true"
+                ledger.STATUS_FINISHED, task_id=support.PARENT_ID, gate="true"
             ),
             support.CHILD_ID: support.task_record(
                 ledger.STATUS_RUNNING, task_id=support.CHILD_ID, after=support.PARENT_ID

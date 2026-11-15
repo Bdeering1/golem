@@ -37,26 +37,26 @@ def stub_clients(monkeypatch):
 def test_registered_terminal_client_opens_task_and_marks_it_done(
     fake_commands, ledger_path, stub_clients
 ):
-    support.write_task(ledger_path, ledger.STATUS_NEEDS_REVIEW)
+    support.write_task(ledger_path, ledger.STATUS_FINISHED)
 
     assert cli.main(["pickup", support.TASK_ID, "--client", STUB_TERMINAL_CLIENT, "--", "-x"]) == 0
     assert support.logged_claude_args(fake_commands) == [
         f"stub:{support.read_task(ledger_path)['session_id']}",
         "-x",
     ]
-    assert support.read_task(ledger_path)["status"] == ledger.STATUS_DONE
+    assert support.read_task(ledger_path)["status"] == ledger.STATUS_FINISHED
 
 
 def test_registered_app_client_opens_task_through_pickup_all(
     fake_commands, ledger_path, stub_clients
 ):
-    support.write_task(ledger_path, ledger.STATUS_NEEDS_REVIEW)
+    support.write_task(ledger_path, ledger.STATUS_FINISHED)
 
     assert cli.main(["pickup", "--all", "--client", STUB_APP_CLIENT]) == 0
     assert fake_commands["open-args"].read_text(encoding="utf-8") == (
         f"stub:{support.read_task(ledger_path)['session_id']}\n"
     )
-    assert support.read_task(ledger_path)["status"] == ledger.STATUS_DONE
+    assert support.read_task(ledger_path)["status"] == ledger.STATUS_FINISHED
 
 
 @pytest.mark.parametrize(
@@ -74,13 +74,13 @@ def test_registered_app_client_opens_task_through_pickup_all(
 def test_pickup_refuses_client_that_cannot_open_task_backend(
     fake_commands, ledger_path, task_fields, client_name, backend_name
 ):
-    support.write_task(ledger_path, ledger.STATUS_NEEDS_REVIEW, **task_fields)
+    support.write_task(ledger_path, ledger.STATUS_FINISHED, **task_fields)
 
     with pytest.raises(
         SystemExit, match=f"{client_name} does not support {backend_name} tasks: {support.TASK_ID}"
     ):
         cli.main(["pickup", support.TASK_ID, "--client", client_name])
-    assert support.read_task(ledger_path)["status"] == ledger.STATUS_NEEDS_REVIEW
+    assert support.read_task(ledger_path)["status"] == ledger.STATUS_FINISHED
     assert fake_commands["open-args"].read_text(encoding="utf-8") == ""
     assert support.logged_claude_calls(fake_commands) == []
     assert fake_commands["codex-args"].read_text(encoding="utf-8") == ""
@@ -105,14 +105,14 @@ def test_pickup_refuses_client_that_cannot_open_task_backend(
 def test_pickup_rejects_invalid_client_options(
     fake_commands, ledger_path, capsys, command, message
 ):
-    support.write_task(ledger_path, ledger.STATUS_NEEDS_REVIEW)
+    support.write_task(ledger_path, ledger.STATUS_FINISHED)
 
     with pytest.raises(SystemExit) as exit_info:
         cli.main(command)
 
     assert exit_info.value.code == 2
     assert message in capsys.readouterr().err
-    assert support.read_task(ledger_path)["status"] == ledger.STATUS_NEEDS_REVIEW
+    assert support.read_task(ledger_path)["status"] == ledger.STATUS_FINISHED
 
 
 def test_auto_pickup_opens_in_client_saved_when_queued(
@@ -175,7 +175,7 @@ def test_then_follow_up_of_auto_pickup_run_uses_saved_default(
 
 
 def test_legacy_auto_pickup_task_opens_in_claude_desktop(fake_commands, ledger_path):
-    support.write_task(ledger_path, ledger.STATUS_NEEDS_REVIEW, auto_pickup=True)
+    support.write_task(ledger_path, ledger.STATUS_FINISHED, auto_pickup=True)
 
     review.auto_pickup_task(support.TASK_ID)
 
@@ -186,7 +186,7 @@ def test_legacy_auto_pickup_task_opens_in_claude_desktop(fake_commands, ledger_p
 
 def test_pickup_all_client_skips_default_clients(fake_commands, ledger_path):
     support.write_config_table("default_clients", {ledger.BACKEND_CLAUDE: "no-such-client"})
-    support.write_task(ledger_path, ledger.STATUS_NEEDS_REVIEW)
+    support.write_task(ledger_path, ledger.STATUS_FINISHED)
 
     assert cli.main(["pickup", "--all", "-c", "claude-desktop"]) == 0
     assert fake_commands["open-args"].read_text(encoding="utf-8") == (
@@ -199,7 +199,7 @@ def test_pickup_all_opens_backend_defaults_and_fails_backend_without_one(
 ):
     monkeypatch.delitem(clients.BUILT_IN_DEFAULT_CLIENTS, ledger.BACKEND_CODEX)
     support.write_config_table("default_clients", {ledger.BACKEND_CLAUDE: STUB_APP_CLIENT})
-    status = ledger.STATUS_NEEDS_REVIEW
+    status = ledger.STATUS_FINISHED
     codex_task = support.task_record(status, backend=ledger.BACKEND_CODEX)
     claude_task = support.task_record(status, task_id=support.CHILD_ID)
     support.write_tasks(ledger_path, {support.TASK_ID: codex_task, support.CHILD_ID: claude_task})
@@ -207,7 +207,7 @@ def test_pickup_all_opens_backend_defaults_and_fails_backend_without_one(
     assert cli.main(["pickup", "--all"]) == 1
 
     assert f"no default app client for Codex tasks: {support.TASK_ID}" in capsys.readouterr().err
-    assert support.read_task(ledger_path)["status"] == ledger.STATUS_NEEDS_REVIEW
+    assert support.read_task(ledger_path)["status"] == ledger.STATUS_FINISHED
     assert fake_commands["open-args"].read_text(encoding="utf-8") == (
         f"stub:{claude_task['session_id']}\n"
     )
@@ -215,11 +215,11 @@ def test_pickup_all_opens_backend_defaults_and_fails_backend_without_one(
 
 def test_pickup_by_id_ignores_default_clients(fake_commands, ledger_path, stub_clients):
     support.write_config_table("default_clients", {ledger.BACKEND_CLAUDE: STUB_APP_CLIENT})
-    support.write_task(ledger_path, ledger.STATUS_NEEDS_REVIEW)
+    support.write_task(ledger_path, ledger.STATUS_FINISHED)
 
     assert cli.main(["pickup", support.TASK_ID]) == 0
     assert fake_commands["open-args"].read_text(encoding="utf-8") == ""
-    assert support.read_task(ledger_path)["status"] == ledger.STATUS_DONE
+    assert support.read_task(ledger_path)["status"] == ledger.STATUS_FINISHED
 
 
 @pytest.mark.parametrize(

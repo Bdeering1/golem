@@ -85,17 +85,15 @@ def task_worktree_retention_reasons(
     tasks: ledger.Tasks, worktree: str, *, is_released: bool
 ) -> list[str]:
     reasons: list[str] = []
-    worktree_tasks = [
-        tasks[task_id] for task_id in task_directories.worktree_task_ids(tasks, worktree)
-    ]
-    if any(task.get("status") == ledger.STATUS_RUNNING for task in worktree_tasks):
+    worktree_task_ids = task_directories.worktree_task_ids(tasks, worktree)
+    if any(tasks[task_id].get("status") == ledger.STATUS_RUNNING for task_id in worktree_task_ids):
         reasons.append("in use")
-    for task in worktree_tasks:
-        status = task.get("status")
-        if status in {ledger.STATUS_SCHEDULED, ledger.STATUS_WAITING}:
+    for task_id in worktree_task_ids:
+        status = tasks[task_id].get("status")
+        if status in {ledger.STATUS_SCHEDULED, ledger.STATUS_WAITING, ledger.STATUS_BLOCKED}:
             reasons.append(f"task {status}")
-        elif status == ledger.STATUS_NEEDS_REVIEW:
-            reasons.append("task needs review")
+        elif status == ledger.STATUS_FINISHED and not ledger.is_counted_opened(tasks, task_id):
+            reasons.append("task not opened")
         elif status in {ledger.STATUS_FAILED, ledger.STATUS_CANCELLED} and not is_released:
             reasons.append("task can be retried (delete the task to override)")
     return reasons

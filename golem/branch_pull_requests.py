@@ -169,7 +169,7 @@ def store_pull_requests(
             task = tasks.get(task_id)
             if (
                 task is None
-                or task["status"] != ledger.STATUS_DONE
+                or task["status"] != ledger.STATUS_FINISHED
                 or task["session_id"] != checked_tasks[task_id]["session_id"]
             ):
                 continue
@@ -181,7 +181,7 @@ def refresh_pull_requests() -> None:
     task_ids_by_branches: dict[str, list[str]] = {}
     for task_id, task in tasks.items():
         if (
-            task["status"] != ledger.STATUS_DONE
+            task["status"] != ledger.STATUS_FINISHED
             or "repository_branches" not in task
             or ledger.has_finished_pull_requests(task)
         ):

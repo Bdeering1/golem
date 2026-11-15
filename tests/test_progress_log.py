@@ -107,7 +107,7 @@ def test_watch_follows_running_task_to_its_end(
         hold_path.unlink(missing_ok=True)
         executor.wait()
 
-    assert first_line + rest == f"{progress}golem: task needs_review: {support.TASK_ID}\n"
+    assert first_line + rest == f"{progress}golem: task finished: {support.TASK_ID}\n"
     assert support.read_task(ledger_path)["result"] == support.CLAUDE_RESULT
 
 
@@ -127,7 +127,7 @@ def test_progress_write_failure_keeps_task_result(
     cli.main(["_execute", support.TASK_ID, task["session_id"]])
 
     task = support.read_task(ledger_path)
-    assert (task["status"], task["result"]) == (ledger.STATUS_NEEDS_REVIEW, support.CLAUDE_RESULT)
+    assert (task["status"], task["result"]) == (ledger.STATUS_FINISHED, support.CLAUDE_RESULT)
 
 
 def test_watch_exits_130_on_interrupt(ledger_path, monkeypatch):
@@ -215,7 +215,7 @@ def test_watch_prints_usage_limit_pause_and_its_resume(
     capsys.readouterr()
 
     assert watch_output(capsys) == (
-        f"{paused_progress}{resumed_progress}golem: task needs_review: {support.TASK_ID}\n"
+        f"{paused_progress}{resumed_progress}golem: task finished: {support.TASK_ID}\n"
     )
 
 
@@ -237,7 +237,7 @@ def test_watch_shows_only_the_run_after_a_retry(
     cli.main(["_execute", support.TASK_ID, retried_task["session_id"]])
     capsys.readouterr()
 
-    assert watch_output(capsys) == f"{progress}golem: task needs_review: {support.TASK_ID}\n"
+    assert watch_output(capsys) == f"{progress}golem: task finished: {support.TASK_ID}\n"
     assert not progress_log.progress_path(first_task["session_id"]).exists()
 
 
@@ -252,7 +252,7 @@ def test_watch_prints_rotated_progress_first(
     cli.main(["_execute", support.TASK_ID, task["session_id"]])
     capsys.readouterr()
 
-    assert watch_output(capsys) == f"{progress}golem: task needs_review: {support.TASK_ID}\n"
+    assert watch_output(capsys) == f"{progress}golem: task finished: {support.TASK_ID}\n"
     assert progress_log.rotated_progress_path(task["session_id"]).exists()
 
 
@@ -260,7 +260,7 @@ def test_watch_prints_rotated_progress_first(
     ("status", "message"),
     [
         (ledger.STATUS_SCHEDULED, "task has not started"),
-        (ledger.STATUS_DONE, "task has no recorded progress"),
+        (ledger.STATUS_FINISHED, "task has no recorded progress"),
     ],
 )
 def test_watch_refuses_task_without_progress(ledger_path, status, message):
@@ -283,7 +283,7 @@ def test_pickup_suggests_watch_for_running_task(ledger_path):
 
 
 def test_delete_removes_recorded_progress(ledger_path):
-    support.write_task(ledger_path, ledger.STATUS_DONE)
+    support.write_task(ledger_path, ledger.STATUS_FINISHED)
     session_id = support.read_task(ledger_path)["session_id"]
     paths = [write_progress(session_id), progress_log.rotated_progress_path(session_id)]
     paths[1].touch()

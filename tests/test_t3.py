@@ -160,7 +160,7 @@ def test_run_creates_thread_in_worktree_and_records_reply(
     assert (t3_server.home / "sent-message").read_text(encoding="utf-8") == support.PROMPT
     send_cwd = (t3_server.home / "send-cwd").read_text(encoding="utf-8").strip()
     assert Path(send_cwd).resolve() == Path(worktree).resolve()
-    assert task["status"] == ledger.STATUS_NEEDS_REVIEW
+    assert task["status"] == ledger.STATUS_FINISHED
     assert task["result"] == T3_REPLY
     assert task["t3_code_thread_id"] == t3.conversation_id(task)
     assert task["native_session_id"] == NATIVE_SESSION_ID
@@ -230,14 +230,15 @@ def test_run_waiting_for_answer_stops_task_until_continue(
 
     parent = execute(ledger_path, support.PARENT_ID)
 
-    assert parent["status"] == ledger.STATUS_NEEDS_REVIEW
+    assert parent["status"] == ledger.STATUS_BLOCKED
     assert parent["gate_stop_reason"] == t3.WAITING_FOR_ANSWER_REASON
     assert support.read_task(ledger_path, support.CHILD_ID)["status"] == ledger.STATUS_WAITING
     assert support.logged_osascript_calls(fake_commands)[-1][-2:] == [
-        f"golem: {support.PARENT_ID} stopped at gate",
+        f"golem: {support.PARENT_ID} blocked",
         t3.WAITING_FOR_ANSWER_REASON,
     ]
     assert cli.main(["continue", support.PARENT_ID]) == 0
+    assert support.read_task(ledger_path, support.PARENT_ID)["status"] == ledger.STATUS_FINISHED
     assert executors == [support.PARENT_ID]
 
 
@@ -267,7 +268,7 @@ def test_usage_limit_resumes_same_thread_at_reported_reset(t3_server, ledger_pat
     write_send_result(t3_server, 0, reply=T3_REPLY)
     support.set_task_due_now(ledger_path)
     task = execute(ledger_path)
-    assert task["status"] == ledger.STATUS_NEEDS_REVIEW
+    assert task["status"] == ledger.STATUS_FINISHED
     assert (t3_server.home / "sent-message").read_text(
         encoding="utf-8"
     ) == common.USAGE_LIMIT_RESUME_PROMPT
@@ -313,7 +314,7 @@ def test_gate_stops_chain_and_hooks_only_claude_tasks(
 
 
 def test_pickup_opens_t3_task_in_t3_code_without_client(server, ledger_path, fake_commands):
-    support.write_task(ledger_path, ledger.STATUS_NEEDS_REVIEW, backend=ledger.BACKEND_T3)
+    support.write_task(ledger_path, ledger.STATUS_FINISHED, backend=ledger.BACKEND_T3)
     (server.home / "thread-present").touch()
 
     assert cli.main(["pickup", support.TASK_ID]) == 0
@@ -322,11 +323,11 @@ def test_pickup_opens_t3_task_in_t3_code_without_client(server, ledger_path, fak
     assert fake_commands["open-args"].read_text(encoding="utf-8") == (
         f"{t3_support.thread_link(t3.conversation_id(task))}\n"
     )
-    assert task["status"] == ledger.STATUS_DONE
+    assert task["status"] == ledger.STATUS_FINISHED
 
 
 def test_pickup_refuses_t3_task_without_thread(server, ledger_path, fake_commands):
-    support.write_task(ledger_path, ledger.STATUS_NEEDS_REVIEW, backend=ledger.BACKEND_T3)
+    support.write_task(ledger_path, ledger.STATUS_FINISHED, backend=ledger.BACKEND_T3)
 
     with pytest.raises(SystemExit, match="thread does not exist in T3 Code"):
         cli.main(["pickup", support.TASK_ID])
@@ -380,4 +381,4 @@ def test_run_starts_t3_code_when_it_is_not_running(
     assert fake_commands["open-args"].read_text(encoding="utf-8").splitlines() == [
         f"-b {t3_code.APP_BUNDLE_ID}"
     ]
-    assert task["status"] == ledger.STATUS_NEEDS_REVIEW
+    assert task["status"] == ledger.STATUS_FINISHED

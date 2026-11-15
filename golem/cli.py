@@ -301,13 +301,12 @@ def add_prune_command(add_parser: Callable[..., argparse.ArgumentParser]) -> Non
     prune_command = add_parser(
         "prune",
         description=(
-            "Delete cancelled tasks, and done tasks whose PRs are all merged or closed, whose "
-            f"directory is missing, or whose session has been idle for {prune.PRUNE_IDLE_DAYS} "
-            "days, after asking."
+            "Delete cancelled tasks, and done chains whose PRs are all merged or closed. Asks "
+            "before deleting other done chains."
         ),
     )
     prune_command.add_argument(
-        "--yes", action="store_true", help="delete done tasks that qualify without asking"
+        "--yes", action="store_true", help="delete done chains without asking"
     )
     set_command_handler(
         prune_command, lambda arguments: prune.prune_tasks(is_confirmed=arguments.yes)
@@ -316,9 +315,7 @@ def add_prune_command(add_parser: Callable[..., argparse.ArgumentParser]) -> Non
 
 def add_list_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
     list_command = add_parser("list")
-    list_command.add_argument(
-        "--all", action="store_true", help="include done tasks whose pull requests are finished"
-    )
+    list_command.add_argument("--all", action="store_true", help="include done chains")
     set_command_handler(
         list_command, lambda arguments: display.list_tasks(is_showing_all=arguments.all)
     )
@@ -444,7 +441,9 @@ def add_pickup_command(add_parser: Callable[..., argparse.ArgumentParser]) -> No
     pickup_command = add_parser("pickup")
     pickup_command.add_argument("id", nargs="?")
     pickup_command.add_argument(
-        "--all", action="store_true", help="open every task that needs review"
+        "--all",
+        action="store_true",
+        help="open blocked tasks and finished chains golem has not opened",
     )
     pickup_command.add_argument(
         "-c",
@@ -470,7 +469,7 @@ def add_pickup_command(add_parser: Callable[..., argparse.ArgumentParser]) -> No
 
 
 def add_close_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
-    close_command = add_parser("close")
+    close_command = add_parser("close", description="Move a finished chain to done.")
     close_command.add_argument("id")
     set_command_handler(
         close_command, lambda arguments: review.close(task_id_from_arguments(arguments))

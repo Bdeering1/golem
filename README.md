@@ -63,8 +63,8 @@ golem run add-auth "Add password reset" \
 | `golem list` | Prints all tasks |
 | `golem watch` | Streams a running task's progress |
 | `golem show` | Prints a task's final result |
-| `golem pickup` | Opens a task's session and marks the task done |
-| `golem prune` | Cleans up cancelled and finished tasks |
+| `golem pickup` | Opens a task's session |
+| `golem prune` | Deletes cancelled tasks and done chains |
 | `golem account` | Adds, lists, and removes Claude accounts |
 
 `golem --help` lists the rest.

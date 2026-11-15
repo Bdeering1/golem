@@ -1,12 +1,13 @@
 import os
 import subprocess
 import sys
+from datetime import UTC, datetime
 
 from golem import accounts, chains, clients, ledger, locks, t3_code, task_directories
 from golem.backends import registry
 
 
-def open_app_and_mark_done(
+def open_app_and_record_opening(
     task_id: str, command: list[str], t3_code_thread_id: str | None = None
 ) -> int:
     returncode = subprocess.run(command, check=False).returncode
@@ -17,12 +18,15 @@ def open_app_and_mark_done(
         if current_task is not None:
             if t3_code_thread_id is not None:
                 current_task["t3_code_thread_id"] = t3_code_thread_id
-            chains.mark_task_done(tasks, current_task)
+            current_task["opened_at"] = datetime.now(UTC).isoformat()
     return 0
 
 
 def pickup(
-    task_id: str, *agent_args: str, client_name: str | None = None, is_review_required: bool = False
+    task_id: str,
+    *agent_args: str,
+    client_name: str | None = None,
+    is_ready_to_open_required: bool = False,
 ) -> int:
     preflight_task = ledger.load_tasks().get(task_id)
     if preflight_task is None:
@@ -40,7 +44,7 @@ def pickup(
         if task_id not in tasks:
             raise SystemExit(f"golem: task not found: {task_id}")
         task = tasks[task_id]
-        if is_review_required and task.get("status") != ledger.STATUS_NEEDS_REVIEW:
+        if is_ready_to_open_required and not chains.is_ready_to_open(tasks, task_id):
             return 0
         if task.get("status") in ledger.NOT_STARTED_STATUSES:
             raise SystemExit(f"golem: task has not started: {task_id}")
@@ -60,7 +64,7 @@ def pickup(
             raise SystemExit(f"golem: task has no {backend.NAME} conversation: {task_id}")
         task_directories.clear_worktree_release(tasks, worktrees, task)
         if client.is_terminal:
-            chains.mark_task_done(tasks, task)
+            task["opened_at"] = datetime.now(UTC).isoformat()
         cwd = ledger.task_directory(task)
     if not client.is_terminal:
         locks.release_lock(directory_lock_file)
@@ -69,7 +73,7 @@ def pickup(
                 f"golem: {task_id} continues on the Claude desktop app's sign-in", file=sys.stderr
             )
         client.prepare(task, conversation_id)
-        return open_app_and_mark_done(
+        return open_app_and_record_opening(
             task_id,
             client.command(task, conversation_id, []),
             t3_code.task_thread_id(task, conversation_id) if client.has_t3_code_thread else None,
@@ -96,9 +100,9 @@ def default_client_name(task_id: str, task: ledger.Task, default_clients: dict[s
 
 def pickup_all(client_name: str | None, default_clients: dict[str, str]) -> int:
     tasks = ledger.load_tasks()
-    task_ids = [task_id for task_id in tasks if chains.is_ready_for_review(tasks, task_id)]
+    task_ids = [task_id for task_id in tasks if chains.is_ready_to_open(tasks, task_id)]
     if not task_ids:
-        print("golem: no tasks ready for review")
+        print("golem: no tasks to open")
         return 0
 
     has_failure = False
@@ -108,7 +112,7 @@ def pickup_all(client_name: str | None, default_clients: dict[str, str]) -> int:
                 task_id, tasks[task_id], default_clients
             )
             has_failure |= (
-                pickup(task_id, client_name=task_client_name, is_review_required=True) != 0
+                pickup(task_id, client_name=task_client_name, is_ready_to_open_required=True) != 0
             )
         except SystemExit as error:
             print(error, file=sys.stderr)
@@ -125,10 +129,10 @@ def auto_pickup_task(task_id: str) -> None:
         auto_pickup_task(task.get("after", ""))
         return
     client_name = clients.task_auto_pickup_client(task)
-    if client_name is None or not chains.is_ready_for_review(tasks, task_id):
+    if client_name is None or not chains.is_ready_to_open(tasks, task_id):
         return
     try:
-        returncode = pickup(task_id, client_name=client_name, is_review_required=True)
+        returncode = pickup(task_id, client_name=client_name, is_ready_to_open_required=True)
     except SystemExit as error:
         print(error, file=sys.stderr)
         return
@@ -141,7 +145,7 @@ def close(task_id: str) -> int:
         if task_id not in tasks:
             raise SystemExit(f"golem: task not found: {task_id}")
         task = tasks[task_id]
-        if task.get("status") != ledger.STATUS_NEEDS_REVIEW:
-            raise SystemExit(f"golem: task does not need review: {task_id}")
-        task["status"] = ledger.STATUS_DONE
+        if not chains.is_chain_finished(tasks, chains.chain_task_ids(tasks, task_id)):
+            raise SystemExit(f"golem: chain is not finished: {task_id}")
+        task.setdefault("closed_at", datetime.now(UTC).isoformat())
     return 0
