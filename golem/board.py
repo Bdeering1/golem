@@ -158,6 +158,7 @@ EMPTY_COLUMN_TEXTS = {
     display.COLUMN_DONE: "Nothing done yet",
 }
 NO_MATCHES_TEXT = "No matches"
+NO_ACTIVITY_TEXT = "No activity yet"
 GATE_CHECK_TEXT = "rechecking the gate…"
 NO_CHANGE_TEXT = "No change"
 LEDGER_ERROR_TEXT = "Can't read the ledger, showing the last good state: "
@@ -822,7 +823,7 @@ def card_badge_parts(row: display.ListRow, context: FrameContext) -> list[Part]:
     if is_new_for_review(context.snapshot, row):
         parts += [
             (" " if parts else "", STYLE_PLAIN, None),
-            (context.glyphs.new_mark, STYLE_BOLD, None),
+            (context.glyphs.new_mark, STYLE_BOLD, display.STATUS_COLORS[row.status]),
         ]
     return parts
 
@@ -1958,7 +1959,8 @@ def task_view_lines(
         ("Prompt", task.get("prompt", ""), STYLE_PLAIN, ""),
         (
             "Activity",
-            "\n".join(activity_text(line, glyphs) for line in task_activity(row, snapshot)),
+            "\n".join(activity_text(line, glyphs) for line in task_activity(row, snapshot))
+            or (NO_ACTIVITY_TEXT if row.status == ledger.STATUS_RUNNING else ""),
             STYLE_DIM,
             "  ",
         ),
@@ -2217,12 +2219,7 @@ def board_frame(
     else:
         segments = board_view_segments(snapshot, width, height, state, glyphs, now)
     if state.is_showing_help:
-        backdrop = [
-            Segment(segment.y, segment.x, segment.text, STYLE_PLAIN, FAINT_COLOR)
-            for segment in segments
-            if segment.y < height - 1
-        ]
-        segments = backdrop + help_view_segments(width, height, glyphs, state)
+        segments = help_view_segments(width, height, glyphs, state)
     return clipped(segments, width, height)
 
 
