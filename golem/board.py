@@ -24,7 +24,6 @@ if TYPE_CHECKING:
 MIN_COLUMN_WIDTH = 20
 MIN_UNFOCUSED_COLUMN_WIDTH = 25
 FOCUSED_COLUMN_WIDTH = 34
-FOCUSED_SHARE_PERCENT = 40
 HIDDEN_COLUMN_MARGIN = 2
 COLUMN_GAP = 2
 CARD_INDENT = 2
@@ -38,7 +37,7 @@ TALL_DETAIL_LINE_COUNT = 4
 MAX_DETAIL_LINE_COUNT = 6
 PRIMARY_LINE_COUNT = 2
 MARK_ONLY_WIDTH = 3
-MAX_ID_WORD_SNAP = 3
+MAX_WORD_SNAP = 3
 DAYS_PER_YEAR = 365
 MIN_DETAIL_HEIGHT = 20
 MIN_SUMMARY_HEIGHT = 14
@@ -54,6 +53,7 @@ MUTED_COLOR = 245
 FAINT_COLOR = 239
 SELECTION_BACKGROUND = 238
 SELECTED_MUTED_COLOR = 250
+SELECTED_TITLE_COLOR = 255
 WIDE_REP_FIX_NCURSES_VERSION = (6, 0, 20170729)
 REP_LINE_PREFIX = b"\trep="
 TOOL_LINE_PREFIX = "[tool] "
@@ -294,6 +294,7 @@ PAIR_COLORS = sorted(
         MUTED_COLOR,
         FAINT_COLOR,
         SELECTED_MUTED_COLOR,
+        SELECTED_TITLE_COLOR,
     }
 )
 COLOR_PAIRS: dict[tuple[int | None, int | None], int] = {
@@ -501,9 +502,8 @@ def column_spans(
     focus_offset = focus_index - first_index
     if is_split and 0 <= focus_offset < fit_count:
         floor_width = max(MIN_UNFOCUSED_COLUMN_WIDTH, min(widths[0], MIN_BOXED_CARD_WIDTH))
-        shared_width = max(FOCUSED_COLUMN_WIDTH, total_width * FOCUSED_SHARE_PERCENT // 100)
         focused_width = max(
-            widths[0], min(shared_width, total_width - (fit_count - 1) * floor_width)
+            widths[0], min(FOCUSED_COLUMN_WIDTH, total_width - (fit_count - 1) * floor_width)
         )
         other_width = (total_width - focused_width) // (fit_count - 1)
         widths = [
@@ -631,9 +631,10 @@ def fitted_words(text: str, width: int, glyphs: Glyphs) -> str:
         return text
     head = text[: max(0, width - 1)]
     word_end = head.rfind(" ")
-    if word_end > width // 2:
-        head = head[:word_end].rstrip(f" ,:{glyphs.separator}")
-    return head + glyphs.ellipsis
+    is_word_cut = text[len(head)] != " "
+    if is_word_cut and word_end > 0 and len(head) - word_end <= MAX_WORD_SNAP:
+        head = head[:word_end]
+    return head.rstrip(f" ,:{glyphs.separator}") + glyphs.ellipsis
 
 
 def fitted_task_id(task_id: str, width: int, glyphs: Glyphs) -> str:
@@ -642,7 +643,8 @@ def fitted_task_id(task_id: str, width: int, glyphs: Glyphs) -> str:
         return fitted(task_id, width, glyphs)
     head = task_id[: width - len(tail) - len(glyphs.ellipsis)]
     word_end = head.rfind("-")
-    if word_end > 0 and len(head) - word_end <= MAX_ID_WORD_SNAP:
+    is_word_cut = task_id[len(head)] != "-"
+    if is_word_cut and word_end > 0 and len(head) - word_end <= MAX_WORD_SNAP:
         head = head[:word_end]
     return f"{head.rstrip('-')}{glyphs.ellipsis}{tail}"
 
@@ -905,7 +907,7 @@ def card_segments(
         is_time_kept=is_stuck(row, context.snapshot.tasks[row.task_id], now),
     )
     is_changed = row.task_id in changed_task_ids
-    title_color = color if is_changed else None
+    title_color = color if is_changed else (SELECTED_TITLE_COLOR if is_selected else None)
     background = SELECTION_BACKGROUND if is_selected else None
     line_count = 3 if is_tall else 2
     fill = (
@@ -1775,6 +1777,7 @@ def footer_segments(
             help_hint,
             quit_hint,
         ],
+        [*filter_hint, move_hint, *open_hint, next_hint, *action_hints, help_hint, quit_hint],
         [
             *filter_hint,
             move_hint,
