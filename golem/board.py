@@ -646,6 +646,8 @@ def fit_state_to_layout(
         scroll_offset = min(state.scroll_offsets[column_index], selected_index)
         scroll_offset = max(scroll_offset, selected_index - visible_count + 1)
         scroll_offset = min(scroll_offset, max(0, len(column_rows) - visible_count))
+        if column_index != state.focus_index:
+            scroll_offset = 0
         state.selected_indices[column_index] = selected_index
         state.selected_task_ids[column_index] = (
             column_task_ids[selected_index] if column_task_ids else None
