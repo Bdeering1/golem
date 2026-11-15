@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from types import FrameType
 
 MIN_COLUMN_WIDTH = 20
+MAX_TASK_VIEW_WIDTH = 100
 MAX_TWO_LINE_FOOTER_COLUMN_COUNT = 2
 HIDDEN_COLUMN_MARGIN = 2
 COLUMN_GAP = 2
@@ -356,7 +357,7 @@ UNICODE_GLYPHS = Glyphs(
     heavy_vertical="┃",
     cursor="▏",
     new_mark="●",
-    idle_mark="○",
+    idle_mark="",
 )
 ASCII_GLYPHS = Glyphs(
     horizontal="-",
@@ -2255,11 +2256,12 @@ def task_view_segments(
     if row is None:
         state.view = VIEW_BOARD
         return board_view_segments(snapshot, width, height, state, glyphs, now)
+    content_width = min(width - 1, MAX_TASK_VIEW_WIDTH)
     header_lines: list[list[Part]] = [
-        *heading_lines(row, width - 1, snapshot, glyphs, now),
-        [(glyphs.horizontal * (width - 1), STYLE_PLAIN, display.STATUS_COLORS[row.status])],
+        *heading_lines(row, content_width, snapshot, glyphs, now),
+        [(glyphs.horizontal * content_width, STYLE_PLAIN, display.STATUS_COLORS[row.status])],
     ]
-    lines = task_view_lines(row, width - 1, snapshot, glyphs, now)
+    lines = task_view_lines(row, content_width, snapshot, glyphs, now)
     body_height = max(1, height - 1 - len(header_lines))
     if state.is_following:
         state.task_scroll = len(lines)
