@@ -65,7 +65,7 @@ BOARD_TITLE = "golem"
 NOT_A_TERMINAL_MESSAGE = "golem: board needs a terminal; use golem list"
 HELP_CLOSE_HINT = " esc closes "
 MIN_CARD_REASON_WIDTH = 10
-CONFIRM_ANSWER_TEXT = " yes  any other key: no"
+CONFIRM_ANSWER_TEXT = " yes  n no"
 CONFIRM_SHORT_ANSWER_TEXT = "/N"
 HELP_SECTION_GAP = 4
 TASK_VIEW_INDENT = "  "
@@ -105,6 +105,7 @@ ESCAPE_SEQUENCE_KEYS = {
 ESCAPE_SEQUENCE_FINAL_KEYS = range(0x40, 0x7F)
 ESCAPE_SEQUENCE_STARTS = "[O"
 ENTER_KEYS = {ord("\n"), ord("\r"), curses.KEY_ENTER}
+CONFIRM_ANSWER_KEYS = {ord("y"), ord("n"), ESCAPE_KEY, *ENTER_KEYS}
 LEFT_KEYS = {ord("h"), curses.KEY_LEFT}
 RIGHT_KEYS = {ord("l"), curses.KEY_RIGHT}
 TAB_KEYS = {ord("\t"), curses.KEY_BTAB}
@@ -2898,6 +2899,8 @@ def handle_action_key(
         return False
     row = selected_row(snapshot, state)
     if state.pending_action is not None:
+        if key not in CONFIRM_ANSWER_KEYS:
+            return True
         action, state.pending_action = state.pending_action, None
         if key == ord("y") and row is not None:
             run_action(screen, state, snapshot, action, row)
