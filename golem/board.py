@@ -1405,7 +1405,9 @@ def title_segments(
     right_style = STYLE_BOLD if state.filter_text else STYLE_DIM
     right_color = BOARD_COLUMNS[1].color if state.filter_text else None
     if state.stale_snapshot_time is not None:
-        right_text, right_style = STALE_TEXT, STYLE_BOLD
+        stale_seconds = (datetime.now().astimezone() - state.stale_snapshot_time).total_seconds()
+        right_text = f"{STALE_TEXT} {duration_text(stale_seconds)}"
+        right_style = STYLE_BOLD
         right_color = display.STATUS_COLORS[ledger.STATUS_BLOCKED]
     title_parts: list[Part] = [(BOARD_TITLE, STYLE_BOLD, None)]
     summaries = summary_options(snapshot, glyphs, now)
@@ -2321,7 +2323,7 @@ def help_sections(glyphs: Glyphs) -> list[tuple[str, list[tuple[str, str]]]]:
                 (glyphs.new_mark, "new, not picked up yet"),
                 ("1/2", "step in its chain"),
                 ("stuck", "overdue, still waiting"),
-                ("bold name", "needs your attention"),
+                ("bold name", "running or needs you"),
             ],
         ),
     ]
