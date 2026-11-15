@@ -45,7 +45,11 @@ def selected_text(tasks, state, width=WIDE_WIDTH, height=HEIGHT):
     snapshot = board.board_snapshot(tasks, NOW)
     board.fit_state_to_layout(snapshot, width, height, state)
     segments = board.board_frame(snapshot, width, height, state)
-    return "".join(segment.text for segment in segments if segment.style == board.STYLE_SELECTED)
+    return "".join(
+        segment.text
+        for segment in segments
+        if segment.background == board.SELECTION_BACKGROUND and segment.text.strip()
+    )
 
 
 def board_and_detail_lines(tasks, width=WIDE_WIDTH, height=HEIGHT, state=None):
@@ -55,7 +59,7 @@ def board_and_detail_lines(tasks, width=WIDE_WIDTH, height=HEIGHT, state=None):
     detail_top = (
         height - 1 - board.snapshot_layout(snapshot, width, height, state).detail_line_count
     )
-    return lines[: detail_top - 1], lines[detail_top:-1]
+    return lines[: detail_top - 1], lines[detail_top - 1 : -1]
 
 
 def frame_text(tasks, width=WIDE_WIDTH, height=HEIGHT, state=None):
@@ -140,7 +144,7 @@ def test_board_shortens_card_text_and_shows_it_in_full_in_the_detail_pane():
     detail_text = "\n".join(detail_lines)
     assert f"{task_id[:10]}" in board_text
     assert task_id not in board_text
-    assert detail_lines[0].startswith(task_id)
+    assert task_id in detail_lines[0]
     assert directory in detail_text
     assert "Polish the board" in detail_text
 
@@ -168,13 +172,12 @@ def test_board_detail_pane_keeps_the_end_of_a_long_directory():
 def test_board_shows_as_many_columns_as_fit(width, shown_titles, has_tabs):
     lines = frame_lines(statuses_tasks(), width, HEIGHT, board.BoardState())
 
-    header_line = lines[board.board_layout(width, HEIGHT, 3).header_y]
-    tab_line = lines[board.TAB_LINE_Y]
+    header_line = lines[board.board_layout(width, HEIGHT, (0, 0, 0)).header_y]
     assert [
         title for title, *_ in board.BOARD_COLUMNS if f"▌ {title}" in header_line
     ] == shown_titles[:1]
-    assert all(title in header_line or title in tab_line for title in shown_titles)
-    assert (board.UNICODE_GLYPHS.right in tab_line) == has_tabs
+    assert all(title in header_line for title in shown_titles)
+    assert (board.UNICODE_GLYPHS.right in header_line) == has_tabs
 
 
 @pytest.mark.parametrize(
@@ -192,7 +195,7 @@ def test_board_lists_hidden_columns_on_the_side_they_scroll_in_from(
     state = board.BoardState(focus_index=focus_index, is_showing_all=True)
     lines = frame_lines(statuses_tasks(), width, HEIGHT, state)
 
-    tab_line = lines[board.TAB_LINE_Y]
+    tab_line = lines[board.board_layout(width, HEIGHT, (0, 0, 0, 0)).header_y]
     assert tab_line.startswith(left_text)
     assert tab_line.endswith(right_text)
 
@@ -363,9 +366,10 @@ class PtyBoard:
         )
 
     def selected_task_id(self):
-        lines = self.screen.display
-        rule_y = max(y for y, line in enumerate(lines) if line.startswith(("──", "--")))
-        return lines[rule_y + 1].split()[0]
+        rule_line = next(
+            line for line in reversed(self.screen.display) if line.startswith(("─ ", "- "))
+        )
+        return rule_line.split()[1]
 
     def send(self, keys):
         self.child.send(keys)
@@ -446,14 +450,15 @@ def test_board_keys_switch_columns_and_select_tasks(pty_board, keys):
 
 
 @pytest.mark.parametrize("is_color", [True, False])
-def test_board_keeps_the_terminal_background(pty_board, is_color):
+def test_board_paints_no_background_beyond_the_selection(pty_board, is_color):
     running_board = pty_board(is_color=is_color)
 
     characters = [
         character for line in running_board.screen.buffer.values() for character in line.values()
     ]
 
-    assert all(character.bg == "default" for character in characters)
+    highlighted_count = sum(character.bg != "default" for character in characters)
+    assert highlighted_count <= 2 * PTY_WIDTH
     assert any(character.bold for character in characters)
     has_foreground_color = any(character.fg != "default" for character in characters)
     assert has_foreground_color == is_color
@@ -530,8 +535,9 @@ def test_board_starts_on_the_column_that_needs_attention(statuses, focused_title
     assert board.BOARD_COLUMNS[column_index].title == focused_title
 
 
-def test_board_drops_card_spacing_only_when_a_column_overflows():
-    roomy = board.board_layout(WIDE_WIDTH, HEIGHT, 3, largest_column_size=2)
-    crowded = board.board_layout(WIDE_WIDTH, HEIGHT, 3, largest_column_size=20)
+def test_board_outlines_cards_that_fit_and_packs_crowded_columns():
+    layout = board.board_layout(WIDE_WIDTH, HEIGHT, (2, 20, 0))
 
-    assert crowded.visible_card_count > roomy.visible_card_count
+    assert layout.card_styles[0].is_boxed
+    assert layout.card_styles[1] == board.DENSE_CARD
+    assert layout.visible_card_count(1, 20) < 20
