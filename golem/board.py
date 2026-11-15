@@ -160,7 +160,7 @@ COMMAND_RUNNER_PATTERN = re.compile(
 SHORT_REASON_PATTERNS = (
     (re.compile(r"^(?:fatal|error): "), ""),
     (re.compile(r"a branch named '[^']+' already exists"), "branch exists"),
-    (re.compile(r"\b(\w+) found (\d+)"), r"\1: \2"),
+    (re.compile(r"\b(\w+) found (\d+)"), r"\2 \1"),
 )
 GATE_COUNT_PATTERN = re.compile(r"(\d+) failed, (\d+) passed")
 DURATION_PART_PATTERN = re.compile(r"(\d+)([a-z])")
@@ -1490,19 +1490,10 @@ def detail_segments(
     line_width = width - 1
     text_width = line_width - CARD_INDENT
     lines: list[tuple[str, str]] = []
-    is_id_in_title = row is not None and is_id_in_rule(row, line_width, context)
-    id_lines: list[str] = []
-    if row is not None and not is_id_in_title:
-        id_lines = textwrap.wrap(row.task_id, text_width)
-        is_id_in_title = len(id_lines) > 1 or line_count - len(id_lines) < PRIMARY_LINE_COUNT
-        if is_id_in_title:
-            id_lines = []
     if row is not None:
-        content_count = line_count - len(id_lines)
-        content = detail_lines(row, text_width, content_count, context.snapshot, context.glyphs)
-        lines = [*((line, STYLE_BOLD) for line in id_lines), *content]
+        lines = detail_lines(row, text_width, line_count, context.snapshot, context.glyphs)
     rule_y = footer_y - 1 - max(1, line_count)
-    segments = detail_title_segments(rule_y, line_width, row, context, is_id_shown=is_id_in_title)
+    segments = detail_title_segments(rule_y, line_width, row, context)
     for line_offset, (text, style) in enumerate(lines, start=1):
         segments.append(Segment(rule_y + line_offset, CARD_INDENT, text, style))
     return segments
@@ -1513,18 +1504,11 @@ def compact_status_text(row: display.ListRow, context: FrameContext) -> str:
     return when.removesuffix(" ago") or label
 
 
-def is_id_in_rule(row: display.ListRow, line_width: int, context: FrameContext) -> bool:
-    compact_width = len(compact_status_text(row, context)) + 4
-    return CARD_INDENT + len(row.task_id) + 2 + compact_width + 2 <= line_width
-
-
 def detail_title_segments(
     rule_y: int,
     line_width: int,
     row: display.ListRow | None,
     context: FrameContext,
-    *,
-    is_id_shown: bool,
 ) -> list[Segment]:
     snapshot, glyphs, now = context.snapshot, context.glyphs, context.now
     rule = glyphs.horizontal
@@ -1543,7 +1527,7 @@ def detail_title_segments(
             (f" {compact_status_text(row, context)} ", STYLE_DIM, None),
         ],
     ]
-    title_width = len(row.task_id) + 2 if is_id_shown else 0
+    title_width = len(row.task_id) + 2
     right_parts = next(
         (
             option
@@ -1557,8 +1541,7 @@ def detail_title_segments(
         (f" {fitted_task_id(row.task_id, id_width, glyphs)} ", STYLE_BOLD, None)
     ]
     right_x = line_width - 1 - parts_width(right_parts)
-    if is_id_shown:
-        segments += part_segments(rule_y, CARD_INDENT - 1, title_parts)
+    segments += part_segments(rule_y, CARD_INDENT - 1, title_parts)
     return [*segments, *part_segments(rule_y, right_x, right_parts)]
 
 
