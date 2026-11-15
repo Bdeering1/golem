@@ -1013,7 +1013,8 @@ def column_segments(
     is_focused = column_index == state.focus_index
     rule = glyphs.heavy_horizontal if is_focused else glyphs.horizontal
     segments = [Segment(layout.header_y + 1, x, rule * column_width, color=board_column.color)]
-    if not context.snapshot.rows:
+    visible_columns = rows_by_column(context.snapshot.rows, is_showing_all=state.is_showing_all)
+    if not any(rows for _, rows in visible_columns):
         return segments
     if not column_rows:
         empty_text = (
@@ -1346,10 +1347,13 @@ def detail_title_segments(
     status_text = f" {status_mark(row.status, glyphs, now)} {row.status}"
     when = row_when_text(row, task, now)
     when_text_part = f" {glyphs.separator} {when}" if when else ""
+    short_when = coarse_time_text(when.removesuffix(" ago"))
     right_options: list[list[Part]] = [
         [(status_text, STYLE_PLAIN, color), (f"{when_text_part} ", STYLE_DIM, None)],
-        [(f"{status_text} ", STYLE_PLAIN, color)],
-        [(f"{status_text[:2]} ", STYLE_PLAIN, color)],
+        [
+            (status_text[:2], STYLE_PLAIN, color),
+            (f" {short_when} " if when else " ", STYLE_DIM, None),
+        ],
     ]
     title_width = len(row.task_id) + 2 if is_id_shown else 0
     right_parts = next(
@@ -1712,15 +1716,21 @@ def footer_segments(
     action_hints = footer_action_hints(snapshot, row)
     complete_hints = footer_action_hints(snapshot, row, is_complete=True)
     open_hint = [(glyphs.enter_key, "open")] if row is not None else []
-    match_text = "".join(match_count_parts(snapshot, state))
+    count_text, done_text = match_count_parts(snapshot, state)
+    toggle_hint = done_hint(state)
     filter_hint = (
-        [(f"/{state.filter_text}", match_text), ("esc", "clear")] if state.filter_text else []
+        [(f"/{state.filter_text}", count_text + done_text), ("esc", "clear")]
+        if state.filter_text
+        else []
     )
+    toggle_hints = [toggle_hint]
+    if done_text:
+        filter_hint.append(toggle_hint)
+        toggle_hints = []
     filter_key_hint = [] if state.filter_text else [("/", "filter")]
     column_hint, select_hint = (glyphs.column_keys, "column"), (glyphs.select_keys, "select")
     move_hint = (f"{glyphs.column_keys}{glyphs.select_keys}", "move")
     help_hint, quit_hint = ("?", "help"), ("q", "quit")
-    toggle_hint = done_hint(state)
     next_hint = ("n", "next")
     key_sets = [
         [
@@ -1730,7 +1740,7 @@ def footer_segments(
             *open_hint,
             next_hint,
             *complete_hints,
-            toggle_hint,
+            *toggle_hints,
             *filter_key_hint,
             help_hint,
             quit_hint,
@@ -1742,7 +1752,7 @@ def footer_segments(
             *open_hint,
             next_hint,
             *action_hints,
-            toggle_hint,
+            *toggle_hints,
             *filter_key_hint,
             help_hint,
             quit_hint,
@@ -1753,7 +1763,7 @@ def footer_segments(
             *open_hint,
             next_hint,
             *action_hints,
-            toggle_hint,
+            *toggle_hints,
             *filter_key_hint,
             help_hint,
             quit_hint,
@@ -1789,6 +1799,7 @@ def footer_segments(
         ],
         [*filter_hint, *open_hint, *action_hints, *filter_key_hint, help_hint, quit_hint],
         [*filter_hint, *open_hint, *action_hints, help_hint, quit_hint],
+        [*filter_hint, *open_hint, *[(key, "") for key, _ in action_hints], help_hint, quit_hint],
         [*filter_hint, *action_hints, help_hint, quit_hint],
         [*filter_hint, *[(key, "") for key, _ in action_hints], help_hint, quit_hint],
         [*filter_hint, help_hint, quit_hint],
@@ -1798,11 +1809,16 @@ def footer_segments(
     return key_hint_segments(y, width, key_sets)
 
 
-def empty_board_segments(layout: BoardLayout, width: int, state: BoardState) -> list[Segment]:
+def empty_board_segments(
+    layout: BoardLayout, width: int, state: BoardState, snapshot: BoardSnapshot
+) -> list[Segment]:
     middle_y = layout.body_top + max(0, layout.body_height // 2 - 1)
     lines = EMPTY_BOARD_LINES
+    done_count = sum(row.column == display.COLUMN_DONE for row in snapshot.rows)
     if state.filter_text:
         lines = (f"No tasks match {state.filter_text!r}", "esc clears the filter")
+    if state.filter_text and done_count:
+        lines = (lines[0], f"{done_count} in Done, a shows it", lines[1])
     return [
         Segment(
             middle_y + offset,
@@ -1858,10 +1874,11 @@ def board_view_segments(
             )
             if segment.y < body_bottom
         ]
-    if not snapshot.rows:
-        segments += empty_board_segments(layout, width, state)
+    has_visible_rows = any(column_rows for _, column_rows in columns)
+    if not has_visible_rows:
+        segments += empty_board_segments(layout, width, state, snapshot)
     row = selected_row(snapshot, state)
-    if layout.detail_line_count and snapshot.rows:
+    if layout.detail_line_count and has_visible_rows:
         segments += detail_segments(
             layout.footer_y,
             width,
