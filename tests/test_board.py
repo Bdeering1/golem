@@ -126,6 +126,47 @@ def test_board_shows_a_chain_as_one_card_with_its_step_and_list_detail():
     assert "no pull request yet" in board_text
 
 
+def chain_tasks():
+    return {
+        "fix-login": support.task_record(ledger.STATUS_FINISHED, task_id="fix-login"),
+        "fix-login-review": support.task_record(
+            ledger.STATUS_RUNNING, task_id="fix-login-review", after="fix-login"
+        ),
+        "fix-login-docs": support.task_record(
+            ledger.STATUS_WAITING, task_id="fix-login-docs", after="fix-login-review"
+        ),
+    }
+
+
+def test_board_names_a_chain_after_its_first_step_and_labels_the_shown_step():
+    board_lines, detail_lines = board_and_detail_lines(
+        chain_tasks(), state=board.BoardState(focus_index=1)
+    )
+
+    assert "fix-login-review" not in "\n".join(board_lines + detail_lines)
+    assert "Step 2/3 review" in "\n".join(detail_lines)
+
+
+def test_board_task_view_shows_only_chain_states_that_cannot_be_inferred():
+    text = frame_text(chain_tasks(), state=board.BoardState(focus_index=1, view=board.VIEW_TASK))
+
+    assert "fix-login → review (running) → docs" in text
+
+
+def test_board_preview_shows_the_result_in_whole_sentences_without_markdown():
+    result = (
+        "## Summary\nFixed the **login** redirect. Then " + "it kept going " * 40 + "to the end."
+    )
+    tasks = {"task": support.task_record(ledger.STATUS_FINISHED, result=result)}
+
+    _, detail_lines = board_and_detail_lines(tasks, state=board.BoardState(focus_index=2))
+
+    detail_text = "\n".join(detail_lines)
+    assert "Fixed the login redirect." in detail_text
+    assert "kept going" not in detail_text
+    assert "Summary" not in detail_text
+
+
 def test_board_shortens_card_text_and_shows_it_in_full_in_the_detail_pane():
     task_id = "a-very-long-task-identifier-that-is-shortened"
     directory = "/somewhere/deeply/nested/project-leaf"
@@ -155,7 +196,8 @@ def test_board_detail_pane_keeps_the_end_of_a_long_directory():
         tasks, NARROW_WIDTH, state=board.BoardState(focus_index=1)
     )
 
-    assert "nested/leaf" in "".join(detail_lines)
+    assert "/leaf" in "".join(detail_lines)
+    assert "/somewhere" not in "".join(detail_lines)
 
 
 @pytest.mark.parametrize(
@@ -222,6 +264,22 @@ def test_board_running_card_shows_the_latest_agent_activity(ledger_path):
     text = frame_text(tasks, state=board.BoardState(focus_index=1))
 
     assert "Edit app/auth/reset.py" in text
+
+
+def test_board_task_view_folds_tool_calls_until_t_is_pressed(ledger_path):
+    tasks = {"task": support.task_record(ledger.STATUS_RUNNING, started_at=NOW.isoformat())}
+    progress_path = progress_log.progress_path(tasks["task"]["session_id"])
+    progress_path.parent.mkdir(parents=True, exist_ok=True)
+    progress_path.write_text("Reading auth\n[tool] Read app/tokens.py\n[tool] Edit app/reset.py\n")
+    state = board.BoardState(focus_index=1, view=board.VIEW_TASK)
+
+    folded_text = frame_text(tasks, state=state)
+    board.apply_key(state, ord("t"))
+    unfolded_text = frame_text(tasks, state=state)
+
+    assert "2 tool calls" in folded_text
+    assert "tokens.py" not in folded_text
+    assert "tokens.py" in unfolded_text
 
 
 def test_board_selection_moves_within_a_column_and_scrolls_to_stay_visible():
@@ -533,11 +591,10 @@ def test_board_starts_on_the_column_that_needs_attention(statuses, focused_title
     assert board.BOARD_COLUMNS[column_index].title == focused_title
 
 
-def test_board_outlines_cards_that_fit_and_packs_crowded_columns():
+def test_board_keeps_one_outlined_card_style_when_a_column_is_crowded():
     layout = board.board_layout(120, HEIGHT, (2, 20, 0))
 
-    assert layout.card_styles[0].is_boxed
-    assert layout.card_styles[1] == board.DENSE_CARD
+    assert set(layout.card_styles) == {board.SLIM_BOXED_CARD}
     assert layout.visible_card_count(1, 20) < 20
 
 
