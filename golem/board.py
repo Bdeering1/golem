@@ -2293,8 +2293,8 @@ def task_view_segments(
     return segments + key_hint_segments(height - 1, width, key_sets)
 
 
-def help_sections(glyphs: Glyphs) -> list[tuple[str, list[tuple[str, str]]]]:
-    return [
+def help_sections(glyphs: Glyphs, *, is_task_view: bool) -> list[tuple[str, list[tuple[str, str]]]]:
+    board_sections = [
         (
             "Move",
             [
@@ -2316,10 +2316,36 @@ def help_sections(glyphs: Glyphs) -> list[tuple[str, list[tuple[str, str]]]]:
                 ("q", "quit"),
             ],
         ),
+    ]
+    task_view_sections = [
+        (
+            "Move",
+            [
+                (f"{glyphs.left}{glyphs.right} h l", "previous, next task"),
+                (f"{glyphs.up}{glyphs.down} j k", "scroll"),
+                ("g G", "top, bottom"),
+                ("PgUp PgDn", "page"),
+                ("Space", "page down"),
+                ("esc q", "back to the board"),
+                ("?", "this help"),
+            ],
+        ),
+    ]
+    open_bindings = [] if is_task_view else [(glyphs.enter_key, "open details")]
+    board_legend = (
+        []
+        if is_task_view
+        else [
+            (glyphs.remembered_marker, f"where {glyphs.left}{glyphs.right} lands"),
+            (f"{glyphs.left} {glyphs.right}", "more columns hidden"),
+        ]
+    )
+    return [
+        *(task_view_sections if is_task_view else board_sections),
         (
             "Task",
             [
-                (glyphs.enter_key, "open details"),
+                *open_bindings,
                 ("p", "pick up its session"),
                 ("w", "follow its live log"),
                 ("o", "open its pull request"),
@@ -2343,8 +2369,7 @@ def help_sections(glyphs: Glyphs) -> list[tuple[str, list[tuple[str, str]]]]:
                 ("1/2", "step in its chain"),
                 ("stuck", "overdue, still waiting"),
                 ("bold name", "running or needs you"),
-                (glyphs.remembered_marker, f"where {glyphs.left}{glyphs.right} lands"),
-                (f"{glyphs.left} {glyphs.right}", "more columns hidden"),
+                *board_legend,
             ],
         ),
     ]
@@ -2387,7 +2412,7 @@ def help_columns(
 
 
 def help_view_segments(width: int, height: int, glyphs: Glyphs, state: BoardState) -> list[Segment]:
-    sections = help_sections(glyphs)
+    sections = help_sections(glyphs, is_task_view=state.view == VIEW_TASK)
     bindings = [binding for _, section_bindings in sections for binding in section_bindings]
     key_width = max(len(key) for key, _ in bindings) + 3
     column_width = key_width + max(len(label) for _, label in bindings)
