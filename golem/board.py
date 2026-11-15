@@ -754,7 +754,7 @@ def row_reason(row: display.ListRow, snapshot: BoardSnapshot) -> str:
 def short_age_text(timestamp: str | None, now: datetime) -> str:
     if timestamp is None:
         return ""
-    return duration_text(seconds_since(timestamp, now)).split()[0]
+    return coarse_time_text(duration_text(seconds_since(timestamp, now)))
 
 
 def short_pull_request_text(pull_requests: list[ledger.PullRequest]) -> str:
@@ -1481,6 +1481,17 @@ def detail_meta_text(row: display.ListRow, width: int, task: ledger.Task, glyphs
     )
 
 
+def activity_lines(activity: list[str], width: int, row_count: int, glyphs: Glyphs) -> list[str]:
+    lines: list[str] = []
+    for entry in reversed(activity):
+        text = activity_text(entry, glyphs)
+        entry_lines = paragraph_lines(text, width)
+        if lines and len(lines) + len(entry_lines) > row_count:
+            entry_lines = [fitted(text, width, glyphs)]
+        lines = [*entry_lines, *lines]
+    return lines
+
+
 def detail_lines(
     row: display.ListRow,
     width: int,
@@ -1500,10 +1511,7 @@ def detail_lines(
             f" {glyphs.separator} ".join(short_reason.splitlines()), wrap_width
         )
     if activity:
-        primary_lines = [
-            *(fitted(activity_text(line, glyphs), width, glyphs) for line in activity[:-1]),
-            *paragraph_lines(activity_text(activity[-1], glyphs), wrap_width),
-        ]
+        primary_lines = activity_lines(activity, wrap_width, max(1, line_count - 1), glyphs)
     primary_count = min(len(primary_lines), PRIMARY_LINE_COUNT, line_count)
     meta_count = min(1, line_count - primary_count)
     prompt_count = min(
@@ -1856,6 +1864,17 @@ def footer_segments(
             next_hint,
             *action_hints,
             *toggle_hints,
+            *filter_key_hint,
+            help_hint,
+            quit_hint,
+        ],
+        [
+            *filter_hint,
+            move_hint,
+            *open_hint,
+            next_hint,
+            *action_hints,
+            *[(key, label.removeprefix("show ")) for key, label in toggle_hints],
             *filter_key_hint,
             help_hint,
             quit_hint,
