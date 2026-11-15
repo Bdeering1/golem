@@ -155,7 +155,7 @@ EXIT_PREFIX_PATTERN = re.compile(r"^[^:]{1,40} exited (?:with status )?\d+:\s*")
 PATH_PREFIX_PATTERN = re.compile(r"[~/]\S*/")
 SHORT_REASON_PATTERNS = (
     (re.compile(r"^(?:fatal|error): "), ""),
-    (re.compile(r"a branch named '[^']+' already exists"), "branch already exists"),
+    (re.compile(r"a branch named '[^']+' already exists"), "branch exists"),
     (re.compile(r"(\d+) failed, (\d+) passed"), r"\1 fail/\2 pass"),
 )
 DURATION_PART_PATTERN = re.compile(r"(\d+)([a-z])")
@@ -1852,17 +1852,6 @@ def footer_segments(
         [
             *filter_hint,
             move_hint,
-            *open_hint,
-            next_hint,
-            *action_hints,
-            *toggle_hints,
-            *filter_key_hint,
-            help_hint,
-            quit_hint,
-        ],
-        [
-            *filter_hint,
-            (move_hint[0], ""),
             *open_hint,
             next_hint,
             *action_hints,
