@@ -181,6 +181,7 @@ GATE_CHECK_TEXT = "rechecking the gate…"
 NO_CHANGE_TEXT = "No change"
 LEDGER_ERROR_TEXT = "Can't read the ledger, showing the last good state: "
 STALE_TEXT = "stale"
+UNREADABLE_LEDGER_TEXT = "ledger unreadable"
 NOTHING_NEEDS_YOU_TEXT = "Nothing needs you right now"
 WAITING_DIRECTORY_TEXT = "waiting for directory:"
 BUSY_DIRECTORY_TEXT = "dir busy:"
@@ -1365,7 +1366,7 @@ def summary_options(snapshot: BoardSnapshot, glyphs: Glyphs, now: datetime) -> l
         (
             glyphs.status_marks[ledger.STATUS_FINISHED],
             review_statuses.count(ledger.STATUS_FINISHED),
-            "finished",
+            "to close",
             ledger.STATUS_FINISHED,
             False,
         ),
@@ -1411,6 +1412,10 @@ def title_segments(
         right_color = display.STATUS_COLORS[ledger.STATUS_BLOCKED]
     title_parts: list[Part] = [(BOARD_TITLE, STYLE_BOLD, None)]
     summaries = summary_options(snapshot, glyphs, now)
+    if state.stale_snapshot_time is not None:
+        long_right_text = f"{UNREADABLE_LEDGER_TEXT} {glyphs.separator} {right_text}"
+        if len(BOARD_TITLE) + parts_width(summaries[0]) + len(long_right_text) + 2 < width:
+            right_text = long_right_text
     options = [(option, right_text) for option in summaries[:-1]]
     options += [(option, "") for option in summaries[:-1]]
     options += [(summaries[-1], right_text), (summaries[-1], "")]
@@ -1901,6 +1906,16 @@ def footer_segments(
     move_hint = (f"{glyphs.column_keys}{glyphs.select_keys}", "move")
     help_hint, quit_hint = ("?", "help"), ("q", "quit")
     next_hint = ("n", "next")
+    hintless_move_set = [
+        *filter_hint,
+        *open_hint,
+        next_hint,
+        *action_hints,
+        *toggle_hints,
+        *filter_key_hint,
+        help_hint,
+        quit_hint,
+    ]
     next_or_toggle_sets = [
         [
             *filter_hint,
@@ -1959,6 +1974,7 @@ def footer_segments(
             help_hint,
             quit_hint,
         ],
+        hintless_move_set,
         *(next_or_toggle_sets[::-1] if state.is_showing_all else next_or_toggle_sets),
         [*filter_hint, move_hint, *open_hint, next_hint, *action_hints, help_hint, quit_hint],
         [
