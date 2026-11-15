@@ -1901,6 +1901,28 @@ def footer_segments(
     move_hint = (f"{glyphs.column_keys}{glyphs.select_keys}", "move")
     help_hint, quit_hint = ("?", "help"), ("q", "quit")
     next_hint = ("n", "next")
+    next_or_toggle_sets = [
+        [
+            *filter_hint,
+            move_hint,
+            *open_hint,
+            next_hint,
+            *action_hints,
+            *filter_key_hint,
+            help_hint,
+            quit_hint,
+        ],
+        [
+            *filter_hint,
+            move_hint,
+            *open_hint,
+            *action_hints,
+            *toggle_hints,
+            *filter_key_hint,
+            help_hint,
+            quit_hint,
+        ],
+    ]
     key_sets = [
         [
             *filter_hint,
@@ -1937,26 +1959,7 @@ def footer_segments(
             help_hint,
             quit_hint,
         ],
-        [
-            *filter_hint,
-            move_hint,
-            *open_hint,
-            next_hint,
-            *action_hints,
-            *filter_key_hint,
-            help_hint,
-            quit_hint,
-        ],
-        [
-            *filter_hint,
-            move_hint,
-            *open_hint,
-            *action_hints,
-            *toggle_hints,
-            *filter_key_hint,
-            help_hint,
-            quit_hint,
-        ],
+        *(next_or_toggle_sets[::-1] if state.is_showing_all else next_or_toggle_sets),
         [*filter_hint, move_hint, *open_hint, next_hint, *action_hints, help_hint, quit_hint],
         [
             *filter_hint,
