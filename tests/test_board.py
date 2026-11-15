@@ -594,7 +594,8 @@ def test_board_starts_on_the_column_that_needs_attention(statuses, focused_title
 def test_board_keeps_one_outlined_card_style_when_a_column_is_crowded():
     layout = board.board_layout(120, HEIGHT, (2, 20, 0))
 
-    assert set(layout.card_styles) == {board.SLIM_BOXED_CARD}
+    assert len(set(layout.card_styles)) == 1
+    assert layout.card_styles[0].is_boxed
     assert layout.visible_card_count(1, 20) < 20
 
 

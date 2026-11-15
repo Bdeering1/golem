@@ -71,6 +71,7 @@ BOARD_TITLE = "golem"
 NOT_A_TERMINAL_MESSAGE = "golem: board needs a terminal; use golem list"
 HELP_CLOSE_HINT = " esc closes "
 MIN_CARD_REASON_WIDTH = 10
+MIN_CARD_REPOSITORY_WIDTH = 6
 CONFIRM_ANSWER_TEXT = " yes  n no"
 CONFIRM_SHORT_ANSWER_TEXT = "/N"
 HELP_SECTION_GAP = 4
@@ -317,10 +318,12 @@ type Part = tuple[str, str, int | None]
 BOXED_CARD = CardStyle(height=4, pitch=5, is_boxed=True)
 STACKED_BOXED_CARD = CardStyle(height=4, pitch=4, is_boxed=True)
 SLIM_BOXED_CARD = CardStyle(height=3, pitch=3, is_boxed=True)
+THIN_BOXED_CARD = CardStyle(height=2, pitch=2, is_boxed=True)
 TALL_CARD = CardStyle(height=3, pitch=4, is_boxed=False)
 SPACED_CARD = CardStyle(height=2, pitch=3, is_boxed=False)
 DENSE_CARD = CardStyle(height=2, pitch=2, is_boxed=False)
-BOXED_CARD_STYLES = (BOXED_CARD, STACKED_BOXED_CARD, SLIM_BOXED_CARD)
+BOXED_CARD_STYLES = (BOXED_CARD, STACKED_BOXED_CARD, SLIM_BOXED_CARD, THIN_BOXED_CARD)
+UNBOXED_CARD_STYLES = (TALL_CARD, SPACED_CARD, DENSE_CARD)
 
 BOARD_COLUMNS = (
     BoardColumn(display.COLUMN_QUEUED, display.STATUS_COLORS[ledger.STATUS_SCHEDULED]),
@@ -526,17 +529,18 @@ def detail_line_count(height: int) -> int:
     return TALL_DETAIL_LINE_COUNT if height >= TALL_DETAIL_HEIGHT else DETAIL_LINE_COUNT
 
 
-def card_style(
-    row_count: int, body_height: int, *, can_box: bool, can_stack: bool, is_split: bool
-) -> CardStyle:
-    styles = BOXED_CARD_STYLES if can_box else (TALL_CARD, SPACED_CARD)
+def card_style(row_count: int, body_height: int, *, can_box: bool, can_stack: bool) -> CardStyle:
+    styles = BOXED_CARD_STYLES if can_box else UNBOXED_CARD_STYLES
     if not can_stack:
         styles = tuple(style for style in styles if style != TALL_CARD)
-    for style in styles:
-        if row_count * style.pitch - (style.pitch - style.height) <= body_height:
-            return style
-    # Side-by-side columns keep one card style, so split boards never drop the outline.
-    return SLIM_BOXED_CARD if can_box and is_split else DENSE_CARD
+    return next(
+        (
+            style
+            for style in styles
+            if row_count * style.pitch - (style.pitch - style.height) <= body_height
+        ),
+        styles[-1],
+    )
 
 
 def attention_column_index(rows: list[display.ListRow]) -> int:
@@ -596,12 +600,11 @@ def board_layout(
             body_height,
             can_box=can_box,
             can_stack=index != done_index,
-            is_split=fit_count > 1,
         )
         for index, size in enumerate(column_sizes)
     )
     shown_indices = range(first_index, first_index + fit_count)
-    for style_group in (BOXED_CARD_STYLES, (SPACED_CARD, TALL_CARD, DENSE_CARD)):
+    for style_group in (BOXED_CARD_STYLES, UNBOXED_CARD_STYLES):
         shown_styles = [styles[index] for index in shown_indices if styles[index] in style_group]
         if not shown_styles:
             continue
@@ -915,14 +918,21 @@ def card_detail(
         shortest_reason = short_reason
         for pattern, replacement in SHORTEST_REASON_PATTERNS:
             shortest_reason = pattern.sub(replacement, shortest_reason)
+        shortest_facts = separator.join(part for part in (time_text, shortest_reason) if part)
+        repository_width = width - len(shortest_facts) - len(separator)
+        is_repository_cuttable = repository_width >= min(len(repository), MIN_CARD_REPOSITORY_WIDTH)
+        cut_repository_facts = (
+            [(time_text, shortest_reason, fitted(repository, repository_width, glyphs))]
+            if repository and is_repository_cuttable
+            else []
+        )
         options = [
             separator.join(part for part in parts if part)
             for parts in (
                 (time_text, reason, repository),
                 (time_text, short_reason, repository),
                 (time_text, compact_reason, repository),
-                (time_text, shortest_reason, repository),
-                (shortest_reason, repository),
+                *cut_repository_facts,
                 (time_text, reason),
                 (time_text, short_reason),
                 (time_text, compact_reason),
@@ -1128,26 +1138,36 @@ def boxed_card_segments(
     context: FrameContext,
     *,
     is_selected: bool,
-    is_slim: bool = False,
+    content_height: int = 2,
 ) -> list[Segment]:
+    is_slim = content_height < BOXED_CARD.height - 2
     glyphs, now, changed_task_ids = context.glyphs, context.now, context.changed_task_ids
     color, frame_color = card_colors(row, context, is_selected=is_selected)
     corners = glyphs.heavy_corners if is_selected else glyphs.corners
     horizontal = glyphs.heavy_horizontal if is_selected else glyphs.horizontal
     vertical = glyphs.heavy_vertical if is_selected else glyphs.vertical
     content_width = width - BOX_BORDER_WIDTH
-    title = fitted_task_id(chain_name(context.snapshot.tasks, row.task_id), content_width, glyphs)
+    badge_parts = card_badge_parts(row, context)
+    border_parts: list[Part] = (
+        [(" ", STYLE_PLAIN, None), *badge_parts, (" ", STYLE_PLAIN, None)]
+        if is_slim and badge_parts
+        else []
+    )
+    right_parts = [] if is_slim else badge_parts
+    title_width = content_width - parts_width(border_parts)
+    title = fitted_task_id(chain_name(context.snapshot.tasks, row.task_id), title_width, glyphs)
     is_changed = row.task_id in changed_task_ids
     title_style = card_title_style(row, context, is_selected=is_selected)
     top_parts: list[Part] = [
         (f"{corners[0]} ", STYLE_PLAIN, frame_color),
         (title, title_style, color if is_changed else None),
-        (f" {horizontal * (content_width - len(title))}{corners[1]}", STYLE_PLAIN, frame_color),
+        (f" {horizontal * (title_width - len(title))}", STYLE_PLAIN, frame_color),
+        *border_parts,
+        (corners[1], STYLE_PLAIN, frame_color),
     ]
     facts = card_facts(row, context)
     time_text, reason, short_reason, repository = facts
     is_warning = is_stuck(row, context.snapshot.tasks[row.task_id], now)
-    right_parts = card_badge_parts(row, context)
     status_width = content_width - parts_width(right_parts) - (1 if right_parts else 0)
     status_time = status_line_time(row, context, facts)
     time_part = f" {glyphs.separator} {status_time}" if status_time else ""
@@ -1195,7 +1215,6 @@ def boxed_card_segments(
             (slim_detail.removeprefix(warning_text), STYLE_DIM, None),
         ]
         detail_line_segments = []
-    content_height = 1 if is_slim else 2
     background = SELECTION_BACKGROUND if is_selected else None
     segments = part_segments(y, x, top_parts)
     for offset in range(1, content_height + 1):
@@ -1212,8 +1231,21 @@ def boxed_card_segments(
         ],
         background,
     )
+    bottom_y = y + content_height + 1
+    if not content_height:
+        segments = part_segments(y, x, top_parts)
+        bottom_parts: list[Part] = [
+            (f"{corners[2]} ", STYLE_PLAIN, frame_color),
+            *status_parts,
+            (
+                f" {horizontal * (width - 4 - parts_width(status_parts))}{corners[3]}",
+                STYLE_PLAIN,
+                frame_color,
+            ),
+        ]
+        return [*segments, *part_segments(bottom_y, x, bottom_parts)]
     bottom = f"{corners[2]}{horizontal * (width - 2)}{corners[3]}"
-    return [*segments, Segment(y + content_height + 1, x, bottom, color=frame_color)]
+    return [*segments, Segment(bottom_y, x, bottom, color=frame_color)]
 
 
 def column_segments(
@@ -1270,7 +1302,7 @@ def column_segments(
                 row,
                 context,
                 is_selected=is_selected,
-                is_slim=style == SLIM_BOXED_CARD,
+                content_height=style.height - 2,
             )
             continue
         segments += card_segments(
@@ -1649,20 +1681,25 @@ def detail_meta_parts(
     directory = display.display_directory(row.directory)
     backend_fact = ("Backend", tasks[row.task_id]["backend"])
     full_step = step_text(row, tasks)
-    options = [(META_GAP, full_step), ("  ", full_step), ("  ", row.step)]
-    for minimum_width in (len(directory), len(Path(row.directory).name)):
-        for gap, step in options:
-            facts = [("Step", step), backend_fact] if step else [backend_fact]
-            facts_width = sum(len(f"{gap}{label} {value}") for label, value in facts)
-            directory_width = width - facts_width
-            if directory_width < minimum_width:
-                continue
-            parts: list[Part] = [
-                (tail_shortened_directory(directory, directory_width, glyphs), STYLE_DIM, None)
-            ]
-            for label, value in facts:
-                parts += [(f"{gap}{label} ", STYLE_PLAIN, FAINT_COLOR), (value, STYLE_DIM, None)]
-            return parts
+    name_width = len(Path(row.directory).name)
+    options = [
+        (META_GAP, full_step, len(directory)),
+        ("  ", full_step, len(directory)),
+        ("  ", full_step, name_width),
+        ("  ", row.step, name_width),
+    ]
+    for gap, step, minimum_width in options:
+        facts = [("Step", step), backend_fact] if step else [backend_fact]
+        facts_width = sum(len(f"{gap}{label} {value}") for label, value in facts)
+        directory_width = width - facts_width
+        if directory_width < minimum_width:
+            continue
+        parts: list[Part] = [
+            (tail_shortened_directory(directory, directory_width, glyphs), STYLE_PLAIN, None)
+        ]
+        for label, value in facts:
+            parts += [(f"{gap}{label} ", STYLE_DIM, None), (value, STYLE_PLAIN, None)]
+        return parts
     fallback = f"{Path(row.directory).name}  {backend_fact[1]}"
     return [(fitted(fallback, width, glyphs), STYLE_DIM, None)]
 
