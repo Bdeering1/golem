@@ -862,7 +862,8 @@ def card_detail(
         ]
         if short_reason.startswith(BUSY_DIRECTORY_TEXT) and time_text:
             busy_text = short_reason.replace(BUSY_DIRECTORY_TEXT, SHORT_BUSY_TEXT)
-            options.append(separator.join((time_text, busy_text)))
+            busy_directory = short_reason.removeprefix(BUSY_DIRECTORY_TEXT).strip()
+            options += [separator.join((time_text, text)) for text in (busy_text, busy_directory)]
         return next((option for option in options if len(option) <= width), options[-1])
     if not timed_facts:
         return reason
