@@ -167,7 +167,7 @@ NO_CHANGE_TEXT = "No change"
 LEDGER_ERROR_TEXT = "Can't read the ledger, showing the last good state: "
 NOTHING_NEEDS_YOU_TEXT = "Nothing needs you right now"
 WAITING_DIRECTORY_TEXT = "waiting for directory:"
-WAITING_TEXT = "waiting:"
+BUSY_DIRECTORY_TEXT = "dir busy:"
 THREAD_STATE_TEXTS = {"thread unsettled": "thread open, no PR"}
 SHORT_REASON_TEXTS = {"thread open, no PR": "thread, no PR"}
 EMPTY_BOARD_LINES = ("No tasks yet", "Queue one with", 'golem run <id> "<prompt>"')
@@ -389,6 +389,7 @@ class BoardState:
     is_showing_help: bool = False
     help_scroll: int = 0
     help_scroll_limit: int = 0
+    focus_before_done: int = 0
     changed_until: dict[str, float] = field(default_factory=dict[str, float])
     gate_checks: dict[str, subprocess.Popen[str]] = field(
         default_factory=dict[str, "subprocess.Popen[str]"]
@@ -500,7 +501,6 @@ def column_spans(
     right_margin = HIDDEN_COLUMN_MARGIN if is_split and has_right_hidden else 0
     total_width = width - left_margin - right_margin - (fit_count - 1) * COLUMN_GAP
     widths = [total_width // fit_count] * fit_count
-    widths[-1] += total_width % fit_count
     spans: list[tuple[int, int]] = []
     x = left_margin
     for column_width in widths:
@@ -619,6 +619,9 @@ def fitted_words(text: str, width: int, glyphs: Glyphs) -> str:
     if len(text) <= width:
         return text
     head = text[: max(0, width - 1)]
+    clause_end = max(head.rfind(", "), head.rfind(f" {glyphs.separator} "))
+    if clause_end > width // 2:
+        return head[:clause_end] + glyphs.ellipsis
     word_end = head.rfind(" ")
     is_word_cut = text[len(head)] != " "
     is_label_kept = not head[:word_end].endswith(":")
@@ -669,8 +672,9 @@ def when_text(task: ledger.Task, now: datetime) -> str:
         return f"{verb} {duration_text(seconds)}" if seconds > 0 else "due now"
     if status == ledger.STATUS_RUNNING and started_at is not None:
         return duration_text(seconds_since(started_at, now))
-    if status in PICKUP_STATUSES and finished_at is not None:
-        return f"{duration_text(seconds_since(finished_at, now))} ago"
+    stopped_at = finished_at or started_at
+    if status in PICKUP_STATUSES and stopped_at is not None:
+        return f"{duration_text(seconds_since(stopped_at, now))} ago"
     return ""
 
 
@@ -729,7 +733,9 @@ def short_reason_text(row: display.ListRow, reason: str, snapshot: BoardSnapshot
     pull_requests = chain_pull_requests(snapshot, row.task_id)
     if row.status == ledger.STATUS_FINISHED and pull_requests:
         return short_pull_request_text(pull_requests)
-    reason = SHORT_REASON_TEXTS.get(reason, reason).replace(WAITING_DIRECTORY_TEXT, WAITING_TEXT)
+    reason = SHORT_REASON_TEXTS.get(reason, reason).replace(
+        WAITING_DIRECTORY_TEXT, BUSY_DIRECTORY_TEXT
+    )
     reason = EXIT_PREFIX_PATTERN.sub("", reason)
     for pattern, replacement in SHORT_REASON_PATTERNS:
         reason = pattern.sub(replacement, reason)
@@ -792,10 +798,8 @@ def card_detail(
                 (time_text, short_reason),
             )
         ]
-        if short_reason.startswith(WAITING_TEXT):
-            waiting_mark = glyphs.status_marks[ledger.STATUS_WAITING]
-            dependency = short_reason.removeprefix(WAITING_TEXT).strip()
-            options.append(f"{time_text} {waiting_mark} {dependency}")
+        if short_reason.startswith(BUSY_DIRECTORY_TEXT):
+            options.append(separator.join((time_text, BUSY_DIRECTORY_TEXT.rstrip(":"))))
         return next((option for option in options if len(option) <= width), options[-1])
     if not timed_facts:
         return reason
@@ -840,6 +844,11 @@ def card_badge_parts(row: display.ListRow, context: FrameContext) -> list[Part]:
             (context.glyphs.new_mark, STYLE_BOLD, display.STATUS_COLORS[row.status]),
         ]
     return parts
+
+
+def is_status_implied(row: display.ListRow, context: FrameContext) -> bool:
+    is_done = row.column == display.COLUMN_DONE and row.status == ledger.STATUS_FINISHED
+    return is_done or is_stuck(row, context.snapshot.tasks[row.task_id], context.now)
 
 
 def card_colors(
@@ -908,7 +917,7 @@ def card_segments(
     if is_tall:
         time_part = f" {glyphs.separator} {time_text}" if time_text else ""
         status_parts = [(row.status, STYLE_PLAIN, mark_color), (time_part, STYLE_DIM, None)]
-        if row.column == display.COLUMN_DONE and row.status == ledger.STATUS_FINISHED:
+        if is_status_implied(row, context):
             status_parts = [(time_text, STYLE_DIM, None)]
     return highlighted(
         [
@@ -962,7 +971,7 @@ def boxed_card_segments(
     status_width = content_width - parts_width(right_parts) - (1 if right_parts else 0)
     time_part = f" {glyphs.separator} {time_text}" if time_text else ""
     status_options = [(f" {row.status}", time_part), ("", f" {time_text}"), (f" {row.status}", "")]
-    if row.column == display.COLUMN_DONE and row.status == ledger.STATUS_FINISHED and time_text:
+    if is_status_implied(row, context) and time_text:
         status_options = status_options[1:]
     label, time_part = next(
         (option for option in status_options if 1 + len("".join(option)) <= status_width),
@@ -1779,6 +1788,16 @@ def footer_segments(
         [
             *filter_hint,
             move_hint,
+            next_hint,
+            *action_hints,
+            *toggle_hints,
+            *filter_key_hint,
+            help_hint,
+            quit_hint,
+        ],
+        [
+            *filter_hint,
+            move_hint,
             *open_hint,
             next_hint,
             *action_hints,
@@ -2130,7 +2149,7 @@ def help_sections(glyphs: Glyphs) -> list[tuple[str, list[tuple[str, str]]]]:
             "Status",
             [
                 (glyphs.status_marks[ledger.STATUS_SCHEDULED], "scheduled"),
-                (glyphs.status_marks[ledger.STATUS_WAITING], "waiting on another task"),
+                (glyphs.status_marks[ledger.STATUS_WAITING], "waiting on a step"),
                 (glyphs.spinner[0], "running"),
                 (glyphs.status_marks[ledger.STATUS_BLOCKED], "blocked by its gate"),
                 (glyphs.status_marks[ledger.STATUS_FAILED], "failed"),
@@ -2287,6 +2306,15 @@ def moved_focus_index(focus_index: int, key: int, column_count: int) -> int:
     return max(0, min(focus_index + step, column_count - 1))
 
 
+def toggle_done(state: BoardState) -> None:
+    state.is_showing_all = not state.is_showing_all
+    done_index = len(BOARD_COLUMNS) - 1
+    if state.is_showing_all:
+        state.focus_before_done, state.focus_index = state.focus_index, done_index
+    elif state.focus_index == done_index:
+        state.focus_index = state.focus_before_done
+
+
 def apply_board_key(state: BoardState, key: int, column_row_count: int, page_size: int) -> None:
     column_count = len(visible_columns(is_showing_all=state.is_showing_all))
     selected_index = state.selected_indices[state.focus_index]
@@ -2305,9 +2333,7 @@ def apply_board_key(state: BoardState, key: int, column_row_count: int, page_siz
         scroll_offset = state.scroll_offsets[state.focus_index]
         state.scroll_offsets[state.focus_index] = max(0, scroll_offset + step)
     elif key == ord("a"):
-        state.is_showing_all = not state.is_showing_all
-        if state.is_showing_all:
-            state.focus_index = len(BOARD_COLUMNS) - 1
+        toggle_done(state)
     elif key == FILTER_KEY:
         state.is_filtering = True
     elif key == ESCAPE_KEY:

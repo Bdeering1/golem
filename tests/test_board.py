@@ -247,13 +247,14 @@ def test_board_selection_stays_on_its_task_when_a_task_is_added_above_it():
     assert "task-02" in selected_text(tasks | {"task-00": added_task}, state)
 
 
-def test_board_moves_focus_off_done_when_it_hides():
-    state = board.BoardState(focus_index=3, is_showing_all=True)
+def test_board_returns_focus_from_done_when_it_hides():
+    state = board.BoardState(focus_index=1)
 
+    board.apply_key(state, ord("a"))
     board.apply_key(state, ord("a"))
     frame_text({}, state=state)
 
-    assert state.focus_index == 2
+    assert state.focus_index == 1
 
 
 def test_board_marks_empty_columns():
