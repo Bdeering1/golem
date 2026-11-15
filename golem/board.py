@@ -2126,10 +2126,12 @@ def task_fields(
             f"{chain_id} ({snapshot.tasks[chain_id]['status']})" for chain_id in ordered_ids
         )
         fields.append(("Chain", steps))
+    pull_requests = chain_pull_requests(snapshot, row.task_id)
     fields += [
-        ("PR", f"{pull_request['url']} ({pull_request['state']})")
-        for pull_request in chain_pull_requests(snapshot, row.task_id)
+        ("PR", f"{pull_request['url']} ({pull_request['state']})") for pull_request in pull_requests
     ]
+    if row.status == ledger.STATUS_FINISHED and not pull_requests:
+        fields.append(("Outcome", row_reason(row, snapshot)))
     return [(label, value) for label, value in fields if value]
 
 
