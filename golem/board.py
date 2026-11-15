@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 MIN_COLUMN_WIDTH = 20
 MIN_UNFOCUSED_COLUMN_WIDTH = 25
 FOCUSED_COLUMN_WIDTH = 34
+FOCUSED_SHARE_PERCENT = 40
 HIDDEN_COLUMN_MARGIN = 2
 COLUMN_GAP = 2
 CARD_INDENT = 2
@@ -55,12 +56,13 @@ SELECTED_MUTED_COLOR = 250
 WIDE_REP_FIX_NCURSES_VERSION = (6, 0, 20170729)
 REP_LINE_PREFIX = b"\trep="
 TOOL_LINE_PREFIX = "[tool] "
+SHELL_LINE_PREFIXES = ("[tool] command ", "[tool] Bash ")
 FINISHED_AGE_SEPARATOR = "; finished "
 TERMINFO_VARIABLE = "TERMINFO"
 TERMINFO_SOURCE_NAME = "terminal.terminfo"
 BOARD_TITLE = "golem"
 NOT_A_TERMINAL_MESSAGE = "golem: board needs a terminal; use golem list"
-HELP_CLOSE_HINT = " any key closes "
+HELP_CLOSE_HINT = " esc closes "
 MIN_CARD_REASON_WIDTH = 8
 CONFIRM_ANSWER_TEXT = " yes  any other key: no"
 CONFIRM_SHORT_ANSWER_TEXT = "/N"
@@ -159,7 +161,10 @@ GATE_CHECK_TEXT = "rechecking the gate…"
 NO_CHANGE_TEXT = "No change"
 LEDGER_ERROR_TEXT = "Can't read the ledger, showing the last good state: "
 NOTHING_NEEDS_YOU_TEXT = "Nothing needs you right now"
+WAITING_DIRECTORY_TEXT = "waiting for directory:"
+WAITING_TEXT = "waiting:"
 THREAD_STATE_TEXTS = {"thread unsettled": "thread open, no PR"}
+SHORT_REASON_TEXTS = {"thread open, no PR": "no PR"}
 EMPTY_BOARD_LINES = ("No tasks yet", "Queue one with", 'golem run <id> "<prompt>"')
 UNAVAILABLE_ACTION_TEXTS = {
     ACTION_PICKUP: "Only blocked, failed or finished tasks can be picked up",
@@ -422,19 +427,18 @@ def board_snapshot(tasks: ledger.Tasks, now: datetime) -> BoardSnapshot:
     return BoardSnapshot(rows, tasks, activity, rows)
 
 
-def is_matching(row: display.ListRow, task: ledger.Task, query: str) -> bool:
-    searched_text = f"{row.task_id} {row.directory} {task.get('prompt', '')}"
-    return query.casefold() in searched_text.casefold()
+def is_matching(row: display.ListRow, tasks: ledger.Tasks, query: str) -> bool:
+    searched_text = " ".join(
+        f"{task_id} {tasks[task_id].get('prompt', '')}"
+        for task_id in chains.chain_task_ids(tasks, row.task_id)
+    )
+    return query.casefold() in f"{row.directory} {searched_text}".casefold()
 
 
 def filtered_snapshot(snapshot: BoardSnapshot, state: BoardState) -> BoardSnapshot:
     if not state.filter_text:
         return snapshot
-    rows = [
-        row
-        for row in snapshot.rows
-        if is_matching(row, snapshot.tasks[row.task_id], state.filter_text)
-    ]
+    rows = [row for row in snapshot.rows if is_matching(row, snapshot.tasks, state.filter_text)]
     return snapshot._replace(rows=rows)
 
 
@@ -485,10 +489,11 @@ def column_spans(
     total_width = width - left_margin - right_margin - (fit_count - 1) * COLUMN_GAP
     widths = [total_width // fit_count] * fit_count
     focus_offset = focus_index - first_index
-    if is_split and widths[0] < FOCUSED_COLUMN_WIDTH and 0 <= focus_offset < fit_count:
+    if is_split and 0 <= focus_offset < fit_count:
+        floor_width = max(MIN_UNFOCUSED_COLUMN_WIDTH, min(widths[0], MIN_BOXED_CARD_WIDTH))
+        shared_width = max(FOCUSED_COLUMN_WIDTH, total_width * FOCUSED_SHARE_PERCENT // 100)
         focused_width = max(
-            widths[0],
-            min(FOCUSED_COLUMN_WIDTH, total_width - (fit_count - 1) * MIN_UNFOCUSED_COLUMN_WIDTH),
+            widths[0], min(shared_width, total_width - (fit_count - 1) * floor_width)
         )
         other_width = (total_width - focused_width) // (fit_count - 1)
         widths = [
@@ -540,7 +545,8 @@ def board_layout(
 def snapshot_layout(
     snapshot: BoardSnapshot, width: int, height: int, state: BoardState
 ) -> BoardLayout:
-    columns = rows_by_column(snapshot.unfiltered_rows, is_showing_all=state.is_showing_all)
+    sized_rows = snapshot.unfiltered_rows if state.is_filtering else snapshot.rows
+    columns = rows_by_column(sized_rows, is_showing_all=state.is_showing_all)
     return board_layout(
         width,
         height,
@@ -601,6 +607,16 @@ def fitted(text: str, width: int, glyphs: Glyphs) -> str:
     return text[: max(0, width - 1)] + glyphs.ellipsis
 
 
+def fitted_words(text: str, width: int, glyphs: Glyphs) -> str:
+    if len(text) <= width:
+        return text
+    head = text[: max(0, width - 1)]
+    word_end = head.rfind(" ")
+    if word_end > width // 2:
+        head = head[:word_end].rstrip(f" ,:{glyphs.separator}")
+    return head + glyphs.ellipsis
+
+
 def fitted_task_id(task_id: str, width: int, glyphs: Glyphs) -> str:
     tail = task_id[task_id.rfind("-") :] if "-" in task_id else ""
     if len(task_id) <= width or not tail or len(tail) > width // 2:
@@ -651,6 +667,9 @@ def row_when_text(row: display.ListRow, task: ledger.Task, now: datetime) -> str
 
 
 def activity_text(line: str, glyphs: Glyphs) -> str:
+    shell_prefix = next((prefix for prefix in SHELL_LINE_PREFIXES if line.startswith(prefix)), None)
+    if shell_prefix is not None:
+        return f"$ {line.removeprefix(shell_prefix)}"
     if line.startswith(TOOL_LINE_PREFIX):
         return f"{glyphs.tool} {line.removeprefix(TOOL_LINE_PREFIX)}"
     return line
@@ -696,6 +715,7 @@ def short_reason_text(row: display.ListRow, reason: str, snapshot: BoardSnapshot
     pull_requests = chain_pull_requests(snapshot, row.task_id)
     if row.status == ledger.STATUS_FINISHED and pull_requests:
         return short_pull_request_text(pull_requests)
+    reason = SHORT_REASON_TEXTS.get(reason, reason).replace(WAITING_DIRECTORY_TEXT, WAITING_TEXT)
     return EXIT_PREFIX_PATTERN.sub("", reason)
 
 
@@ -761,9 +781,11 @@ def status_mark(status: str, glyphs: Glyphs, now: datetime) -> str:
 
 
 def is_new_for_review(snapshot: BoardSnapshot, row: display.ListRow) -> bool:
-    return row.column == display.COLUMN_REVIEW and chains.is_ready_to_open(
-        snapshot.tasks, row.task_id
-    )
+    if row.column != display.COLUMN_REVIEW:
+        return False
+    if row.status == ledger.STATUS_FAILED:
+        return not ledger.is_counted_opened(snapshot.tasks, row.task_id)
+    return chains.is_ready_to_open(snapshot.tasks, row.task_id)
 
 
 def is_live_card(row: display.ListRow, context: FrameContext) -> bool:
@@ -842,6 +864,8 @@ def card_segments(
     if is_tall:
         time_part = f" {glyphs.separator} {time_text}" if time_text else ""
         status_parts = [(row.status, STYLE_PLAIN, mark_color), (time_part, STYLE_DIM, None)]
+        if row.column == display.COLUMN_DONE and row.status == ledger.STATUS_FINISHED:
+            status_parts = [(time_text, STYLE_DIM, None)]
     return highlighted(
         [
             *fill,
@@ -855,7 +879,10 @@ def card_segments(
             ),
             *part_segments(y + 1, x + CARD_INDENT, status_parts),
             Segment(
-                detail_y, x + CARD_INDENT, fitted(detail, detail_text_width, glyphs), STYLE_DIM
+                detail_y,
+                x + CARD_INDENT,
+                fitted_words(detail, detail_text_width, glyphs),
+                STYLE_DIM,
             ),
             *part_segments(y + 1, x + width - parts_width(right_parts), right_parts),
         ],
@@ -891,6 +918,8 @@ def boxed_card_segments(
     status_width = content_width - parts_width(right_parts) - (1 if right_parts else 0)
     time_part = f" {glyphs.separator} {time_text}" if time_text else ""
     status_options = [(f" {row.status}", time_part), ("", f" {time_text}"), (f" {row.status}", "")]
+    if row.column == display.COLUMN_DONE and row.status == ledger.STATUS_FINISHED and time_text:
+        status_options = status_options[1:]
     label, time_part = next(
         (option for option in status_options if 1 + len("".join(option)) <= status_width),
         status_options[-1],
@@ -922,7 +951,7 @@ def boxed_card_segments(
         [
             *part_segments(y + 1, x + 2, status_parts),
             *part_segments(y + 1, x + width - 2 - parts_width(right_parts), right_parts),
-            Segment(y + 2, x + 2, fitted(detail, content_width, glyphs), STYLE_DIM),
+            Segment(y + 2, x + 2, fitted_words(detail, content_width, glyphs), STYLE_DIM),
         ],
         background,
     )
@@ -1232,8 +1261,10 @@ def detail_segments(
     if row is not None:
         lines = detail_lines(row, text_width, line_count, context.snapshot, context.glyphs)
     if row is not None and not is_id_in_rule(row.task_id, line_width):
-        id_line = (fitted_task_id(row.task_id, text_width, context.glyphs), STYLE_BOLD)
-        lines = [id_line, *lines][:line_count]
+        id_lines = textwrap.wrap(row.task_id, text_width)
+        if len(id_lines) + len(lines) > line_count:
+            id_lines = [fitted_task_id(row.task_id, text_width, context.glyphs)]
+        lines = [*((line, STYLE_BOLD) for line in id_lines), *lines][:line_count]
     rule_y = footer_y - 1 - max(1, len(lines))
     segments = detail_title_segments(rule_y, line_width, row, context)
     for line_offset, (text, style) in enumerate(lines, start=1):
@@ -1544,12 +1575,15 @@ def narrow_footer_segments(
         return filter_input_segments(y, width, state, snapshot, glyphs)
     if not snapshot.unfiltered_rows:
         return key_hint_segments(y + 1, width, [[("?", "help"), ("q", "quit")]])
+    is_flashing = state.flash_text and time.monotonic() < state.flash_until
+    if is_flashing and state.pending_action is None and len(state.flash_text) >= width:
+        flash_lines = textwrap.wrap(state.flash_text, width - 1)[:2]
+        return [
+            Segment(y + offset, 0, fitted(line, width - 1, glyphs), STYLE_BOLD)
+            for offset, line in enumerate(flash_lines)
+        ]
     action_segments = status_line_segments(y, width, state, row, glyphs, snapshot) or []
     if not action_segments:
-        match_text = "".join(match_count_parts(snapshot, state))
-        filter_hint = (
-            [(f"/{state.filter_text}", match_text), ("esc", "clear")] if state.filter_text else []
-        )
         open_hint = [(glyphs.enter_key, "open")] if row is not None else []
         action_hints = footer_action_hints(snapshot, row)
         bare_hints = [(key, "") for key, _ in action_hints]
@@ -1557,15 +1591,23 @@ def narrow_footer_segments(
             y,
             width,
             [
-                [*filter_hint, *open_hint, *footer_action_hints(snapshot, row, is_complete=True)],
-                [*filter_hint, *open_hint, *action_hints],
-                [*filter_hint, *action_hints],
-                [*filter_hint, *open_hint, *bare_hints],
-                [*filter_hint, *bare_hints],
+                [*open_hint, *footer_action_hints(snapshot, row, is_complete=True)],
+                [*open_hint, *action_hints],
+                action_hints,
+                [*open_hint, *bare_hints],
+                bare_hints,
             ],
         )
     move_hint = (f"{glyphs.column_keys}{glyphs.select_keys}", "move")
     help_hint, quit_hint = ("?", "help"), ("q", "quit")
+    if state.filter_text:
+        filter_hint = (f"/{state.filter_text}", "".join(match_count_parts(snapshot, state)))
+        filter_sets = [
+            [filter_hint, ("esc", "clear"), help_hint, quit_hint],
+            [filter_hint, ("esc", "clear"), ("?", ""), ("q", "")],
+            [filter_hint, ("esc", "")],
+        ]
+        return action_segments + key_hint_segments(y + 1, width, filter_sets)
     navigation_sets = [
         [
             (glyphs.column_keys, "column"),
@@ -1613,12 +1655,14 @@ def footer_segments(
     move_hint = (f"{glyphs.column_keys}{glyphs.select_keys}", "move")
     help_hint, quit_hint = ("?", "help"), ("q", "quit")
     toggle_hint = done_hint(state)
+    next_hint = ("n", "next")
     key_sets = [
         [
             *filter_hint,
             column_hint,
             select_hint,
             *open_hint,
+            next_hint,
             *complete_hints,
             toggle_hint,
             *filter_key_hint,
@@ -1630,6 +1674,7 @@ def footer_segments(
             column_hint,
             select_hint,
             *open_hint,
+            next_hint,
             *action_hints,
             toggle_hint,
             *filter_key_hint,
@@ -1896,7 +1941,9 @@ def task_view_segments(
     if status_segments is not None:
         return segments + status_segments
     action_hints = [
-        hint for hint in footer_action_hints(snapshot, row) if hint[0] != ACTION_KEYS[ACTION_WATCH]
+        hint
+        for hint in footer_action_hints(snapshot, row, is_complete=True)
+        if hint[0] not in {ACTION_KEYS[ACTION_WATCH], ACTION_KEYS[ACTION_CLOSE_ALL]}
     ]
     is_scrollable = len(lines) > body_height
     position = f"{min(len(lines), state.task_scroll + body_height)}/{len(lines)}"
@@ -1908,8 +1955,10 @@ def task_view_segments(
         if row.status == ledger.STATUS_RUNNING
         else []
     )
+    step_hint = [(glyphs.column_keys, "task")]
     key_sets = [
-        [*scroll_hints, *follow_hint, *action_hints, ("esc", "back"), *position_hints],
+        [*scroll_hints, *step_hint, *follow_hint, *action_hints, ("esc", "back"), *position_hints],
+        [*scroll_hints, *step_hint, *follow_hint, *action_hints, ("esc", "back")],
         [*scroll_hints, *follow_hint, *action_hints, ("esc", "back")],
         [*bare_scroll_hints, *follow_hint, *action_hints, ("esc", "back")],
         [*follow_hint, *action_hints, ("esc", "back")],
@@ -2030,7 +2079,6 @@ def help_view_segments(width: int, height: int, glyphs: Glyphs, state: BoardStat
     if state.help_scroll_limit:
         scroll_hint = f" {glyphs.up}{glyphs.down} scroll"
         close_hints = [
-            f"{scroll_hint}  other keys close ",
             f"{scroll_hint}  esc close ",
             f"{scroll_hint} ",
             "",
@@ -2059,6 +2107,10 @@ def help_view_segments(width: int, height: int, glyphs: Glyphs, state: BoardStat
             Segment(top + offset, left + box_width - 1, glyphs.vertical, STYLE_DIM),
         ]
     first_row_y = top + 1 + padding
+    mark_colors = {
+        **{mark: display.STATUS_COLORS[status] for status, mark in glyphs.status_marks.items()},
+        glyphs.spinner[0]: display.STATUS_COLORS[ledger.STATUS_RUNNING],
+    }
     for column_index, rows in enumerate(columns):
         x = left + 2 + column_index * (column_width + HELP_SECTION_GAP)
         shown_rows = rows[state.help_scroll : state.help_scroll + visible_count]
@@ -2070,7 +2122,7 @@ def help_view_segments(width: int, height: int, glyphs: Glyphs, state: BoardStat
                 continue
             label_width = left + box_width - 2 - x - key_width
             segments += [
-                Segment(first_row_y + offset, x, key, STYLE_BOLD),
+                Segment(first_row_y + offset, x, key, STYLE_BOLD, mark_colors.get(key)),
                 Segment(
                     first_row_y + offset,
                     x + key_width,
@@ -2160,10 +2212,14 @@ def apply_filter_key(state: BoardState, key: int) -> None:
         state.filter_text += chr(key)
 
 
-def apply_task_key(state: BoardState, key: int, page_size: int) -> None:
-    state.is_following = key in LAST_KEYS or (state.is_following and key in DOWN_KEYS)
+def apply_task_key(state: BoardState, key: int, page_size: int, column_row_count: int) -> None:
+    state.is_following = state.is_following and key in DOWN_KEYS | LAST_KEYS
     if key in BACK_KEYS:
         state.view = VIEW_BOARD
+    elif key in LEFT_KEYS | RIGHT_KEYS:
+        step = 1 if key in RIGHT_KEYS else -1
+        move_selection(state, column_row_count, state.selected_indices[state.focus_index] + step)
+        state.task_scroll = 0
     elif key in DOWN_KEYS | UP_KEYS:
         state.task_scroll += 1 if key in DOWN_KEYS else -1
     elif key in PAGE_DOWN_KEYS | PAGE_UP_KEYS:
@@ -2183,7 +2239,10 @@ def apply_help_key(state: BoardState, key: int, page_size: int) -> None:
         **dict.fromkeys(PAGE_DOWN_KEYS, page_size),
         **dict.fromkeys(PAGE_UP_KEYS, -page_size),
     }
-    if state.help_scroll_limit and key in scroll_steps:
+    if key in FIRST_KEYS | LAST_KEYS:
+        state.help_scroll = state.help_scroll_limit if key in LAST_KEYS else 0
+        return
+    if key in scroll_steps:
         state.help_scroll = max(
             0, min(state.help_scroll + scroll_steps[key], state.help_scroll_limit)
         )
@@ -2224,7 +2283,7 @@ def apply_key(
     elif state.is_filtering:
         apply_filter_key(state, key)
     elif state.view == VIEW_TASK:
-        apply_task_key(state, key, max(1, height - 2))
+        apply_task_key(state, key, max(1, height - 2), column_row_count or 1)
     elif key == NEXT_ATTENTION_KEY and snapshot is not None:
         select_next_attention(state, snapshot)
     else:
@@ -2499,7 +2558,7 @@ def board_loop(screen: curses.window, *, is_color: bool, glyphs: Glyphs) -> int:
         now = datetime.now().astimezone()
         source_key = (file_stat(task_ledger_path), progress_stats(snapshot), now.date())
         if source_key != shown_source_key:
-            is_first_load = shown_source_key is None and not snapshot.unfiltered_rows
+            is_first_load = not snapshot.unfiltered_rows
             previous_snapshot = snapshot
             try:
                 snapshot = board_snapshot(ledger.load_tasks(), now)
