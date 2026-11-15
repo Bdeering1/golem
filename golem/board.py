@@ -1464,7 +1464,10 @@ def title_segments(
     summaries = summary_options(snapshot, glyphs, now)
     if state.stale_snapshot_time is not None:
         long_right_text = f"{UNREADABLE_LEDGER_TEXT} {glyphs.separator} {right_text}"
-        if len(BOARD_TITLE) + parts_width(summaries[0]) + len(long_right_text) + 2 < width:
+        if any(
+            len(BOARD_TITLE) + parts_width(summary) + len(long_right_text) + 2 < width
+            for summary in summaries[:-1]
+        ):
             right_text = long_right_text
     options = [(option, right_text) for option in summaries[:-1]]
     options += [(option, "") for option in summaries[:-1]]
@@ -1545,11 +1548,11 @@ def detail_title_segments(
         (
             option
             for option in right_options
-            if CARD_INDENT + title_width + parts_width(option) + 2 <= line_width
+            if CARD_INDENT + title_width + parts_width(option) + 1 <= line_width
         ),
         right_options[-1],
     )
-    id_width = max(1, line_width - CARD_INDENT - 2 - parts_width(right_parts) - 2)
+    id_width = max(1, line_width - CARD_INDENT - 2 - parts_width(right_parts) - 1)
     title_parts: list[Part] = [
         (f" {fitted_task_id(row.task_id, id_width, glyphs)} ", STYLE_BOLD, None)
     ]
@@ -2973,7 +2976,6 @@ def board_loop(screen: curses.window, *, is_color: bool, glyphs: Glyphs) -> int:
     state = BoardState()
     shown_source_key: tuple[LedgerStat, tuple[LedgerStat, ...], date] | None = None
     snapshot = BoardSnapshot([], {}, {}, [])
-    snapshot_time = datetime.now().astimezone()
     shown_size = screen.getmaxyx()
     while True:
         now = datetime.now().astimezone()
@@ -2985,11 +2987,10 @@ def board_loop(screen: curses.window, *, is_color: bool, glyphs: Glyphs) -> int:
                 snapshot = board_snapshot(ledger.load_tasks(), now)
             except (ValueError, KeyError, TypeError) as error:
                 flash(state, f"{LEDGER_ERROR_TEXT}{error}")
-                state.stale_snapshot_time = snapshot_time
+                state.stale_snapshot_time = state.stale_snapshot_time or now
                 shown_source_key = source_key
                 continue
             state.stale_snapshot_time = None
-            snapshot_time = now
             if is_first_load:
                 state.focus_index = attention_column_index(snapshot.rows)
             else:
