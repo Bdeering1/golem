@@ -24,6 +24,8 @@ if TYPE_CHECKING:
 MIN_COLUMN_WIDTH = 20
 HIDDEN_COLUMN_MARGIN = 2
 COLUMN_GAP = 2
+REVIEW_SHARE_PERCENT = 40
+MIN_REVIEW_NEIGHBOUR_WIDTH = 22
 CARD_INDENT = 2
 BOX_BORDER_WIDTH = 4
 MIN_BOXED_CARD_WIDTH = 30
@@ -291,6 +293,7 @@ BOARD_COLUMNS = (
     BoardColumn(display.COLUMN_REVIEW, display.STATUS_COLORS[ledger.STATUS_BLOCKED]),
     BoardColumn(display.COLUMN_DONE, display.STATUS_COLORS[ledger.STATUS_FINISHED]),
 )
+REVIEW_COLUMN_INDEX = [column.title for column in BOARD_COLUMNS].index(display.COLUMN_REVIEW)
 PAIR_COLORS = sorted(
     {
         *display.STATUS_COLORS.values(),
@@ -506,6 +509,18 @@ def column_spans(
     right_margin = HIDDEN_COLUMN_MARGIN if is_split and has_right_hidden else 0
     total_width = width - left_margin - right_margin - (fit_count - 1) * COLUMN_GAP
     widths = [total_width // fit_count] * fit_count
+    review_offset = REVIEW_COLUMN_INDEX - first_index
+    if is_split and 0 <= review_offset < fit_count:
+        review_width = max(
+            widths[0],
+            min(
+                total_width * REVIEW_SHARE_PERCENT // 100,
+                total_width - (fit_count - 1) * MIN_REVIEW_NEIGHBOUR_WIDTH,
+            ),
+        )
+        other_width = (total_width - review_width) // (fit_count - 1)
+        widths = [other_width] * fit_count
+        widths[review_offset] = review_width
     spans: list[tuple[int, int]] = []
     x = left_margin
     for column_width in widths:
@@ -804,7 +819,12 @@ def card_detail(
             )
         ]
         if short_reason.startswith(BUSY_DIRECTORY_TEXT):
-            options.append(separator.join((time_text, BUSY_DIRECTORY_TEXT.rstrip(":"))))
+            dependency = short_reason.removeprefix(BUSY_DIRECTORY_TEXT).strip()
+            busy_texts = (f"{dependency} busy", BUSY_DIRECTORY_TEXT.rstrip(":"))
+            options += [
+                separator.join(part for part in (time_text, busy_text) if part)
+                for busy_text in busy_texts
+            ]
         return next((option for option in options if len(option) <= width), options[-1])
     if not timed_facts:
         return reason
@@ -896,7 +916,8 @@ def card_segments(
     glyphs, now, changed_task_ids = context.glyphs, context.now, context.changed_task_ids
     color, mark_color = card_colors(row, context, is_selected=is_selected)
     right_parts = card_badge_parts(row, context)
-    right_width = parts_width(right_parts) + (2 if right_parts else 0)
+    badge_gap = 2 if row.step else 1
+    right_width = parts_width(right_parts) + (badge_gap if right_parts else 0)
     title = fitted_task_id(row.task_id, width - CARD_INDENT, glyphs)
     detail_width = width - CARD_INDENT - right_width
     time_text, reason, short_reason, repository = card_facts(row, context)
@@ -923,7 +944,10 @@ def card_segments(
         time_part = f" {glyphs.separator} {time_text}" if time_text else ""
         status_parts = [(row.status, STYLE_PLAIN, mark_color), (time_part, STYLE_DIM, None)]
         if is_status_implied(row, context):
-            status_parts = [(time_text, STYLE_DIM, None)]
+            is_warning = is_stuck(row, context.snapshot.tasks[row.task_id], now)
+            status_parts = [
+                (time_text, STYLE_PLAIN, mark_color) if is_warning else (time_text, STYLE_DIM, None)
+            ]
     return highlighted(
         [
             *fill,
@@ -972,6 +996,7 @@ def boxed_card_segments(
         (f" {horizontal * (content_width - len(title))}{corners[1]}", STYLE_PLAIN, frame_color),
     ]
     time_text, reason, short_reason, repository = card_facts(row, context)
+    is_warning = is_stuck(row, context.snapshot.tasks[row.task_id], now)
     right_parts = card_badge_parts(row, context)
     status_width = content_width - parts_width(right_parts) - (1 if right_parts else 0)
     time_part = f" {glyphs.separator} {time_text}" if time_text else ""
@@ -989,7 +1014,7 @@ def boxed_card_segments(
             frame_color,
         ),
         (fitted(label, status_width - 1, glyphs), STYLE_PLAIN, frame_color),
-        (time_part, STYLE_DIM, None),
+        (time_part, STYLE_PLAIN, frame_color) if is_warning else (time_part, STYLE_DIM, None),
     ]
     detail = card_detail(
         ("", reason, short_reason, repository),
@@ -1337,7 +1362,7 @@ def detail_segments(
         content_count = line_count - len(id_lines)
         content = detail_lines(row, text_width, content_count, context.snapshot, context.glyphs)
         lines = [*((line, STYLE_BOLD) for line in id_lines), *content]
-    rule_y = footer_y - 1 - max(1, len(lines))
+    rule_y = footer_y - 1 - max(1, line_count)
     segments = detail_title_segments(rule_y, line_width, row, context, is_id_shown=is_id_in_title)
     for line_offset, (text, style) in enumerate(lines, start=1):
         segments.append(Segment(rule_y + line_offset, CARD_INDENT, text, style))
