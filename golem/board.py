@@ -162,7 +162,6 @@ SHORT_REASON_PATTERNS = (
     (re.compile(r"\b(\w+) found (\d+)"), r"\1: \2"),
 )
 GATE_COUNT_PATTERN = re.compile(r"(\d+) failed, (\d+) passed")
-COUNT_NOUN_PATTERN = re.compile(r"(\d+) (?:problem|error|warning|issue)s?\b")
 DURATION_PART_PATTERN = re.compile(r"(\d+)([a-z])")
 DURATION_UNIT_SIZES = {"m": 60, "h": 24}
 LOUD_STATUSES = {*STOPPED_STATUSES, ledger.STATUS_RUNNING}
@@ -416,6 +415,7 @@ class BoardState:
     stale_snapshot_time: datetime | None = None
     focus_before_done: int = 0
     changed_until: dict[str, float] = field(default_factory=dict[str, float])
+    pull_request_presses: dict[str, int] = field(default_factory=dict[str, int])
     gate_checks: dict[str, subprocess.Popen[str]] = field(
         default_factory=dict[str, "subprocess.Popen[str]"]
     )
@@ -854,9 +854,7 @@ def card_detail(
     if not reason:
         return fitted_facts
     if not is_live:
-        compact_reason = COUNT_NOUN_PATTERN.sub(
-            r"\1", GATE_COUNT_PATTERN.sub(r"\1 fail/\2 pass", short_reason)
-        )
+        compact_reason = GATE_COUNT_PATTERN.sub(r"\1 fail/\2 pass", short_reason)
         options = [
             separator.join(part for part in parts if part)
             for parts in (
@@ -2788,16 +2786,20 @@ def run_action(
         flash(state, f"Copied {row.task_id}" if returncode == 0 else output)
         return
     if action == ACTION_OPEN_PULL_REQUEST:
-        pull_requests = chain_pull_requests(snapshot, row.task_id)
-        pull_request = next(
-            (item for item in pull_requests if item["state"] == ledger.PULL_REQUEST_STATE_OPEN),
-            pull_requests[0],
+        pull_requests = sorted(
+            chain_pull_requests(snapshot, row.task_id),
+            key=lambda item: item["state"] != ledger.PULL_REQUEST_STATE_OPEN,
         )
+        press_count = state.pull_request_presses.get(row.task_id, 0)
+        state.pull_request_presses[row.task_id] = press_count + 1
+        pull_request = pull_requests[press_count % len(pull_requests)]
         returncode, output = run_captured([OPEN_COMMAND, pull_request["url"]])
         opened_text = (
             f"Opened {pull_request_text([pull_request]).removesuffix(pull_request['state'])}"
-        )
-        flash(state, opened_text.strip() if returncode == 0 else output)
+        ).strip()
+        if len(pull_requests) > 1:
+            opened_text += f" ({press_count % len(pull_requests) + 1} of {len(pull_requests)})"
+        flash(state, opened_text if returncode == 0 else output)
         return
     returncode, output = run_captured([*GOLEM_COMMAND, action, row.task_id])
     flash(state, f"{ACTION_DONE_VERBS[action]} {row.task_id}" if returncode == 0 else output)
@@ -2857,9 +2859,15 @@ def mark_changed_tasks(state: BoardState, previous: BoardSnapshot, current: Boar
     previous_positions = row_positions(previous)
     current_positions = row_positions(current)
     until = time.monotonic() + CHANGE_HIGHLIGHT_SECONDS
+    status_changes: list[str] = []
     for task_id, position in current_positions.items():
-        if previous_positions.get(task_id) != position:
+        previous_position = previous_positions.get(task_id)
+        if previous_position != position:
             state.changed_until[task_id] = until
+        if previous_position is not None and previous_position[1] != position[1]:
+            status_changes.append(f"{task_id} {position[1]}")
+    if status_changes:
+        flash(state, ", ".join(status_changes))
     selected_task_id = state.selected_task_ids[state.focus_index]
     if selected_task_id not in previous_positions or selected_task_id not in current_positions:
         return
