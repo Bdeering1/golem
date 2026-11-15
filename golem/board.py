@@ -1081,6 +1081,18 @@ def status_line_segments(
     return None
 
 
+def match_count_parts(snapshot: BoardSnapshot, state: BoardState) -> tuple[str, str]:
+    if state.is_showing_all:
+        return f"{len(snapshot.rows)}/{len(snapshot.unfiltered_rows)}", ""
+    shown_rows, unfiltered_rows = [
+        [row for row in rows if row.column != display.COLUMN_DONE]
+        for rows in (snapshot.rows, snapshot.unfiltered_rows)
+    ]
+    count_text = f"{len(shown_rows)}/{len(unfiltered_rows)}"
+    done_count = len(snapshot.rows) - len(shown_rows)
+    return count_text, f", {done_count} in Done" if done_count else ""
+
+
 def footer_segments(
     y: int,
     width: int,
@@ -1091,11 +1103,11 @@ def footer_segments(
 ) -> list[Segment]:
     if state.is_filtering:
         query = f"/{state.filter_text}{glyphs.cursor}"
-        shown_count = f"{len(snapshot.rows)}/{len(snapshot.unfiltered_rows)}"
+        count_text, done_text = match_count_parts(snapshot, state)
         hints = (
-            f"  {shown_count} match  {glyphs.enter_key} keep  esc clear",
-            f"  {shown_count}  {glyphs.enter_key} keep  esc clear",
-            f"  {shown_count}  esc clear",
+            f"  {count_text} match{done_text}  {glyphs.enter_key} keep  esc clear",
+            f"  {count_text}{done_text}  {glyphs.enter_key} keep  esc clear",
+            f"  {count_text}  esc clear",
         )
         hint = next((hint for hint in hints if len(query) + len(hint) < width), hints[-1])
         return [
@@ -1107,7 +1119,7 @@ def footer_segments(
         return status_segments
     action_hints = footer_action_hints(snapshot, row)
     open_hint = [(glyphs.enter_key, "open")] if row is not None else []
-    match_text = f"{len(snapshot.rows)}/{len(snapshot.unfiltered_rows)}"
+    match_text = "".join(match_count_parts(snapshot, state))
     filter_hint = [(f"/{state.filter_text}", match_text)] if state.filter_text else []
     done_hint = ("a", "hide done" if state.is_showing_all else "show done")
     short_done_hint = ("a", "done")
