@@ -750,7 +750,12 @@ def card_facts(row: display.ListRow, context: FrameContext) -> tuple[str, str, s
 
 
 def card_detail(
-    facts: tuple[str, str, str, str], width: int, glyphs: Glyphs, *, is_live: bool
+    facts: tuple[str, str, str, str],
+    width: int,
+    glyphs: Glyphs,
+    *,
+    is_live: bool,
+    is_time_kept: bool = False,
 ) -> str:
     time_text, reason, short_reason, repository = facts
     separator = f" {glyphs.separator} "
@@ -767,13 +772,12 @@ def card_detail(
                 (time_text, short_reason),
             )
         ]
-        return next(
-            (option for option in [*options, short_reason] if len(option) <= width), options[-1]
-        )
+        candidates = options if is_time_kept else [*options, short_reason]
+        return next((option for option in candidates if len(option) <= width), options[-1])
     if not timed_facts:
         return reason
     if width - len(timed_facts) - len(separator) < MIN_CARD_REASON_WIDTH:
-        return timed_facts
+        return timed_facts if len(timed_facts) <= width else time_text
     return f"{timed_facts}{separator}{reason}"
 
 
@@ -862,7 +866,13 @@ def card_segments(
     detail_facts = ("" if is_tall else time_text, reason, short_reason, repository)
     detail_y = y + 2 if is_tall else y + 1
     detail_text_width = width - CARD_INDENT if is_tall else detail_width
-    detail = card_detail(detail_facts, detail_text_width, glyphs, is_live=is_live)
+    detail = card_detail(
+        detail_facts,
+        detail_text_width,
+        glyphs,
+        is_live=is_live,
+        is_time_kept=is_stuck(row, context.snapshot.tasks[row.task_id], now),
+    )
     is_changed = row.task_id in changed_task_ids
     title_color = color if is_changed else None
     background = SELECTION_BACKGROUND if is_selected else None
@@ -1371,7 +1381,7 @@ def detail_lines(
     primary_lines = paragraph_lines(reason, wrap_width)
     prompt_lines = paragraph_lines(" ".join(task.get("prompt", "").split()), wrap_width)
     if len(primary_lines) > PRIMARY_LINE_COUNT:
-        short_reason = EXIT_PREFIX_PATTERN.sub("", reason)
+        short_reason = PATH_PREFIX_PATTERN.sub("", EXIT_PREFIX_PATTERN.sub("", reason))
         primary_lines = paragraph_lines(
             f" {glyphs.separator} ".join(short_reason.splitlines()), wrap_width
         )
@@ -1989,12 +1999,16 @@ def task_view_segments(
     )
     task_number = min(state.selected_indices[state.focus_index], column_row_count - 1) + 1
     step_hint = [(glyphs.column_keys, f"task {task_number} of {column_row_count}")]
+    short_step_hint = [(glyphs.column_keys, f"{task_number}/{column_row_count}")]
+    core_action_hints = [hint for hint in action_hints if hint[0] != ACTION_KEYS[ACTION_COPY]]
     key_sets = [
         [*scroll_hints, *step_hint, *follow_hint, *action_hints, ("esc", "back"), *position_hints],
         [*scroll_hints, *step_hint, *follow_hint, *action_hints, ("esc", "back")],
         [*scroll_hints, *follow_hint, *action_hints, ("esc", "back")],
         [*bare_scroll_hints, *follow_hint, *action_hints, ("esc", "back")],
         [*follow_hint, *action_hints, ("esc", "back")],
+        [*short_step_hint, *follow_hint, *core_action_hints, ("esc", "back")],
+        [*follow_hint, *core_action_hints, ("esc", "back")],
         [("esc", "back")],
     ]
     return segments + key_hint_segments(height - 1, width, key_sets)
