@@ -1387,7 +1387,7 @@ def detail_segments(
     id_lines: list[str] = []
     if row is not None and not is_id_in_title:
         id_lines = textwrap.wrap(row.task_id, text_width)
-        is_id_in_title = line_count - len(id_lines) < PRIMARY_LINE_COUNT
+        is_id_in_title = len(id_lines) > 1 or line_count - len(id_lines) < PRIMARY_LINE_COUNT
         if is_id_in_title:
             id_lines = []
     if row is not None:
@@ -1896,6 +1896,7 @@ def footer_segments(
         [*filter_hint, *open_hint, *action_hints, *filter_key_hint, help_hint, quit_hint],
         [*filter_hint, *open_hint, *action_hints, help_hint, quit_hint],
         [*filter_hint[:2], *open_hint, *action_hints, help_hint, quit_hint],
+        [*filter_hint[:2], *action_hints, help_hint, quit_hint],
         [*filter_hint, *open_hint, *[(key, "") for key, _ in action_hints], help_hint, quit_hint],
         [*filter_hint, *action_hints, help_hint, quit_hint],
         [*filter_hint, *[(key, "") for key, _ in action_hints], help_hint, quit_hint],
@@ -2175,7 +2176,9 @@ def task_view_segments(
         [*scroll_hints, *step_hint, *follow_hint, *action_hints, ("esc", "back"), *position_hints],
         [*scroll_hints, *step_hint, *follow_hint, *action_hints, ("esc", "back")],
         [*bare_scroll_hints, *short_step_hint, *follow_hint, *action_hints, ("esc", "back")],
+        [*bare_scroll_hints, *short_step_hint, *follow_hint, *core_action_hints, ("esc", "back")],
         [*short_step_hint, *follow_hint, *action_hints, ("esc", "back")],
+        [*bare_scroll_hints, *short_step_hint, *follow_hint, *core_action_hints, ("esc", "")],
         [*short_step_hint, *follow_hint, *core_action_hints, ("esc", "back")],
         [*short_step_hint, *follow_hint, *core_action_hints, ("esc", "")],
         [*follow_hint, *core_action_hints, ("esc", "back")],
