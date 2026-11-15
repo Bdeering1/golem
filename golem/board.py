@@ -33,6 +33,7 @@ MIN_DETAIL_HEIGHT = 20
 TICK_MILLISECONDS = 250
 ESCAPE_DELAY_MILLISECONDS = 25
 FLASH_SECONDS = 4
+CHANGE_HIGHLIGHT_SECONDS = 10
 ACTIVITY_TAIL_BYTES = 16384
 ACTIVITY_LINE_COUNT = 200
 INTERRUPTED_EXIT_STATUS = 130
@@ -174,6 +175,7 @@ class FrameContext(NamedTuple):
     snapshot: BoardSnapshot
     glyphs: Glyphs
     now: datetime
+    changed_task_ids: frozenset[str] = frozenset()
 
 
 class BoardLayout(NamedTuple):
@@ -285,6 +287,7 @@ class BoardState:
     flash_until: float = 0.0
     filter_text: str = ""
     is_filtering: bool = False
+    changed_until: dict[str, float] = field(default_factory=dict[str, float])
 
 
 def recent_activity(session_id: str) -> list[str]:
@@ -492,7 +495,7 @@ def row_reason(row: display.ListRow, snapshot: BoardSnapshot) -> str:
 
 
 def card_detail(row: display.ListRow, context: FrameContext) -> str:
-    snapshot, glyphs, now = context
+    snapshot, glyphs, now, _ = context
     activity = snapshot.activity.get(row.task_id)
     detail = activity_text(activity[-1], glyphs) if activity else row_reason(row, snapshot)
     detail = detail or Path(row.directory).name
@@ -524,7 +527,7 @@ def card_segments(
     *,
     is_selected: bool,
 ) -> list[Segment]:
-    snapshot, glyphs, now = context
+    snapshot, glyphs, now, changed_task_ids = context
     color = display.STATUS_COLORS[row.status]
     right_parts: list[Part] = [(row.step, STYLE_DIM, None)] if row.step else []
     if is_new_for_review(snapshot, row):
@@ -541,9 +544,10 @@ def card_segments(
             Segment(y, x, first_line, STYLE_SELECTED, color),
             Segment(y + 1, x, f"{' ' * CARD_INDENT}{detail}".ljust(width), STYLE_SELECTED, color),
         ]
+    title_color = color if row.task_id in changed_task_ids else None
     return [
         Segment(y, x, mark, STYLE_BOLD, color),
-        Segment(y, x + CARD_INDENT, title, STYLE_BOLD),
+        Segment(y, x + CARD_INDENT, title, STYLE_BOLD, title_color),
         *part_segments(y, x + width - parts_width(right_parts), right_parts),
         Segment(y + 1, x + CARD_INDENT, detail, STYLE_DIM),
     ]
@@ -761,7 +765,7 @@ def detail_segments(
     row: display.ListRow | None,
     context: FrameContext,
 ) -> list[Segment]:
-    snapshot, glyphs, now = context
+    snapshot, glyphs, now, _ = context
     line_width = width - 1
     lines: list[list[Part]] = [[("No task selected", STYLE_DIM, None)]]
     if row is not None:
@@ -1024,7 +1028,10 @@ def board_view_segments(
     if layout.fit_count < len(columns):
         segments += tab_segments(TITLE_LINE_COUNT, width, columns, layout, state, glyphs)
     body_bottom = layout.body_top + layout.body_height
-    context = FrameContext(snapshot, glyphs, now)
+    changed_task_ids = frozenset(
+        task_id for task_id, until in state.changed_until.items() if until > time.monotonic()
+    )
+    context = FrameContext(snapshot, glyphs, now, changed_task_ids)
     for offset in range(layout.fit_count):
         column_index = state.first_column_index + offset
         segments += [
@@ -1539,6 +1546,18 @@ def is_quit_key(state: BoardState, key: int) -> bool:
     return state.view == VIEW_BOARD and is_idle and key == ord("q")
 
 
+def row_positions(snapshot: BoardSnapshot) -> dict[str, tuple[str | None, str]]:
+    return {row.task_id: (row.column, row.status) for row in snapshot.unfiltered_rows}
+
+
+def mark_changed_tasks(state: BoardState, previous: BoardSnapshot, current: BoardSnapshot) -> None:
+    previous_positions = row_positions(previous)
+    until = time.monotonic() + CHANGE_HIGHLIGHT_SECONDS
+    for task_id, position in row_positions(current).items():
+        if previous_positions.get(task_id) != position:
+            state.changed_until[task_id] = until
+
+
 def board_loop(screen: curses.window, *, is_color: bool, glyphs: Glyphs) -> int:
     task_ledger_path = ledger.ledger_path()
     state = BoardState()
@@ -1550,9 +1569,12 @@ def board_loop(screen: curses.window, *, is_color: bool, glyphs: Glyphs) -> int:
         source_key = (file_stat(task_ledger_path), progress_stats(snapshot), now.date())
         if source_key != shown_source_key:
             is_first_load = shown_source_key is None and not snapshot.unfiltered_rows
+            previous_snapshot = snapshot
             snapshot = board_snapshot(ledger.load_tasks(), now)
             if is_first_load:
                 state.focus_index = attention_column_index(snapshot.rows)
+            else:
+                mark_changed_tasks(state, previous_snapshot, snapshot)
             shown_source_key = (source_key[0], progress_stats(snapshot), now.date())
         if screen.getmaxyx() != shown_size:
             shown_size = screen.getmaxyx()
