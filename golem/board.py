@@ -653,7 +653,11 @@ def fitted_words(text: str, width: int, glyphs: Glyphs) -> str:
     is_label_kept = not head[:word_end].endswith(":")
     if is_word_cut and is_label_kept and word_end > 0 and len(head) - word_end <= MAX_WORD_SNAP:
         head = head[:word_end]
-    return head.rstrip(f" ,:{glyphs.separator}") + glyphs.ellipsis
+    head = head.rstrip(f" ,:{glyphs.separator}")
+    last_word_start = head.rfind(" ") + 1
+    if last_word_start and head[last_word_start:].isdigit():
+        head = head[:last_word_start].rstrip(f" ,:{glyphs.separator}")
+    return head + glyphs.ellipsis
 
 
 def fitted_task_id(task_id: str, width: int, glyphs: Glyphs) -> str:
@@ -1468,8 +1472,12 @@ def detail_title_segments(
             (f" {short_when or label} ", STYLE_DIM, None),
         ],
     ]
-    if when and not when.endswith(" ago") and when != short_when:
-        right_options[-1] = [(status_text[:2], STYLE_PLAIN, color), (f" {when} ", STYLE_DIM, None)]
+    full_when = when.removesuffix(" ago")
+    if full_when != short_when:
+        right_options[-1] = [
+            (status_text[:2], STYLE_PLAIN, color),
+            (f" {full_when} ", STYLE_DIM, None),
+        ]
     title_width = len(row.task_id) + 2 if is_id_shown else 0
     right_parts = next(
         (
@@ -1516,14 +1524,18 @@ def detail_meta_text(row: display.ListRow, width: int, task: ledger.Task, glyphs
 
 
 def activity_lines(activity: list[str], width: int, row_count: int, glyphs: Glyphs) -> list[str]:
-    lines: list[str] = []
-    for entry in reversed(activity):
-        text = activity_text(entry, glyphs)
+    texts = [activity_text(entry, glyphs) for entry in activity]
+    wrapped_lines: list[str] = []
+    shown_count = 0
+    for text in reversed(texts):
         entry_lines = paragraph_lines(text, width)
-        if lines and len(lines) + len(entry_lines) > row_count:
-            entry_lines = [fitted(text, width, glyphs)]
-        lines = [*entry_lines, *lines]
-    return lines
+        if len(wrapped_lines) + len(entry_lines) > row_count:
+            break
+        wrapped_lines = [*entry_lines, *wrapped_lines]
+        shown_count += 1
+    if shown_count == len(texts) or shown_count > 1:
+        return wrapped_lines
+    return [fitted(text, width, glyphs) for text in texts]
 
 
 def detail_lines(
@@ -2165,7 +2177,11 @@ def task_view_lines(
     for title, text, style, hanging_indent in sections:
         if not text.strip():
             continue
-        title_line: list[Part] = [(title, STYLE_BOLD, None)]
+        title_line: list[Part] = [
+            (f"{glyphs.horizontal} ", STYLE_PLAIN, FAINT_COLOR),
+            (title, STYLE_BOLD, None),
+            (f" {glyphs.horizontal * (width - len(title) - 3)}", STYLE_PLAIN, FAINT_COLOR),
+        ]
         lines += [[], title_line, *wrapped_lines(text, width, style, hanging_indent)]
     return lines
 
