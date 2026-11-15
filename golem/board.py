@@ -63,7 +63,7 @@ TERMINFO_SOURCE_NAME = "terminal.terminfo"
 BOARD_TITLE = "golem"
 NOT_A_TERMINAL_MESSAGE = "golem: board needs a terminal; use golem list"
 HELP_CLOSE_HINT = " esc closes "
-MIN_CARD_REASON_WIDTH = 8
+MIN_CARD_REASON_WIDTH = 10
 CONFIRM_ANSWER_TEXT = " yes  any other key: no"
 CONFIRM_SHORT_ANSWER_TEXT = "/N"
 HELP_SECTION_GAP = 4
@@ -610,7 +610,7 @@ def selected_row(snapshot: BoardSnapshot, state: BoardState) -> display.ListRow 
 def fitted(text: str, width: int, glyphs: Glyphs) -> str:
     if len(text) <= width:
         return text
-    return text[: max(0, width - 1)] + glyphs.ellipsis
+    return text[: max(0, width - 1)].rstrip() + glyphs.ellipsis
 
 
 def fitted_words(text: str, width: int, glyphs: Glyphs) -> str:
@@ -761,7 +761,7 @@ def card_detail(
     separator = f" {glyphs.separator} "
     timed_facts = separator.join(part for part in (time_text, repository) if part)
     if not reason:
-        return timed_facts
+        return timed_facts if len(timed_facts) <= width else time_text
     if not is_live:
         options = [
             separator.join(part for part in parts if part)
@@ -772,13 +772,15 @@ def card_detail(
                 (time_text, short_reason),
             )
         ]
-        candidates = options if is_time_kept else [*options, short_reason]
-        return next((option for option in candidates if len(option) <= width), options[-1])
+        if not is_time_kept:
+            options.append(short_reason)
+        return next((option for option in options if len(option) <= width), options[-1])
     if not timed_facts:
         return reason
-    if width - len(timed_facts) - len(separator) < MIN_CARD_REASON_WIDTH:
+    reason_width = width - len(timed_facts) - len(separator)
+    if reason_width < MIN_CARD_REASON_WIDTH:
         return timed_facts if len(timed_facts) <= width else time_text
-    return f"{timed_facts}{separator}{reason}"
+    return f"{timed_facts}{separator}{fitted(reason, reason_width, glyphs)}"
 
 
 def is_stuck(row: display.ListRow, task: ledger.Task, now: datetime) -> bool:
@@ -1249,8 +1251,9 @@ def title_segments(
     right_color = BOARD_COLUMNS[1].color if state.filter_text else None
     title_parts: list[Part] = [(BOARD_TITLE, STYLE_BOLD, None)]
     summaries = summary_options(snapshot, glyphs, now)
-    options = [(option, right_text) for option in summaries]
-    options += [(option, "") for option in summaries]
+    options = [(option, right_text) for option in summaries[:-1]]
+    options += [(option, "") for option in summaries[:-1]]
+    options += [(summaries[-1], right_text), (summaries[-1], "")]
     summary, right_text = next(
         (
             (option, shown_right_text)
@@ -1287,13 +1290,15 @@ def detail_segments(
     lines: list[tuple[str, str]] = []
     if row is not None:
         lines = detail_lines(row, text_width, line_count, context.snapshot, context.glyphs)
-    if row is not None and not is_id_in_rule(row.task_id, line_width):
+    is_id_in_title = row is not None and is_id_in_rule(row.task_id, line_width)
+    if row is not None and not is_id_in_title:
         id_lines = textwrap.wrap(row.task_id, text_width)
-        if len(id_lines) + len(lines) > line_count:
+        is_id_in_title = len(id_lines) + len(lines) > line_count
+        if is_id_in_title:
             id_lines = []
         lines = [*((line, STYLE_BOLD) for line in id_lines), *lines][:line_count]
     rule_y = footer_y - 1 - max(1, len(lines))
-    segments = detail_title_segments(rule_y, line_width, row, context)
+    segments = detail_title_segments(rule_y, line_width, row, context, is_id_shown=is_id_in_title)
     for line_offset, (text, style) in enumerate(lines, start=1):
         segments.append(Segment(rule_y + line_offset, CARD_INDENT, text, style))
     return segments
@@ -1304,7 +1309,12 @@ def is_id_in_rule(task_id: str, line_width: int) -> bool:
 
 
 def detail_title_segments(
-    rule_y: int, line_width: int, row: display.ListRow | None, context: FrameContext
+    rule_y: int,
+    line_width: int,
+    row: display.ListRow | None,
+    context: FrameContext,
+    *,
+    is_id_shown: bool,
 ) -> list[Segment]:
     snapshot, glyphs, now = context.snapshot, context.glyphs, context.now
     rule = glyphs.horizontal
@@ -1321,7 +1331,6 @@ def detail_title_segments(
         [(f"{status_text} ", STYLE_PLAIN, color)],
         [(f"{status_text[:2]} ", STYLE_PLAIN, color)],
     ]
-    is_id_shown = is_id_in_rule(row.task_id, line_width)
     title_width = len(row.task_id) + 2 if is_id_shown else 0
     right_parts = next(
         (
@@ -2061,6 +2070,8 @@ def help_sections(glyphs: Glyphs) -> list[tuple[str, list[tuple[str, str]]]]:
                 (glyphs.status_marks[ledger.STATUS_FAILED], "failed"),
                 (glyphs.status_marks[ledger.STATUS_FINISHED], "finished"),
                 (glyphs.new_mark, "new, not picked up yet"),
+                ("1/2", "step in its chain"),
+                ("stuck", "overdue, still waiting"),
             ],
         ),
     ]
