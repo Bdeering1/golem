@@ -55,11 +55,8 @@ def selected_text(tasks, state, width=WIDE_WIDTH, height=HEIGHT):
 def board_and_detail_lines(tasks, width=WIDE_WIDTH, height=HEIGHT, state=None):
     state = state or board.BoardState()
     lines = frame_lines(tasks, width, height, state)
-    snapshot = board.board_snapshot(tasks, NOW)
-    detail_top = (
-        height - 1 - board.snapshot_layout(snapshot, width, height, state).detail_line_count
-    )
-    return lines[: detail_top - 1], lines[detail_top - 1 : -1]
+    rule_y = max(y for y, line in enumerate(lines) if line.startswith(("─ ", "- ")))
+    return lines[:rule_y], lines[rule_y:-1]
 
 
 def frame_text(tasks, width=WIDE_WIDTH, height=HEIGHT, state=None):
@@ -541,3 +538,20 @@ def test_board_outlines_cards_that_fit_and_packs_crowded_columns():
     assert layout.card_styles[0].is_boxed
     assert layout.card_styles[1] == board.DENSE_CARD
     assert layout.visible_card_count(1, 20) < 20
+
+
+@pytest.mark.parametrize(
+    ("narrow_keys", "wide_width"), [("", WIDE_WIDTH), ("aa", NARROW_WIDTH), ("aa", WIDE_WIDTH)]
+)
+def test_board_redraws_after_its_columns_scroll_back_into_view(narrow_keys, wide_width):
+    state = board.BoardState(focus_index=2)
+    frame_lines(statuses_tasks(), NARROW_WIDTH, HEIGHT, state)
+    for key in narrow_keys:
+        board.apply_key(state, ord(key))
+        frame_lines(
+            statuses_tasks(), NARROW_WIDTH if key == narrow_keys[0] else wide_width, HEIGHT, state
+        )
+
+    lines = frame_lines(statuses_tasks(), wide_width, HEIGHT, state)
+
+    assert "Review" in "\n".join(lines)

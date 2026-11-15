@@ -35,6 +35,8 @@ TALL_HEIGHT = 30
 DETAIL_LINE_COUNT = 3
 TALL_DETAIL_LINE_COUNT = 4
 MAX_DETAIL_LINE_COUNT = 6
+PRIMARY_LINE_COUNT = 2
+MARK_ONLY_WIDTH = 3
 DAYS_PER_YEAR = 365
 MIN_DETAIL_HEIGHT = 20
 MIN_SUMMARY_HEIGHT = 14
@@ -104,6 +106,7 @@ PAGE_DOWN_KEYS = {curses.KEY_NPAGE, CONTROL_D, ord(" ")}
 PAGE_UP_KEYS = {curses.KEY_PPAGE, CONTROL_U}
 BACKSPACE_KEYS = {curses.KEY_BACKSPACE, 127, 8}
 BACK_KEYS = {ESCAPE_KEY, ord("q"), *BACKSPACE_KEYS, *ENTER_KEYS}
+DISMISS_KEYS = {ESCAPE_KEY, ord("n"), ord("N"), ord("q"), *ENTER_KEYS}
 FILTER_KEY = ord("/")
 PRINTABLE_KEYS = range(32, 127)
 ACTION_KEYS = {
@@ -152,6 +155,7 @@ EMPTY_COLUMN_TEXTS = {
 }
 NO_MATCHES_TEXT = "No matches"
 GATE_CHECK_TEXT = "rechecking the gate…"
+NO_CHANGE_TEXT = "No change"
 THREAD_STATE_TEXTS = {"thread unsettled": "thread open, no PR"}
 EMPTY_BOARD_LINES = ("No tasks yet", "Queue one with", 'golem run <id> "<prompt>"')
 UNAVAILABLE_ACTION_TEXTS = {
@@ -494,6 +498,7 @@ def board_layout(
 ) -> BoardLayout:
     column_count = len(column_sizes)
     fit_count = min(column_count, max(1, (width + COLUMN_GAP) // (MIN_COLUMN_WIDTH + COLUMN_GAP)))
+    first_index = min(first_index, column_count - fit_count)
     spans = column_spans(width, fit_count, column_count, first_index, focus_index)
     spacer_row_count = 1 if height >= SPACED_HEIGHT else 0
     header_y = TAB_LINE_Y + spacer_row_count
@@ -504,7 +509,7 @@ def board_layout(
     body_height = footer_y - detail_height - body_top
     can_box = min(span_width for _, span_width in spans) >= MIN_BOXED_CARD_WIDTH
     styles = tuple(card_style(size, body_height, can_box=can_box) for size in column_sizes)
-    if line_count >= DETAIL_LINE_COUNT:
+    if line_count:
         shown_indices = range(first_index, first_index + fit_count)
         used_height = max(
             min(body_height, column_sizes[index] * styles[index].pitch) for index in shown_indices
@@ -707,6 +712,7 @@ def card_detail(
             separator.join(part for part in parts if part)
             for parts in (
                 (time_text, reason, repository),
+                (time_text, short_reason, repository),
                 (time_text, reason),
                 (time_text, short_reason),
             )
@@ -926,7 +932,7 @@ def column_segments(
         segments += draw_card(card_y, x, column_width, row, context, is_selected=is_selected)
     hidden_count = len(column_rows) - scroll_offset - len(shown_rows)
     if hidden_count > 0:
-        marker_y = layout.body_top + layout.body_height - 1
+        marker_y = layout.body_top + len(shown_rows) * style.pitch - (style.pitch - style.height)
         more_text = f"{glyphs.down} {hidden_count} more"
         segments.append(Segment(marker_y, x + CARD_INDENT, more_text, STYLE_DIM))
     return segments
@@ -997,22 +1003,33 @@ def hidden_side_options(
     is_left: bool,
 ) -> list[list[Part]]:
     options: list[list[Part]] = []
-    counted_shapes = [(shown_count, True) for shown_count in range(len(hidden_columns), 0, -1)]
-    counted_shapes += [(shown_count, False) for shown_count in range(len(hidden_columns), -1, -1)]
-    for shown_count, is_counted in counted_shapes:
-        folded_count = len(hidden_columns) - shown_count
-        shown_columns = hidden_columns[folded_count:] if is_left else hidden_columns[:shown_count]
+    nearest_first = hidden_columns[::-1] if is_left else hidden_columns
+    column_count = len(nearest_first)
+    shapes = [
+        (folded_count, is_farthest_named)
+        for folded_count in range(column_count + 1)
+        for is_farthest_named in (False, True)
+        if folded_count < column_count or not is_farthest_named
+    ]
+    for folded_count, is_farthest_named in shapes:
+        shown_columns = nearest_first[: column_count - folded_count]
         labels: list[list[Part]] = [
             [
                 (board_column.title, STYLE_PLAIN, board_column.color),
-                (f" {len(column_rows)}" if is_counted else "", STYLE_DIM, None),
+                (
+                    ""
+                    if is_farthest_named and index == len(shown_columns) - 1
+                    else f" {len(column_rows)}",
+                    STYLE_DIM,
+                    None,
+                ),
             ]
-            for board_column, column_rows in shown_columns
+            for index, (board_column, column_rows) in enumerate(shown_columns)
         ]
         folded: list[list[Part]] = [[(f"+{folded_count}", STYLE_DIM, None)]] if folded_count else []
         if is_left:
             left_arrow: list[Part] = [(glyphs.left, STYLE_DIM, None)]
-            options.append(joined_parts([left_arrow, *folded, *labels], 0))
+            options.append(joined_parts([left_arrow, *folded, *labels[::-1]], 0))
         else:
             right_arrow: list[Part] = [(glyphs.right, STYLE_DIM, None)]
             right_tokens = [*labels, *folded, right_arrow]
@@ -1045,9 +1062,8 @@ def tab_segments(
         parts_width(left_options[left_index])
         + (2 if left_options[left_index] and middle_width else 0)
         + middle_width
-        + parts_width(right_options[right_index])
-        + 2
-        >= width
+        + (parts_width(right_options[right_index]) + 2 if right_options[right_index] else 0)
+        > width
     ):
         can_shrink_left = left_index < len(left_options) - 1
         can_shrink_right = right_index < len(right_options) - 1
@@ -1162,30 +1178,36 @@ def detail_segments(
     line_count: int,
     row: display.ListRow | None,
     context: FrameContext,
+    *,
+    min_line_count: int,
 ) -> list[Segment]:
     line_width = width - 1
-    rule_y = footer_y - 1 - line_count
-    segments, is_id_shown = detail_title_segments(rule_y, line_width, row, context)
-    if row is None:
-        return segments
     text_width = line_width - CARD_INDENT
-    lines = detail_lines(row, text_width, line_count, context.snapshot, context.glyphs)
-    if not is_id_shown:
+    lines: list[tuple[str, str]] = []
+    if row is not None:
+        lines = detail_lines(row, text_width, line_count, context.snapshot, context.glyphs)
+    if row is not None and not is_id_in_rule(row.task_id, line_width):
         id_lines = [(line, STYLE_BOLD) for line in textwrap.wrap(row.task_id, text_width)]
         lines = [*id_lines, *lines][:line_count]
+    rule_y = footer_y - 1 - max(min_line_count, len(lines))
+    segments = detail_title_segments(rule_y, line_width, row, context)
     for line_offset, (text, style) in enumerate(lines, start=1):
         segments.append(Segment(rule_y + line_offset, CARD_INDENT, text, style))
     return segments
 
 
+def is_id_in_rule(task_id: str, line_width: int) -> bool:
+    return CARD_INDENT + len(task_id) + 2 + MARK_ONLY_WIDTH + 2 <= line_width
+
+
 def detail_title_segments(
     rule_y: int, line_width: int, row: display.ListRow | None, context: FrameContext
-) -> tuple[list[Segment], bool]:
+) -> list[Segment]:
     snapshot, glyphs, now = context.snapshot, context.glyphs, context.now
     rule = glyphs.horizontal
     segments = [Segment(rule_y, 0, rule * line_width, color=FAINT_COLOR)]
     if row is None:
-        return [*segments, Segment(rule_y, CARD_INDENT, " No task selected ", STYLE_DIM)], True
+        return [*segments, Segment(rule_y, CARD_INDENT, " No task selected ", STYLE_DIM)]
     task = snapshot.tasks[row.task_id]
     color, _ = card_colors(row, context, is_selected=True)
     status_text = f" {status_mark(row.status, glyphs, now)} {row.status}"
@@ -1198,9 +1220,7 @@ def detail_title_segments(
         [(f"{status_text} ", STYLE_PLAIN, color)],
         [(f"{status_text[:2]} ", STYLE_PLAIN, color)],
     ]
-    is_id_shown = (
-        CARD_INDENT + len(row.task_id) + 2 + parts_width(right_options[-1]) + 2 <= line_width
-    )
+    is_id_shown = is_id_in_rule(row.task_id, line_width)
     title_width = len(row.task_id) + 2 if is_id_shown else 0
     right_parts = next(
         (
@@ -1217,7 +1237,7 @@ def detail_title_segments(
     right_x = line_width - 1 - parts_width(right_parts)
     if is_id_shown:
         segments += part_segments(rule_y, CARD_INDENT - 1, title_parts)
-    return [*segments, *part_segments(rule_y, right_x, right_parts)], is_id_shown
+    return [*segments, *part_segments(rule_y, right_x, right_parts)]
 
 
 def paragraph_lines(text: str, width: int) -> list[str]:
@@ -1259,24 +1279,26 @@ def detail_lines(
     reason = detail_reason_text(row, snapshot)
     primary_lines = paragraph_lines(reason, wrap_width)
     prompt_lines = paragraph_lines(" ".join(task.get("prompt", "").split()), wrap_width)
-    meta_lines = (
-        [detail_meta_text(row, width, task, glyphs)] if line_count >= DETAIL_LINE_COUNT else []
-    )
-    prompt_reserve = 1 if prompt_lines and line_count > 1 else 0
-    primary_count = max(1, line_count - len(meta_lines) - prompt_reserve)
-    if len(primary_lines) > primary_count:
+    if len(primary_lines) > PRIMARY_LINE_COUNT:
         short_reason = EXIT_PREFIX_PATTERN.sub("", reason)
         primary_lines = paragraph_lines(
             f" {glyphs.separator} ".join(short_reason.splitlines()), wrap_width
         )
     if activity:
-        shown_primary = [
-            fitted(activity_text(line, glyphs), width, glyphs) for line in activity[-primary_count:]
-        ]
+        primary_lines = [fitted(activity_text(line, glyphs), width, glyphs) for line in activity]
+    primary_count = min(len(primary_lines), PRIMARY_LINE_COUNT, line_count)
+    prompt_count = min(len(prompt_lines), 1, line_count - primary_count)
+    meta_count = min(1, line_count - primary_count - prompt_count)
+    spare_count = line_count - primary_count - prompt_count - meta_count
+    extra_primary_count = min(len(primary_lines) - primary_count, spare_count)
+    primary_count += extra_primary_count
+    prompt_count += spare_count - extra_primary_count
+    if activity:
+        shown_primary = primary_lines[len(primary_lines) - primary_count :]
     else:
         shown_primary = clipped_lines(primary_lines, primary_count, width, glyphs)
-    prompt_count = line_count - len(meta_lines) - len(shown_primary)
     shown_prompt = clipped_lines(prompt_lines, prompt_count, width, glyphs)
+    meta_lines = [detail_meta_text(row, width, task, glyphs)][:meta_count]
     lines = [
         *((line, STYLE_PLAIN) for line in shown_primary),
         *((line, STYLE_DIM) for line in shown_prompt),
@@ -1503,6 +1525,7 @@ def narrow_footer_segments(
             quit_hint,
         ],
         [move_hint, ("/", "filter"), done_hint(state), help_hint, quit_hint],
+        [(move_hint[0], ""), ("/", "filter"), ("a", "done"), help_hint, quit_hint],
         [move_hint, ("/", "filter"), help_hint, quit_hint],
         [("/", "filter"), done_hint(state), help_hint, quit_hint],
         [move_hint, help_hint, quit_hint],
@@ -1652,7 +1675,14 @@ def board_view_segments(
         segments += empty_board_segments(layout, width, state)
     row = selected_row(snapshot, state)
     if layout.detail_line_count and snapshot.rows:
-        segments += detail_segments(layout.footer_y, width, layout.detail_line_count, row, context)
+        segments += detail_segments(
+            layout.footer_y,
+            width,
+            layout.detail_line_count,
+            row,
+            context,
+            min_line_count=detail_line_count(height),
+        )
     if layout.fit_count == 1:
         return segments + narrow_footer_segments(
             layout.footer_y, width, state, snapshot, row, glyphs
@@ -1707,6 +1737,7 @@ def task_fields(
         ("Directory", display.display_directory(row.directory)),
         ("Worktree", display.display_directory(task.get("worktree", ""))),
         ("Backend", task["backend"]),
+        ("Session", task.get("session_id", "")),
         ("Due", moment_text(due_at, now)),
         ("Started", moment_text(task.get("started_at"), now)),
         (
@@ -1841,7 +1872,8 @@ def help_sections(glyphs: Glyphs) -> list[tuple[str, list[tuple[str, str]]]]:
                 (f"{glyphs.left}{glyphs.right} h l Tab", "switch column"),
                 (f"{glyphs.up}{glyphs.down} j k", "select task"),
                 ("g G", "first, last"),
-                ("PgUp PgDn Space", "page"),
+                ("PgUp PgDn", "page"),
+                ("Space", "page down"),
                 ("1-4", "jump to column"),
             ],
         ),
@@ -1877,7 +1909,7 @@ def help_sections(glyphs: Glyphs) -> list[tuple[str, list[tuple[str, str]]]]:
                 (glyphs.status_marks[ledger.STATUS_BLOCKED], "blocked by its gate"),
                 (glyphs.status_marks[ledger.STATUS_FAILED], "failed"),
                 (glyphs.status_marks[ledger.STATUS_FINISHED], "finished"),
-                (glyphs.new_mark, "not opened yet"),
+                (glyphs.new_mark, "new, not opened yet"),
             ],
         ),
     ]
@@ -1976,9 +2008,15 @@ def help_view_segments(width: int, height: int, glyphs: Glyphs, state: BoardStat
                     Segment(first_row_y + offset, x, key, STYLE_BOLD, BOARD_COLUMNS[1].color)
                 )
                 continue
+            label_width = left + box_width - 2 - x - key_width
             segments += [
                 Segment(first_row_y + offset, x, key, STYLE_BOLD),
-                Segment(first_row_y + offset, x + key_width, label, STYLE_PLAIN),
+                Segment(
+                    first_row_y + offset,
+                    x + key_width,
+                    fitted(label, label_width, glyphs),
+                    STYLE_PLAIN,
+                ),
             ]
     return segments
 
@@ -2319,7 +2357,10 @@ def handle_action_key(
         action, state.pending_action = state.pending_action, None
         if key == ord("y") and row is not None:
             run_action(screen, state, snapshot, action, row)
-        return True
+            return True
+        flash(state, NO_CHANGE_TEXT)
+        if key in DISMISS_KEYS:
+            return True
     key_actions = [action for action, char in ACTION_KEYS.items() if ord(char) == key]
     if not key_actions or row is None:
         return False
