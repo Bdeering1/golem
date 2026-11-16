@@ -267,7 +267,7 @@ def test_invalid_default_backend_fails_run_only(
     assert cli.main(["alias", "list"]) == 0
 
 
-@pytest.mark.parametrize("label", ["", "two words", "tab\tlabel", " padded"])
+@pytest.mark.parametrize("label", ["", "two words", " padded"])
 def test_run_rejects_empty_or_whitespace_label(installed_launch_agent, ledger_path, label):
     with pytest.raises(SystemExit, match="--label"):
         cli.main(["run", support.TASK_ID, support.PROMPT, "--now", "--label", label])

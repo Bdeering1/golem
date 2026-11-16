@@ -195,8 +195,6 @@ def run_task_from_arguments(arguments: ledger.Arguments) -> int:
         raise SystemExit(f"golem: --env does not support {backend.NAME} tasks")
     if arguments.label is not None and arguments.label.split() != [arguments.label]:
         raise SystemExit("golem: --label must be non-empty and contain no whitespace")
-    if isinstance(arguments.after, str):
-        arguments.after = task_lookup.resolved_task_id(arguments.after)
     launch_agent.require_launch_agent()
     task_id = task_id_from_arguments(arguments)
     prompt_text = (
@@ -204,6 +202,8 @@ def run_task_from_arguments(arguments: ledger.Arguments) -> int:
     )
     if prompt_text is None:
         raise SystemExit("golem: a prompt is required")
+    if isinstance(arguments.after, str):
+        arguments.after = task_lookup.resolved_task_id(arguments.after)
     task_args = tuple(arguments.agent_args)
     placement = scheduling.RunPlacement(
         str(Path.cwd()),

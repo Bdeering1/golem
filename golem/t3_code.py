@@ -326,9 +326,9 @@ def worktree_and_branch(task: ledger.Task, root: str) -> tuple[str | None, str |
 
 
 def thread_title(task_id: str, task: ledger.Task, thread_id: str) -> str:
-    if "label" in task:
-        return ledger.task_name(task_id, task)
-    return (task["prompt"].strip().splitlines() or [thread_id])[0]
+    if task.get("label") is None:
+        return (task["prompt"].strip().splitlines() or [thread_id])[0]
+    return ledger.task_name(task_id, task)
 
 
 def thread_create_command(

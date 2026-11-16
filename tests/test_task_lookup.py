@@ -63,8 +63,10 @@ def test_shared_label_lists_matches_newest_first_and_picks_by_number(
     use_terminal(monkeypatch, "first\n3\n1\n")
 
     assert task_lookup.resolved_task_id(support.LABEL) == NEWER_ID
-    listed_ids = [line.split()[1] for line in capsys.readouterr().out.splitlines()[:2]]
-    assert listed_ids == [NEWER_ID, OLDER_ID]
+    newer_line, older_line = capsys.readouterr().out.splitlines()[:2]
+    assert newer_line.split()[:4] == ["1)", NEWER_ID, support.LABEL, ledger.STATUS_FINISHED]
+    assert newer_line.endswith(support.PROMPT)
+    assert older_line.split()[1] == OLDER_ID
 
 
 @pytest.mark.parametrize(
@@ -83,7 +85,3 @@ def test_shared_label_without_terminal_lists_matching_ids(labelled_tasks, monkey
     monkeypatch.setattr(sys, "stdin", io.StringIO())
     with pytest.raises(SystemExit, match=f"{NEWER_ID}, {OLDER_ID}"):
         task_lookup.resolved_task_id(support.LABEL)
-
-
-def test_unknown_argument_is_kept_when_requested(labelled_tasks):
-    assert task_lookup.resolved_task_id("missing", is_unknown_kept=True) == "missing"

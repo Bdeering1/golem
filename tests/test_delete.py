@@ -35,6 +35,17 @@ def test_delete_refuses_unknown_task():
         cli.main(["delete", support.TASK_ID])
 
 
+def test_delete_by_label_reports_every_missing_id(ledger_path):
+    support.write_task(ledger_path, ledger.STATUS_FINISHED, label=support.LABEL)
+
+    with pytest.raises(SystemExit) as error:
+        cli.main(["delete", support.LABEL, "first", "second"])
+
+    assert str(error.value) == "golem: task not found: first\ngolem: task not found: second"
+
+    assert support.TASK_ID in ledger.load_tasks()
+
+
 def test_delete_refuses_and_lists_dependents(ledger_path):
     support.write_tasks(
         ledger_path,

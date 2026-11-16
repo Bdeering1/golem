@@ -244,10 +244,11 @@ def list_rows(tasks: ledger.Tasks, today: date) -> list[ListRow]:
         shown_task = tasks[shown_id]
         column, chain_reason = chain_column(tasks, chain_ids, today)
         step_count = max(chains.task_depth(tasks, chain_id) for chain_id in chain_ids)
+        root_id = min(chain_ids, key=lambda chain_id: chains.task_depth(tasks, chain_id))
         rows.append(
             ListRow(
                 shown_id,
-                shown_task.get("label", ""),
+                tasks[root_id].get("label", ""),
                 f"{chains.task_depth(tasks, shown_id)}/{step_count}" if len(chain_ids) > 1 else "",
                 shown_task["status"],
                 shown_task["cwd"],

@@ -309,6 +309,24 @@ def test_list_shows_label_column_after_id(ledger_path, capsys):
     assert unlabelled.split()[:2] == [support.SIBLING_ID, ledger.STATUS_RUNNING]
 
 
+def test_list_shows_the_chain_label_on_a_follow_up_step(ledger_path, capsys):
+    support.write_tasks(
+        ledger_path,
+        {
+            support.PARENT_ID: support.task_record(
+                ledger.STATUS_FINISHED, task_id=support.PARENT_ID, label=support.LABEL
+            ),
+            support.CHILD_ID: support.task_record(
+                ledger.STATUS_RUNNING, task_id=support.CHILD_ID, after=support.PARENT_ID
+            ),
+        },
+    )
+
+    _, row = support.list_output(capsys).splitlines()
+
+    assert row.split()[:2] == [support.CHILD_ID, support.LABEL]
+
+
 @pytest.mark.parametrize(
     ("is_tty", "term", "no_color"),
     [
