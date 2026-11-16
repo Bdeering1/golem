@@ -72,7 +72,7 @@ def pickup(
             print(
                 f"golem: {task_id} continues on the Claude desktop app's sign-in", file=sys.stderr
             )
-        client.prepare(task, conversation_id)
+        client.prepare(task_id, task, conversation_id)
         return open_app_and_record_opening(
             task_id,
             client.command(task, conversation_id, []),

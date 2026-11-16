@@ -109,6 +109,7 @@ def create_thread(
             thread_id,
             t3_code.thread_instance_id(driver, instance),
             arguments.model or t3_code.default_model(driver),
+            task_id=task_id,
             model_options=t3_code.effort_options(driver, arguments.effort),
         ),
     )

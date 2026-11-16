@@ -30,6 +30,8 @@ def test_passing_gate_continues_chain_and_receives_task_as_json(
     parent = support.schedule_gated_chain(
         ledger_path,
         support.gate_command(tmp_path),
+        "--label",
+        support.LABEL,
         then_arguments=("--then", support.GRANDCHILD_ID, support.GRANDCHILD_PROMPT),
     )
     support.write_transcript(parent["session_id"], 0)
@@ -45,10 +47,11 @@ def test_passing_gate_continues_chain_and_receives_task_as_json(
         ledger.STATUS_FINISHED,
     ]
     parent_input, child_input = gate_inputs(tmp_path)
-    assert child_input["task_id"] == support.CHILD_ID
+    assert (child_input["task_id"], child_input["label"]) == (support.CHILD_ID, None)
     assert parent_input == (
         {
             "task_id": support.PARENT_ID,
+            "label": support.LABEL,
             "session_id": parent["session_id"],
             "directory": str(Path.cwd()),
             "started_at": tasks[support.PARENT_ID]["started_at"],

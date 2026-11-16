@@ -1,3 +1,4 @@
+import io
 import json
 import os
 import select
@@ -5,7 +6,7 @@ import shlex
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import cast
+from typing import cast, override
 
 from golem import cli, config, git, ledger, spawn, task_directories
 from golem.backends import claude
@@ -15,6 +16,7 @@ WORK_EMAIL = "work@example.com"
 CREDENTIALS = ".credentials.json"
 TASK_ID = "fix-thing"
 PROMPT = "fix the thing"
+LABEL = "GH-115"
 PARENT_ID = "parent"
 CHILD_ID = "child"
 GRANDCHILD_ID = "grandchild"
@@ -38,6 +40,22 @@ WORKTREE_BRANCH = "worktree"
 DAY_SECONDS = 24 * 60 * 60
 GATE_STOP_REASON = "no pull request yet"
 PARENT_SESSION = f"{PARENT_ID}-session"
+
+
+class TerminalInput(io.StringIO):
+    def __init__(self, answers, on_first_read=lambda: None):
+        super().__init__(answers)
+        self.on_first_read = on_first_read
+
+    @override
+    def isatty(self):
+        return True
+
+    @override
+    def readline(self, size: int = -1) -> str:
+        self.on_first_read()
+        self.on_first_read = lambda: None
+        return super().readline(size)
 
 
 def read_task(ledger_path, task_id=TASK_ID):

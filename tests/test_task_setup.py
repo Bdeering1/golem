@@ -84,6 +84,7 @@ def test_setup_prepares_directory_and_prompt_for_chain(
     assert setup_inputs(tmp_path) == [
         {
             "task_id": support.PARENT_ID,
+            "label": None,
             "session_id": parent["session_id"],
             "directory": str(Path.cwd()),
             "prompt": support.PARENT_PROMPT,

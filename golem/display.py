@@ -19,7 +19,7 @@ STATUS_COLORS = {
 }
 DETAIL_LINE_COLOR = 245
 ANSI_RESET = "\033[0m"
-LIST_HEADERS = ("ID", "STEP", "STATUS", "DIRECTORY", "DETAIL")
+LIST_HEADERS = ("ID", "LABEL", "STEP", "STATUS", "DIRECTORY", "DETAIL")
 DETAIL_LINE_INDENT = "    "
 COLUMN_QUEUED = "Queued"
 COLUMN_RUNNING = "Running"
@@ -42,14 +42,15 @@ DONE_THREAD_STATES = {
 
 class ListRow(NamedTuple):
     task_id: str
+    label: str
     step: str
     status: str
     directory: str
     detail: str
     column: str | None
 
-    def cells(self) -> tuple[str, str, str, str, str]:
-        return (self.task_id, self.step, self.status, self.directory, self.detail)
+    def cells(self) -> tuple[str, str, str, str, str, str]:
+        return (self.task_id, self.label, self.step, self.status, self.directory, self.detail)
 
 
 LIST_STATUS_COLUMN = ListRow._fields.index("status")
@@ -246,6 +247,7 @@ def list_rows(tasks: ledger.Tasks, today: date) -> list[ListRow]:
         rows.append(
             ListRow(
                 shown_id,
+                shown_task.get("label", ""),
                 f"{chains.task_depth(tasks, shown_id)}/{step_count}" if len(chain_ids) > 1 else "",
                 shown_task["status"],
                 shown_task["cwd"],

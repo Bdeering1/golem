@@ -15,6 +15,7 @@ def gate_input_json(task_id: str, task: ledger.Task) -> str:
     return json.dumps(
         {
             "task_id": task_id,
+            "label": task.get("label"),
             "session_id": task["session_id"],
             "directory": ledger.task_directory(task),
             "started_at": task.get("started_at"),

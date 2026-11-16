@@ -109,7 +109,7 @@ def run_claude(
     if VERBOSE_ARGUMENT not in agent_args:
         default_args.append(VERBOSE_ARGUMENT)
     if not common.has_agent_argument(agent_args, NAME_ARGUMENTS):
-        default_args += ["--name", task_id]
+        default_args += ["--name", ledger.task_name(task_id, task)]
     worktree = task.get("worktree")
     is_creating_worktree = worktree is not None and not Path(worktree).is_dir()
     if worktree is not None and is_creating_worktree:

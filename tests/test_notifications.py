@@ -8,19 +8,25 @@ from tests import support
 
 
 @pytest.mark.parametrize(
-    ("exit_code", "title"),
+    ("exit_code", "run_arguments", "title"),
     [
-        pytest.param(0, f"golem: {support.TASK_ID} finished", id="finished"),
-        pytest.param(1, f"golem: {support.TASK_ID} failed", id="failed"),
+        pytest.param(0, [], f"golem: {support.TASK_ID} finished", id="finished"),
+        pytest.param(1, [], f"golem: {support.TASK_ID} failed", id="failed"),
+        pytest.param(
+            0,
+            ["--label", support.LABEL],
+            f"golem: {support.TASK_ID} {support.LABEL} finished",
+            id="labelled",
+        ),
     ],
 )
 def test_finished_task_notifies_with_result(
-    installed_launch_agent, fake_commands, ledger_path, monkeypatch, exit_code, title
+    installed_launch_agent, fake_commands, ledger_path, monkeypatch, exit_code, run_arguments, title
 ):
     result = "finished the task\nwith details"
     monkeypatch.setenv("GOLEM_CLAUDE_EXIT", str(exit_code))
     support.write_claude_output(fake_commands, result)
-    cli.main(["run", support.TASK_ID, support.PROMPT, "--now"])
+    cli.main(["run", support.TASK_ID, support.PROMPT, "--now", *run_arguments])
     task = support.read_task(ledger_path)
 
     assert cli.main(["_execute", support.TASK_ID, task["session_id"]]) == exit_code

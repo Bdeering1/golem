@@ -325,6 +325,12 @@ def worktree_and_branch(task: ledger.Task, root: str) -> tuple[str | None, str |
     return directory, branch or None
 
 
+def thread_title(task_id: str, task: ledger.Task, thread_id: str) -> str:
+    if "label" in task:
+        return ledger.task_name(task_id, task)
+    return (task["prompt"].strip().splitlines() or [thread_id])[0]
+
+
 def thread_create_command(
     origin: str,
     token: str,
@@ -333,6 +339,7 @@ def thread_create_command(
     instance_id: str,
     model: str,
     *,
+    task_id: str,
     model_options: list[ledger.JsonObject] | None = None,
 ) -> ledger.JsonObject:
     root = project_root(task)
@@ -347,7 +354,7 @@ def thread_create_command(
         "commandId": str(uuid.uuid4()),
         "threadId": thread_id,
         "projectId": project_id(origin, token, root),
-        "title": (task["prompt"].strip().splitlines() or [thread_id])[0],
+        "title": thread_title(task_id, task, thread_id),
         "modelSelection": model_selection,
         "runtimeMode": "full-access",
         "interactionMode": "default",
@@ -357,7 +364,11 @@ def thread_create_command(
 
 
 def ensure_thread(
-    task: ledger.Task, conversation_id: str, thread_id: str, instance: ClaudeInstance | None
+    task_id: str,
+    task: ledger.Task,
+    conversation_id: str,
+    thread_id: str,
+    instance: ClaudeInstance | None,
 ) -> None:
     ensure_app_running()
     is_present = is_thread_present(thread_id)
@@ -373,7 +384,13 @@ def ensure_thread(
         return
     driver = INSTANCE_IDS[task["backend"]]
     command = thread_create_command(
-        origin, token, task, thread_id, thread_instance_id(driver, instance), default_model(driver)
+        origin,
+        token,
+        task,
+        thread_id,
+        thread_instance_id(driver, instance),
+        default_model(driver),
+        task_id=task_id,
     )
     command["importedNativeThread"] = {
         "ref": {"driver": driver, "nativeId": conversation_id, "strength": "strong"}
@@ -388,14 +405,14 @@ def version() -> str:
 
 
 def prepare_thread(
-    task: ledger.Task, conversation_id: str, instance: ClaudeInstance | None
+    task_id: str, task: ledger.Task, conversation_id: str, instance: ClaudeInstance | None
 ) -> None:
     cli_path = t3_cli_path()
     if not cli_path.exists():
         raise SystemExit(f"golem: T3 Code is not installed: {cli_path} not found")
     thread_id = task_thread_id(task, conversation_id)
     try:
-        ensure_thread(task, conversation_id, thread_id, instance)
+        ensure_thread(task_id, task, conversation_id, thread_id, instance)
     except T3_CODE_ERRORS as error:
         raise SystemExit(
             f"golem: T3 Code {version()} could not open thread {thread_id}: {error}"

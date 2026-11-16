@@ -26,6 +26,7 @@ from golem import (
     prune,
     review,
     scheduling,
+    task_lookup,
     usage_windows,
     worktree_cleanup,
 )
@@ -162,6 +163,10 @@ def task_id_from_arguments(arguments: ledger.Arguments) -> str:
     return arguments.id
 
 
+def resolved_task_id_from_arguments(arguments: ledger.Arguments) -> str:
+    return task_lookup.resolved_task_id(task_id_from_arguments(arguments))
+
+
 def require_claude_account_backend(backend_id: str, agent_args: list[str]) -> None:
     agent_backend_id = registry.agent_backend_id(backend_id, agent_args)
     if agent_backend_id != ledger.BACKEND_CLAUDE:
@@ -188,6 +193,10 @@ def run_task_from_arguments(arguments: ledger.Arguments) -> int:
     is_t3 = arguments.backend == ledger.BACKEND_T3
     if is_t3 and arguments.env:
         raise SystemExit(f"golem: --env does not support {backend.NAME} tasks")
+    if arguments.label is not None and arguments.label.split() != [arguments.label]:
+        raise SystemExit("golem: --label must be non-empty and contain no whitespace")
+    if isinstance(arguments.after, str):
+        arguments.after = task_lookup.resolved_task_id(arguments.after)
     launch_agent.require_launch_agent()
     task_id = task_id_from_arguments(arguments)
     prompt_text = (
@@ -330,7 +339,7 @@ def add_continue_command(add_parser: Callable[..., argparse.ArgumentParser]) -> 
     set_command_handler(
         continue_command,
         lambda arguments: gates.continue_task(
-            task_id_from_arguments(arguments), is_forced=arguments.force
+            resolved_task_id_from_arguments(arguments), is_forced=arguments.force
         ),
     )
 
@@ -339,7 +348,8 @@ def add_watch_command(add_parser: Callable[..., argparse.ArgumentParser]) -> Non
     watch_command = add_parser("watch")
     watch_command.add_argument("id")
     set_command_handler(
-        watch_command, lambda arguments: progress_log.watch_task(task_id_from_arguments(arguments))
+        watch_command,
+        lambda arguments: progress_log.watch_task(resolved_task_id_from_arguments(arguments)),
     )
 
 
@@ -382,6 +392,7 @@ def add_run_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
     prompt_group = run_command.add_mutually_exclusive_group(required=True)
     prompt_group.add_argument("prompt", nargs="?")
     prompt_group.add_argument("--file")
+    run_command.add_argument("--label", help="label the task; commands accept it in place of ID")
     run_command.add_argument(
         "--then",
         action="append",
@@ -460,7 +471,7 @@ def add_pickup_command(add_parser: Callable[..., argparse.ArgumentParser]) -> No
             review.pickup_all(arguments.client, {} if arguments.client else load_default_clients())
             if arguments.all
             else review.pickup(
-                task_id_from_arguments(arguments),
+                resolved_task_id_from_arguments(arguments),
                 *arguments.agent_args,
                 client_name=arguments.client,
             )
@@ -472,7 +483,7 @@ def add_close_command(add_parser: Callable[..., argparse.ArgumentParser]) -> Non
     close_command = add_parser("close", description="Move a finished chain to done.")
     close_command.add_argument("id")
     set_command_handler(
-        close_command, lambda arguments: review.close(task_id_from_arguments(arguments))
+        close_command, lambda arguments: review.close(resolved_task_id_from_arguments(arguments))
     )
 
 
@@ -480,7 +491,8 @@ def add_show_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None
     show_command = add_parser("show")
     show_command.add_argument("id")
     set_command_handler(
-        show_command, lambda arguments: display.show_task_result(task_id_from_arguments(arguments))
+        show_command,
+        lambda arguments: display.show_task_result(resolved_task_id_from_arguments(arguments)),
     )
 
 
@@ -488,7 +500,8 @@ def add_cancel_command(add_parser: Callable[..., argparse.ArgumentParser]) -> No
     cancel_command = add_parser("cancel")
     cancel_command.add_argument("id")
     set_command_handler(
-        cancel_command, lambda arguments: scheduling.cancel_task(task_id_from_arguments(arguments))
+        cancel_command,
+        lambda arguments: scheduling.cancel_task(resolved_task_id_from_arguments(arguments)),
     )
 
 
@@ -503,7 +516,7 @@ def add_retry_command(add_parser: Callable[..., argparse.ArgumentParser]) -> Non
     set_command_handler(
         retry_command,
         lambda arguments: scheduling.retry_task(
-            task_id_from_arguments(arguments), is_now=arguments.now, at_text=arguments.at
+            resolved_task_id_from_arguments(arguments), is_now=arguments.now, at_text=arguments.at
         ),
     )
 
@@ -519,7 +532,7 @@ def add_reschedule_command(add_parser: Callable[..., argparse.ArgumentParser]) -
     set_command_handler(
         reschedule_command,
         lambda arguments: scheduling.reschedule_task(
-            task_id_from_arguments(arguments), is_now=arguments.now, at_text=arguments.at
+            resolved_task_id_from_arguments(arguments), is_now=arguments.now, at_text=arguments.at
         ),
     )
 
@@ -532,7 +545,7 @@ def add_delete_command(add_parser: Callable[..., argparse.ArgumentParser]) -> No
     set_command_handler(
         delete_command,
         lambda arguments: delete.delete_tasks(
-            arguments.ids,
+            [task_lookup.resolved_task_id(task_id) for task_id in arguments.ids],
             is_chain=arguments.chain,
             is_removing_worktree=arguments.remove_worktree,
         ),
