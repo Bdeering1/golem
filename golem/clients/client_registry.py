@@ -145,6 +145,6 @@ def default_clients(configured: dict[str, str], invalid_config_prefix: str) -> d
 
 
 def task_auto_pickup_client(task: ledger.Task) -> str | None:
-    if "auto_pickup_client" in task:
-        return task["auto_pickup_client"]
-    return CLAUDE_DESKTOP_CLIENT if task.get("auto_pickup") else None
+    if not ledger.has_auto_pickup(task):
+        return None
+    return task.get("auto_pickup_client", CLAUDE_DESKTOP_CLIENT)

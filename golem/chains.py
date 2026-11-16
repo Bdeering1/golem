@@ -70,8 +70,7 @@ def is_dependent_reservable(tasks: ledger.Tasks, parent_id: str) -> bool:
 def add_dependent_records(
     tasks: ledger.Tasks, records: ledger.Tasks, parent_id: str, default_clients: dict[str, str]
 ) -> None:
-    parent = tasks[parent_id]
-    if "auto_pickup_client" in parent or parent.get("auto_pickup"):
+    if ledger.has_auto_pickup(tasks[parent_id]):
         for record in records.values():
             client_name = default_clients.get(record["backend"])
             if client_name is not None:
