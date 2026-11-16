@@ -30,7 +30,7 @@ COLUMN_GAP = 2
 RAIL_WIDTH = 1
 CARD_INDENT = 2
 BOX_BORDER_WIDTH = 4
-MIN_BOXED_CARD_WIDTH = 30
+MIN_BOXED_CARD_WIDTH = 25
 TAB_LINE_Y = 1
 SPACED_HEIGHT = 24
 DETAIL_LINE_COUNT = 3
@@ -336,12 +336,17 @@ type Part = tuple[str, str, int | None]
 BOXED_CARD = CardStyle(height=4, pitch=5, is_boxed=True)
 STACKED_BOXED_CARD = CardStyle(height=4, pitch=4, is_boxed=True)
 SLIM_BOXED_CARD = CardStyle(height=3, pitch=3, is_boxed=True)
-THIN_BOXED_CARD = CardStyle(height=2, pitch=2, is_boxed=True)
 TALL_CARD = CardStyle(height=3, pitch=4, is_boxed=False)
 SPACED_CARD = CardStyle(height=2, pitch=3, is_boxed=False)
 DENSE_CARD = CardStyle(height=2, pitch=2, is_boxed=False)
-BOXED_CARD_STYLES = (BOXED_CARD, STACKED_BOXED_CARD, SLIM_BOXED_CARD, THIN_BOXED_CARD)
-UNBOXED_CARD_STYLES = (TALL_CARD, SPACED_CARD, DENSE_CARD)
+WIDE_COLUMN_CARD_STYLES = (
+    BOXED_CARD,
+    STACKED_BOXED_CARD,
+    SLIM_BOXED_CARD,
+    SPACED_CARD,
+    DENSE_CARD,
+)
+NARROW_COLUMN_CARD_STYLES = (TALL_CARD, SPACED_CARD, DENSE_CARD)
 
 BOARD_COLUMNS = (
     BoardColumn(display.COLUMN_QUEUED, display.STATUS_COLORS[ledger.STATUS_SCHEDULED]),
@@ -547,7 +552,7 @@ def detail_line_count(height: int) -> int:
 
 
 def card_style(row_count: int, body_height: int, *, can_box: bool, can_stack: bool) -> CardStyle:
-    styles = BOXED_CARD_STYLES if can_box else UNBOXED_CARD_STYLES
+    styles = WIDE_COLUMN_CARD_STYLES if can_box else NARROW_COLUMN_CARD_STYLES
     if not can_stack:
         styles = tuple(style for style in styles if style != TALL_CARD)
     return next(
@@ -617,15 +622,12 @@ def board_layout(
         for index, size in enumerate(column_sizes)
     )
     shown_indices = range(first_index, first_index + fit_count)
-    for style_group in (BOXED_CARD_STYLES, UNBOXED_CARD_STYLES):
-        shown_styles = [styles[index] for index in shown_indices if styles[index] in style_group]
-        if not shown_styles:
-            continue
-        densest_style = min(shown_styles, key=lambda style: (style.pitch, style.height))
-        styles = tuple(
-            densest_style if index in shown_indices and style in style_group else style
-            for index, style in enumerate(styles)
-        )
+    densest_style = min(
+        (styles[index] for index in shown_indices), key=lambda style: (style.pitch, style.height)
+    )
+    styles = tuple(
+        densest_style if index in shown_indices else style for index, style in enumerate(styles)
+    )
     footer_gap = 0
     if line_count:
         used_height = max(
@@ -1250,8 +1252,7 @@ def boxed_card_segments(
         (time_part, STYLE_PLAIN, frame_color) if is_warning else (time_part, STYLE_DIM, None),
     ]
     if is_compact:
-        is_thin = style == THIN_BOXED_CARD
-        compact_width = content_width - (3 if is_thin else 2)
+        compact_width = content_width - 2
         compact_detail = fitted_words(
             card_detail(facts, compact_width, glyphs, is_live=is_live_card(row, context)),
             compact_width,
@@ -1264,17 +1265,6 @@ def boxed_card_segments(
             (warning_text, STYLE_PLAIN, frame_color),
             (compact_detail.removeprefix(warning_text), STYLE_DIM, None),
         ]
-        if is_thin:
-            bottom_parts: list[Part] = [
-                (f"{corners[2]} ", STYLE_PLAIN, frame_color),
-                *status_parts,
-                (
-                    f" {horizontal * (compact_width - len(compact_detail))}{corners[3]}",
-                    STYLE_PLAIN,
-                    frame_color,
-                ),
-            ]
-            return [*part_segments(y, x, top_parts), *part_segments(y + 1, x, bottom_parts)]
     background = SELECTION_BACKGROUND if is_selected else None
     segments = part_segments(y, x, top_parts)
     for offset in range(1, style.height - 1):
