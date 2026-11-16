@@ -621,10 +621,10 @@ def board_layout(
     detail_height = line_count + 1 + spacer_row_count if line_count else 0
     body_top = header_y + 2 + spacer_row_count
     body_height = footer_y - detail_height - body_top
-    shown_styles = column_card_styles(min(span_width for _, span_width in spans))
+    allowed_styles = column_card_styles(min(span_width for _, span_width in spans))
     done_index = len(BOARD_COLUMNS) - 1
     styles = tuple(
-        card_style(size, body_height, shown_styles, can_stack=index != done_index)
+        card_style(size, body_height, allowed_styles, can_stack=index != done_index)
         for index, size in enumerate(column_sizes)
     )
     shown_indices = range(first_index, first_index + fit_count)
