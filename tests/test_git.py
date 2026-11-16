@@ -5,7 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from golem import cli, git
+from golem import cli
+from golem.worktrees import git
 from tests import support
 
 

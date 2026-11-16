@@ -4,7 +4,8 @@ import sys
 from pathlib import Path
 from typing import cast
 
-from golem import git, ledger, spawn, task_directories
+from golem import ledger, spawn
+from golem.worktrees import git, task_directories
 
 COMMAND_TIMEOUT_SECONDS = 30
 

@@ -14,7 +14,6 @@ from typing import Any, Never
 import pytest
 
 from golem import (
-    branch_pull_requests,
     cli,
     executor,
     launch_agent,
@@ -26,6 +25,7 @@ from golem import (
     t3_code,
 )
 from golem.backends import claude
+from golem.worktrees import branch_pull_requests
 from tests import support
 
 LAUNCH_AGENT_ERROR_PATTERN = re.escape(launch_agent.LAUNCH_AGENT_ERROR)

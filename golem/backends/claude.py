@@ -10,8 +10,9 @@ from typing import TYPE_CHECKING, TypedDict, cast
 if TYPE_CHECKING:
     import io
 
-from golem import accounts, ledger, progress_log, spawn, task_directories
+from golem import accounts, ledger, progress_log, spawn
 from golem.backends import common
+from golem.worktrees import task_directories
 
 PROGRESS_TOOL_INPUT_KEYS = ("command", "file_path", "pattern", "url", "description")
 USAGE_LIMIT_HTTP_STATUS = 429

@@ -9,20 +9,18 @@ if TYPE_CHECKING:
 
 from golem import (
     accounts,
-    branch_pull_requests,
     chains,
     gates,
-    git,
     ledger,
     locks,
     notifications,
     progress_log,
     review,
     scheduling,
-    task_directories,
     task_setup,
 )
 from golem.backends import claude_hooks, common, registry
+from golem.worktrees import branch_pull_requests, git, task_directories
 
 MAX_USAGE_LIMIT_RESUMES = 2
 BACKGROUND_WORK_STOPPED_PATTERN = re.compile(

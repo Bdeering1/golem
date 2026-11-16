@@ -6,8 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from golem import cli, executor, git, ledger, review, task_directories
+from golem import cli, executor, ledger, review
 from golem.backends import claude_hooks
+from golem.worktrees import git, task_directories
 from tests import support
 
 

@@ -12,7 +12,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["golem", "golem.backends"]
+packages = ["golem", "golem.backends", "golem.clients", "golem.worktrees"]
 
 [project.scripts]
 golem = "golem.cli:main"

@@ -3,8 +3,9 @@ from pathlib import Path
 
 import pytest
 
-from golem import cli, git, ledger, task_directories
+from golem import cli, ledger
 from golem.backends import claude
+from golem.worktrees import git, task_directories
 from tests import support
 
 
