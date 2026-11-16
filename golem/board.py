@@ -335,11 +335,12 @@ type Part = tuple[str, str, int | None]
 
 BOXED_CARD = CardStyle(height=4, pitch=5, is_boxed=True)
 STACKED_BOXED_CARD = CardStyle(height=4, pitch=4, is_boxed=True)
+SLIM_BOXED_CARD = CardStyle(height=3, pitch=3, is_boxed=True)
 THIN_BOXED_CARD = CardStyle(height=2, pitch=2, is_boxed=True)
 TALL_CARD = CardStyle(height=3, pitch=4, is_boxed=False)
 SPACED_CARD = CardStyle(height=2, pitch=3, is_boxed=False)
 DENSE_CARD = CardStyle(height=2, pitch=2, is_boxed=False)
-BOXED_CARD_STYLES = (BOXED_CARD, STACKED_BOXED_CARD, THIN_BOXED_CARD)
+BOXED_CARD_STYLES = (BOXED_CARD, STACKED_BOXED_CARD, SLIM_BOXED_CARD, THIN_BOXED_CARD)
 UNBOXED_CARD_STYLES = (TALL_CARD, SPACED_CARD, DENSE_CARD)
 
 BOARD_COLUMNS = (
@@ -1185,8 +1186,9 @@ def boxed_card_segments(
     context: FrameContext,
     *,
     is_selected: bool,
-    is_thin: bool = False,
+    height: int,
 ) -> list[Segment]:
+    is_compact = height < BOXED_CARD.height
     glyphs, now, changed_task_ids = context.glyphs, context.now, context.changed_task_ids
     color, frame_color = card_colors(row, context, is_selected=is_selected)
     corners = glyphs.heavy_corners if is_selected else glyphs.corners
@@ -1198,15 +1200,15 @@ def boxed_card_segments(
     status_time = status_line_time(row, context, facts)
     badge_parts = card_badge_parts(row, context, is_named=True)
     status_line_width = len(f"  {row.status} {glyphs.separator} {status_time} ")
-    used_width = len(name) + 3 if is_thin else status_line_width
+    used_width = len(name) + 3 if is_compact else status_line_width
     if used_width + parts_width(badge_parts) > content_width:
         badge_parts = card_badge_parts(row, context)
     border_parts: list[Part] = (
         [(" ", STYLE_PLAIN, None), *badge_parts, (" ", STYLE_PLAIN, None)]
-        if is_thin and badge_parts
+        if is_compact and badge_parts
         else []
     )
-    right_parts = [] if is_thin else badge_parts
+    right_parts = [] if is_compact else badge_parts
     title_width = content_width - parts_width(border_parts)
     title = fitted_task_id(name, title_width - 1, glyphs)
     is_changed = row.task_id in changed_task_ids
@@ -1250,45 +1252,51 @@ def boxed_card_segments(
     )
     if row.status == ledger.STATUS_RUNNING and not detail:
         detail = IDLE_CARD_TEXT
-    if is_thin:
-        thin_width = content_width - 3
-        thin_detail = fitted_words(
-            card_detail(facts, thin_width, glyphs, is_live=is_live_card(row, context)),
-            thin_width,
+    if is_compact:
+        is_thin = height == THIN_BOXED_CARD.height
+        compact_width = content_width - (3 if is_thin else 2)
+        compact_detail = fitted_words(
+            card_detail(facts, compact_width, glyphs, is_live=is_live_card(row, context)),
+            compact_width,
             glyphs,
         )
-        warning_text = time_text if is_warning and thin_detail.startswith(time_text) else ""
-        bottom_parts: list[Part] = [
-            (f"{corners[2]} ", STYLE_PLAIN, frame_color),
+        warning_text = time_text if is_warning and compact_detail.startswith(time_text) else ""
+        status_parts = [
             status_parts[0],
             (" ", STYLE_PLAIN, None),
             (warning_text, STYLE_PLAIN, frame_color),
-            (thin_detail.removeprefix(warning_text), STYLE_DIM, None),
-            (
-                f" {horizontal * (thin_width - len(thin_detail))}{corners[3]}",
-                STYLE_PLAIN,
-                frame_color,
-            ),
+            (compact_detail.removeprefix(warning_text), STYLE_DIM, None),
         ]
-        return [*part_segments(y, x, top_parts), *part_segments(y + 1, x, bottom_parts)]
+        if is_thin:
+            bottom_parts: list[Part] = [
+                (f"{corners[2]} ", STYLE_PLAIN, frame_color),
+                *status_parts,
+                (
+                    f" {horizontal * (compact_width - len(compact_detail))}{corners[3]}",
+                    STYLE_PLAIN,
+                    frame_color,
+                ),
+            ]
+            return [*part_segments(y, x, top_parts), *part_segments(y + 1, x, bottom_parts)]
     background = SELECTION_BACKGROUND if is_selected else None
     segments = part_segments(y, x, top_parts)
-    for offset in (1, 2):
+    for offset in range(1, height - 1):
         segments += [
             Segment(y + offset, x, vertical, color=frame_color),
             *highlighted([Segment(y + offset, x + 1, " " * (width - 2))], background),
             Segment(y + offset, x + width - 1, vertical, color=frame_color),
         ]
-    segments += highlighted(
-        [
-            *part_segments(y + 1, x + 2, status_parts),
-            *part_segments(y + 1, x + width - 2 - parts_width(right_parts), right_parts),
-            Segment(y + 2, x + 2, fitted_words(detail, content_width, glyphs), STYLE_DIM),
-        ],
-        background,
-    )
+    content_segments = [
+        *part_segments(y + 1, x + 2, status_parts),
+        *part_segments(y + 1, x + width - 2 - parts_width(right_parts), right_parts),
+    ]
+    if not is_compact:
+        content_segments.append(
+            Segment(y + 2, x + 2, fitted_words(detail, content_width, glyphs), STYLE_DIM)
+        )
+    segments += highlighted(content_segments, background)
     bottom = f"{corners[2]}{horizontal * (width - 2)}{corners[3]}"
-    return [*segments, Segment(y + 3, x, bottom, color=frame_color)]
+    return [*segments, Segment(y + height - 1, x, bottom, color=frame_color)]
 
 
 def column_segments(
@@ -1345,7 +1353,7 @@ def column_segments(
                 row,
                 context,
                 is_selected=is_selected,
-                is_thin=style == THIN_BOXED_CARD,
+                height=style.height,
             )
             continue
         segments += card_segments(
@@ -1359,7 +1367,7 @@ def column_segments(
         )
     hidden_count = len(column_rows) - scroll_offset - len(shown_rows)
     if hidden_count > 0:
-        marker_y = layout.body_top + len(shown_rows) * style.pitch - (style.pitch - style.height)
+        marker_y = layout.body_top + style.stack_height(len(shown_rows))
         more_text = f"{glyphs.down} {hidden_count} more"
         segments.append(Segment(marker_y, x + CARD_INDENT, more_text, STYLE_DIM))
     return segments
