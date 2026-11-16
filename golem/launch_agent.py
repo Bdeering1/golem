@@ -9,7 +9,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from golem import (
-    branch_pull_requests,
     chains,
     display,
     ledger,
@@ -18,11 +17,10 @@ from golem import (
     progress_log,
     spawn,
     t3_code,
-    task_directories,
     usage_windows,
-    worktree_cleanup,
 )
 from golem.backends import claude_hooks
+from golem.worktrees import branch_pull_requests, task_directories, worktree_cleanup
 
 LAUNCH_AGENT_ERROR = "golem: the agent is not installed or is out of date; run golem agent install"
 LAUNCH_AGENT_LABEL = "com.github.bdeering1.golem"

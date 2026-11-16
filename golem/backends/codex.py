@@ -14,8 +14,9 @@ if TYPE_CHECKING:
     import io
     from collections.abc import Callable
 
-from golem import ledger, progress_log, spawn, task_directories
+from golem import ledger, progress_log, spawn
 from golem.backends import common
+from golem.worktrees import task_directories
 
 CODEX_ACCOUNT_ERROR = "golem: Codex account lookup unavailable"
 CODEX_SUBSCRIPTION_ERROR = (

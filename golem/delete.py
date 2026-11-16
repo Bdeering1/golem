@@ -2,8 +2,9 @@ from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from golem import chains, git, ledger, progress_log, t3_code, task_directories, worktree_cleanup
+from golem import chains, ledger, progress_log, t3_code
 from golem.backends import claude_hooks, registry
+from golem.worktrees import git, task_directories, worktree_cleanup
 
 
 @dataclass(frozen=True)

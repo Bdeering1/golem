@@ -12,10 +12,10 @@ from golem import (
     progress_log,
     spawn,
     t3_code,
-    task_directories,
     usage_windows,
 )
 from golem.backends import claude_hooks, common, registry
+from golem.worktrees import task_directories
 
 
 def new_session_id() -> str:

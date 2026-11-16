@@ -3,7 +3,8 @@ import shutil
 
 import pytest
 
-from golem import branch_pull_requests, ledger
+from golem import ledger
+from golem.worktrees import branch_pull_requests
 from tests import support
 
 FEATURE_BRANCH = "feature"

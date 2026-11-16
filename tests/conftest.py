@@ -8,7 +8,8 @@ from pathlib import Path
 
 import pytest
 
-from golem import cli, codex_app, ledger, t3_code
+from golem import cli, ledger, t3_code
+from golem.clients import codex_app
 from tests import support, t3_support
 
 

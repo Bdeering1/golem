@@ -3,8 +3,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
-from golem import git, ledger
+from golem import ledger
 from golem.backends import common
+from golem.worktrees import git
 
 WORKTREE_OWNER_GOLEM = "golem"
 WORKTREE_OWNER_EXTERNAL = "external"

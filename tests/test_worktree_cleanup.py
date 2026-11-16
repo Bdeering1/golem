@@ -3,7 +3,8 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from golem import cli, git, launch_agent, ledger, task_directories, worktree_cleanup
+from golem import cli, launch_agent, ledger
+from golem.worktrees import git, task_directories, worktree_cleanup
 from tests import support
 
 
