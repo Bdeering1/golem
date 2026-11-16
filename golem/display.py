@@ -9,11 +9,11 @@ from typing import NamedTuple
 from golem import chains, ledger
 
 STATUS_COLORS = {
-    ledger.STATUS_BLOCKED: 33,
+    ledger.STATUS_BLOCKED: 214,
     ledger.STATUS_FAILED: 196,
     ledger.STATUS_RUNNING: 39,
-    ledger.STATUS_SCHEDULED: 208,
-    ledger.STATUS_WAITING: 141,
+    ledger.STATUS_SCHEDULED: 141,
+    ledger.STATUS_WAITING: 103,
     ledger.STATUS_FINISHED: 34,
     ledger.STATUS_CANCELLED: 244,
 }

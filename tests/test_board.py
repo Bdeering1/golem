@@ -11,7 +11,7 @@ import pexpect
 import pyte
 import pytest
 
-from golem import board, cli, display, ledger
+from golem import board, cli, display, ledger, progress_log
 from tests import support
 
 TODAY = date(2030, 3, 10)
@@ -34,11 +34,29 @@ MERGED_PULL_REQUEST = {"url": "https://github.com/owner/repository/pull/2", "sta
 def frame_lines(tasks, width, height, state, glyphs=board.UNICODE_GLYPHS):
     snapshot = board.board_snapshot(tasks, NOW)
     lines = [[" "] * width for _ in range(height)]
-    board.fit_state_to_layout(snapshot.rows, width, height, state)
+    board.fit_state_to_layout(snapshot, width, height, state)
     for segment in board.board_frame(snapshot, width, height, state, glyphs):
         for offset, character in enumerate(segment.text):
             lines[segment.y][segment.x + offset] = character
     return ["".join(line).rstrip() for line in lines]
+
+
+def selected_text(tasks, state, width=WIDE_WIDTH, height=HEIGHT):
+    snapshot = board.board_snapshot(tasks, NOW)
+    board.fit_state_to_layout(snapshot, width, height, state)
+    segments = board.board_frame(snapshot, width, height, state)
+    return "".join(
+        segment.text
+        for segment in segments
+        if segment.background == board.SELECTION_BACKGROUND and segment.text.strip()
+    )
+
+
+def board_and_detail_lines(tasks, width=WIDE_WIDTH, height=HEIGHT, state=None):
+    state = state or board.BoardState()
+    lines = frame_lines(tasks, width, height, state)
+    rule_y = max(y for y, line in enumerate(lines) if line.startswith(("─ ", "- ")))
+    return lines[:rule_y], lines[rule_y:-1]
 
 
 def frame_text(tasks, width=WIDE_WIDTH, height=HEIGHT, state=None):
@@ -100,11 +118,53 @@ def test_board_shows_a_chain_as_one_card_with_its_step_and_list_detail():
         "child": support.task_record(ledger.STATUS_WAITING, task_id="child", after="root"),
     }
 
-    text = frame_text(tasks, state=board.BoardState(focus_index=2))
+    board_lines, _ = board_and_detail_lines(tasks, state=board.BoardState(focus_index=2))
+    board_text = "\n".join(board_lines)
 
-    assert "1/2" in text
-    assert "child" not in text
-    assert "no pull request yet" in text
+    assert "1/2" in board_text
+    assert "child" not in board_text
+    assert "no pull request" in board_text
+
+
+def chain_tasks():
+    return {
+        "fix-login": support.task_record(ledger.STATUS_FINISHED, task_id="fix-login"),
+        "fix-login-review": support.task_record(
+            ledger.STATUS_RUNNING, task_id="fix-login-review", after="fix-login"
+        ),
+        "fix-login-docs": support.task_record(
+            ledger.STATUS_WAITING, task_id="fix-login-docs", after="fix-login-review"
+        ),
+    }
+
+
+def test_board_names_a_chain_after_its_first_step_and_labels_the_shown_step():
+    board_lines, detail_lines = board_and_detail_lines(
+        chain_tasks(), state=board.BoardState(focus_index=1)
+    )
+
+    assert "fix-login-review" not in "\n".join(board_lines + detail_lines)
+    assert "2/3 review" in "\n".join(detail_lines)
+
+
+def test_board_task_view_shows_only_chain_states_that_cannot_be_inferred():
+    text = frame_text(chain_tasks(), state=board.BoardState(focus_index=1, view=board.VIEW_TASK))
+
+    assert "fix-login → review (running) → docs" in text
+
+
+def test_board_preview_shows_the_result_in_whole_sentences_without_markdown():
+    result = (
+        "## Summary\nFixed the **login** redirect. Then " + "it kept going " * 40 + "to the end."
+    )
+    tasks = {"task": support.task_record(ledger.STATUS_FINISHED, result=result)}
+
+    _, detail_lines = board_and_detail_lines(tasks, state=board.BoardState(focus_index=2))
+
+    detail_text = "\n".join(detail_lines)
+    assert "Fixed the login redirect." in detail_text
+    assert "kept going" not in detail_text
+    assert "Summary" not in detail_text
 
 
 def test_board_shortens_card_text_and_shows_it_in_full_in_the_detail_pane():
@@ -116,10 +176,15 @@ def test_board_shortens_card_text_and_shows_it_in_full_in_the_detail_pane():
         )
     }
 
-    lines = frame_lines(tasks, WIDE_WIDTH, HEIGHT, board.BoardState(focus_index=1))
+    board_lines, detail_lines = board_and_detail_lines(tasks, state=board.BoardState(focus_index=1))
 
-    assert "a-very-long-task-identi…" in "\n".join(lines)
-    assert lines[-4:-1] == [f"{task_id}  running", directory, "Polish the board more"]
+    board_text = "\n".join(board_lines)
+    detail_text = "\n".join(detail_lines)
+    assert f"{task_id[:10]}" in board_text
+    assert task_id not in board_text
+    assert task_id in detail_lines[0]
+    assert directory in detail_text
+    assert "Polish the board" in detail_text
 
 
 def test_board_detail_pane_keeps_the_end_of_a_long_directory():
@@ -127,9 +192,12 @@ def test_board_detail_pane_keeps_the_end_of_a_long_directory():
         "task": support.task_record(ledger.STATUS_RUNNING, cwd="/somewhere/deeply/nested/leaf")
     }
 
-    lines = frame_lines(tasks, NARROW_WIDTH, HEIGHT, board.BoardState(focus_index=1))
+    _, detail_lines = board_and_detail_lines(
+        tasks, NARROW_WIDTH, state=board.BoardState(focus_index=1)
+    )
 
-    assert "…/deeply/nested/leaf" in lines
+    assert "/leaf" in "".join(detail_lines)
+    assert "/somewhere" not in "".join(detail_lines)
 
 
 @pytest.mark.parametrize(
@@ -143,18 +211,21 @@ def test_board_detail_pane_keeps_the_end_of_a_long_directory():
 def test_board_shows_as_many_columns_as_fit(width, shown_titles, has_tabs):
     lines = frame_lines(statuses_tasks(), width, HEIGHT, board.BoardState())
 
-    header_y = board.board_layout(width, HEIGHT, len(shown_titles) + has_tabs).header_y
-    header_line = lines[header_y]
-    assert [title for title, *_ in board.BOARD_COLUMNS if title in header_line] == shown_titles
-    assert (header_y > board.TITLE_LINE_COUNT and bool(lines[board.TITLE_LINE_COUNT])) == has_tabs
+    header_line = lines[board.board_layout(width, HEIGHT, (0, 0, 0)).header_y]
+    assert [
+        title for title, *_ in board.BOARD_COLUMNS if f"▌ {title}" in header_line
+    ] == shown_titles[:1]
+    assert all(title in header_line for title in shown_titles)
+    assert (board.UNICODE_GLYPHS.right in header_line) == has_tabs
 
 
 @pytest.mark.parametrize(
     ("width", "focus_index", "left_text", "right_text"),
     [
-        pytest.param(46, 2, "← Queued 2", "Done 0 →", id="both-sides"),
-        pytest.param(28, 1, "← Queued 2", "Review 3  +1 →", id="folds-farthest"),
-        pytest.param(28, 0, "", "Running 1  Review 3  +1 →", id="right-only"),
+        pytest.param(46, 2, "←   Running 1", "→", id="both-sides"),
+        pytest.param(40, 1, "← Queued 2  ▌ Running 1", "Review  Done →", id="drops-counts"),
+        pytest.param(28, 3, "← +2  Review 3", "▌ Done 1", id="folds-left"),
+        pytest.param(28, 0, "▌ Queued 2", "Running 1  +2 →", id="right-only"),
     ],
 )
 def test_board_lists_hidden_columns_on_the_side_they_scroll_in_from(
@@ -163,21 +234,69 @@ def test_board_lists_hidden_columns_on_the_side_they_scroll_in_from(
     state = board.BoardState(focus_index=focus_index, is_showing_all=True)
     lines = frame_lines(statuses_tasks(), width, HEIGHT, state)
 
-    tab_line = lines[board.TITLE_LINE_COUNT]
+    tab_line = lines[board.board_layout(width, HEIGHT, (0, 0, 0, 0)).header_y]
     assert tab_line.startswith(left_text)
     assert tab_line.endswith(right_text)
 
 
+@pytest.mark.parametrize("width", [WIDE_WIDTH, 40, NARROW_WIDTH, 12])
+def test_board_footer_shortens_to_fit_and_keeps_help_and_quit(width):
+    footer = frame_lines(statuses_tasks(), width, HEIGHT, board.BoardState())[-1]
+
+    assert len(footer) < width
+    assert {"?", "q"} <= set(footer.split())
+
+
 @pytest.mark.parametrize(
-    ("width", "footer"),
-    [
-        (WIDE_WIDTH, "←→ column  ↑↓ select  a show done  q quit"),
-        (40, "←→ col  ↑↓ sel  a done  q quit"),
-        (NARROW_WIDTH, "←→  ↑↓  a  q"),
-    ],
+    ("seconds", "text"),
+    [(30, "<1m"), (7 * 60, "7m"), (3 * 3600 + 600, "3h 10m"), (2 * 86400 + 3600, "2d 1h")],
 )
-def test_board_footer_shortens_to_fit(width, footer):
-    assert frame_lines(statuses_tasks(), width, HEIGHT, board.BoardState())[-1] == footer
+def test_board_durations_read_at_a_glance(seconds, text):
+    assert board.duration_text(seconds) == text
+
+
+def running_task_with_activity(activity_text):
+    tasks = {"task": support.task_record(ledger.STATUS_RUNNING, started_at=NOW.isoformat())}
+    progress_path = progress_log.progress_path(tasks["task"]["session_id"])
+    progress_path.parent.mkdir(parents=True, exist_ok=True)
+    progress_path.write_text(activity_text)
+    return tasks
+
+
+def test_board_running_card_shows_the_latest_agent_activity(ledger_path):
+    tasks = running_task_with_activity("Reading the auth module\n[tool] Edit app/auth/reset.py\n")
+
+    text = frame_text(tasks, state=board.BoardState(focus_index=1))
+
+    assert "Edit app/auth/reset.py" in text
+
+
+def test_board_task_view_folds_activity_and_t_unfolds_it_in_steps(ledger_path):
+    tasks = running_task_with_activity(
+        "Reading auth\n[tool] Read app/tokens.py\n[tool] Edit app/reset.py\n"
+    )
+    state = board.BoardState(focus_index=1, view=board.VIEW_TASK)
+
+    texts = []
+    for _ in range(3):
+        texts.append(frame_text(tasks, state=state))
+        board.apply_key(state, ord("t"))
+    folded_text, messages_text, full_text = texts
+
+    assert "Reading auth" not in folded_text
+    assert "Reading auth" in messages_text
+    assert "tokens.py" not in messages_text
+    assert "tokens.py" in full_text
+
+
+def test_board_task_view_keeps_tool_calls_shown_after_following_stops(ledger_path):
+    tasks = running_task_with_activity("Reading auth\n[tool] Read app/tokens.py\n")
+    state = board.BoardState(focus_index=1, view=board.VIEW_TASK, is_following=True)
+    frame_text(tasks, state=state)
+
+    board.apply_key(state, ord("k"))
+
+    assert "tokens.py" in frame_text(tasks, state=state)
 
 
 def test_board_selection_moves_within_a_column_and_scrolls_to_stay_visible():
@@ -185,12 +304,12 @@ def test_board_selection_moves_within_a_column_and_scrolls_to_stay_visible():
 
     for _ in range(100):
         board.apply_key(state, ord("j"))
-    bottom_text = frame_text(running_tasks(), state=state)
+    bottom_selection = selected_text(running_tasks(), state)
     board.apply_key(state, ord("k"))
-    scrolled_up_text = frame_text(running_tasks(), state=state)
+    scrolled_up_selection = selected_text(running_tasks(), state)
 
-    assert f"{board.UNICODE_GLYPHS.heavy_vertical} task-09" in bottom_text
-    assert f"{board.UNICODE_GLYPHS.heavy_vertical} task-08" in scrolled_up_text
+    assert "task-09" in bottom_selection
+    assert "task-08" in scrolled_up_selection
 
 
 def test_board_selection_stays_on_its_task_when_a_task_is_added_above_it():
@@ -200,18 +319,17 @@ def test_board_selection_stays_on_its_task_when_a_task_is_added_above_it():
     board.apply_key(state, ord("j"))
     frame_text(tasks, state=state)
 
-    text = frame_text(tasks | {"task-00": added_task}, state=state)
-
-    assert "task-02  running" in text
+    assert "task-02" in selected_text(tasks | {"task-00": added_task}, state)
 
 
-def test_board_moves_focus_off_done_when_it_hides():
-    state = board.BoardState(focus_index=3, is_showing_all=True)
+def test_board_returns_focus_from_done_when_it_hides():
+    state = board.BoardState(focus_index=1)
 
+    board.apply_key(state, ord("a"))
     board.apply_key(state, ord("a"))
     frame_text({}, state=state)
 
-    assert state.focus_index == 2
+    assert state.focus_index == 1
 
 
 def test_board_marks_empty_columns():
@@ -321,9 +439,10 @@ class PtyBoard:
         )
 
     def selected_task_id(self):
-        lines = self.screen.display
-        rule_y = max(y for y, line in enumerate(lines) if line.startswith(("──", "--")))
-        return lines[rule_y + 1].split()[0]
+        rule_line = next(
+            line for line in reversed(self.screen.display) if line.startswith(("─ ", "- "))
+        )
+        return rule_line.split()[1]
 
     def send(self, keys):
         self.child.send(keys)
@@ -380,7 +499,7 @@ def test_board_switches_columns_after_resizing_to_one_column(pty_board):
     running_board = pty_board()
 
     running_board.resize(NARROW_WIDTH)
-    running_board.wait_until(lambda: "to review" not in running_board.text())
+    running_board.wait_until(lambda: "queued" not in running_board.screen.display[0])
     running_board.send("lll")
 
     running_board.wait_until(lambda: running_board.is_focused("Review"))
@@ -392,26 +511,27 @@ def test_board_keys_switch_columns_and_select_tasks(pty_board, keys):
     tasks = statuses_tasks() | running_tasks()
     running_board = pty_board(tasks=tasks)
 
-    running_board.send(right)
+    running_board.send(left)
     running_board.wait_until(lambda: running_board.selected_task_id() == ledger.STATUS_RUNNING)
     running_board.send(down)
     running_board.wait_until(lambda: running_board.selected_task_id() == "task-00")
     running_board.send(up)
     running_board.wait_until(lambda: running_board.selected_task_id() == ledger.STATUS_RUNNING)
-    running_board.send(left)
+    running_board.send(right)
 
-    running_board.wait_until(lambda: running_board.is_focused("Queued"))
+    running_board.wait_until(lambda: running_board.is_focused("Review"))
 
 
 @pytest.mark.parametrize("is_color", [True, False])
-def test_board_keeps_the_terminal_background(pty_board, is_color):
+def test_board_paints_no_background_beyond_the_selection(pty_board, is_color):
     running_board = pty_board(is_color=is_color)
 
     characters = [
         character for line in running_board.screen.buffer.values() for character in line.values()
     ]
 
-    assert all(character.bg == "default" for character in characters)
+    highlighted_count = sum(character.bg != "default" for character in characters)
+    assert highlighted_count <= 2 * PTY_WIDTH
     assert any(character.bold for character in characters)
     has_foreground_color = any(character.fg != "default" for character in characters)
     assert has_foreground_color == is_color
@@ -434,4 +554,98 @@ def test_board_keeps_unicode_rules_when_the_terminal_declares_rep(pty_board, tmp
 
     running_board = pty_board(environment={"TERMINFO": str(tmp_path)})
 
-    assert any(line.startswith("──") for line in running_board.screen.display)
+    assert any(line.lstrip().startswith("──") for line in running_board.screen.display)
+
+
+@pytest.mark.parametrize(
+    ("keys", "prompt"), [("3c", "Close done?"), ("1C", "Close 1 finished task?")]
+)
+def test_board_closes_a_finished_chain_only_after_confirmation(
+    pty_board, ledger_path, keys, prompt
+):
+    tasks = {"done": support.task_record(ledger.STATUS_FINISHED, task_id="done")}
+    running_board = pty_board(tasks=tasks)
+
+    running_board.send(keys)
+    running_board.wait_for_text(prompt)
+    running_board.send("y")
+
+    running_board.wait_until(lambda: "closed_at" in ledger.load_tasks()["done"])
+
+
+def test_board_reports_a_gate_check_without_waiting_for_the_executor_it_starts(monkeypatch):
+    command = "sleep 3 & echo 'golem: 3 failed' >&2; exit 1"
+    monkeypatch.setattr(board, "GOLEM_COMMAND", ("/bin/sh", "-c", command))
+    tasks = {"task": support.task_record(ledger.STATUS_BLOCKED)}
+    state = board.BoardState(gate_checks={"task": board.start_gate_check("task")})
+    state.gate_checks["task"].process.wait()
+
+    started = time.monotonic()
+    board.report_gate_checks(state, tasks)
+
+    assert time.monotonic() - started < 1
+    assert "3 failed" in state.flash_text
+
+
+def test_board_opens_a_task_and_returns_to_the_board(pty_board):
+    running_board = pty_board(tasks={"task": support.task_record(ledger.STATUS_RUNNING)})
+
+    running_board.send("2\r")
+    running_board.wait_for_text("Backend")
+    running_board.send("\x1b")
+
+    running_board.wait_for_text("q quit")
+
+
+def test_board_filter_narrows_cards_and_escape_clears_it():
+    snapshot = board.board_snapshot(running_tasks(), NOW)
+    state = board.BoardState(focus_index=1)
+
+    for key in "/TASK-03\r":
+        board.apply_key(state, ord(key), snapshot)
+    filtered_ids = [row.task_id for row in board.filtered_snapshot(snapshot, state).rows]
+    board.apply_key(state, board.ESCAPE_KEY, snapshot)
+
+    assert filtered_ids == ["task-03"]
+    assert board.filtered_snapshot(snapshot, state).rows == snapshot.rows
+
+
+@pytest.mark.parametrize(
+    ("statuses", "focused_title"),
+    [
+        ((ledger.STATUS_SCHEDULED, ledger.STATUS_RUNNING, ledger.STATUS_BLOCKED), "Review"),
+        ((ledger.STATUS_SCHEDULED, ledger.STATUS_RUNNING), "Running"),
+        ((ledger.STATUS_SCHEDULED,), "Queued"),
+    ],
+)
+def test_board_starts_on_the_column_that_needs_attention(statuses, focused_title):
+    tasks = {status: support.task_record(status, task_id=status) for status in statuses}
+    rows = board.board_snapshot(tasks, NOW).rows
+
+    column_index = board.attention_column_index(rows)
+
+    assert board.BOARD_COLUMNS[column_index].title == focused_title
+
+
+def test_board_keeps_one_card_style_when_a_column_is_crowded():
+    layout = board.board_layout(120, HEIGHT, (2, 20, 0))
+
+    assert len(set(layout.card_styles)) == 1
+    assert layout.visible_card_count(1, 20) < 20
+
+
+@pytest.mark.parametrize(
+    ("narrow_keys", "wide_width"), [("", WIDE_WIDTH), ("aa", NARROW_WIDTH), ("aa", WIDE_WIDTH)]
+)
+def test_board_redraws_after_its_columns_scroll_back_into_view(narrow_keys, wide_width):
+    state = board.BoardState(focus_index=2)
+    frame_lines(statuses_tasks(), NARROW_WIDTH, HEIGHT, state)
+    for key in narrow_keys:
+        board.apply_key(state, ord(key))
+        frame_lines(
+            statuses_tasks(), NARROW_WIDTH if key == narrow_keys[0] else wide_width, HEIGHT, state
+        )
+
+    lines = frame_lines(statuses_tasks(), wide_width, HEIGHT, state)
+
+    assert "Review" in "\n".join(lines)
