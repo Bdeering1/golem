@@ -31,6 +31,7 @@ RAIL_WIDTH = 1
 CARD_INDENT = 2
 BOX_BORDER_WIDTH = 4
 MIN_BOXED_CARD_WIDTH = 25
+MIN_SLIM_BOXED_CARD_WIDTH = 30
 TAB_LINE_Y = 1
 SPACED_HEIGHT = 24
 DETAIL_LINE_COUNT = 3
@@ -346,6 +347,7 @@ WIDE_COLUMN_CARD_STYLES = (
     SPACED_CARD,
     DENSE_CARD,
 )
+MEDIUM_COLUMN_CARD_STYLES = (BOXED_CARD, STACKED_BOXED_CARD, SPACED_CARD, DENSE_CARD)
 NARROW_COLUMN_CARD_STYLES = (TALL_CARD, SPACED_CARD, DENSE_CARD)
 
 BOARD_COLUMNS = (
@@ -551,8 +553,17 @@ def detail_line_count(height: int) -> int:
     return TALL_DETAIL_LINE_COUNT if height >= TALL_DETAIL_HEIGHT else DETAIL_LINE_COUNT
 
 
-def card_style(row_count: int, body_height: int, *, can_box: bool, can_stack: bool) -> CardStyle:
-    styles = WIDE_COLUMN_CARD_STYLES if can_box else NARROW_COLUMN_CARD_STYLES
+def column_card_styles(column_width: int) -> tuple[CardStyle, ...]:
+    if column_width >= MIN_SLIM_BOXED_CARD_WIDTH:
+        return WIDE_COLUMN_CARD_STYLES
+    if column_width >= MIN_BOXED_CARD_WIDTH:
+        return MEDIUM_COLUMN_CARD_STYLES
+    return NARROW_COLUMN_CARD_STYLES
+
+
+def card_style(
+    row_count: int, body_height: int, styles: tuple[CardStyle, ...], *, can_stack: bool
+) -> CardStyle:
     if not can_stack:
         styles = tuple(style for style in styles if style != TALL_CARD)
     return next(
@@ -610,15 +621,10 @@ def board_layout(
     detail_height = line_count + 1 + spacer_row_count if line_count else 0
     body_top = header_y + 2 + spacer_row_count
     body_height = footer_y - detail_height - body_top
-    can_box = min(span_width for _, span_width in spans) >= MIN_BOXED_CARD_WIDTH
+    shown_styles = column_card_styles(min(span_width for _, span_width in spans))
     done_index = len(BOARD_COLUMNS) - 1
     styles = tuple(
-        card_style(
-            size,
-            body_height,
-            can_box=can_box,
-            can_stack=index != done_index,
-        )
+        card_style(size, body_height, shown_styles, can_stack=index != done_index)
         for index, size in enumerate(column_sizes)
     )
     shown_indices = range(first_index, first_index + fit_count)
