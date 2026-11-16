@@ -920,6 +920,12 @@ def coarse_time_text(time_text: str) -> str:
     return " ".join([*words[:-2], f"{int(count) + is_rounding_up}{unit}"])
 
 
+def cut_repository_text(repository: str, width: int, glyphs: Glyphs) -> str | None:
+    if width < min(len(repository), MIN_CARD_REPOSITORY_WIDTH):
+        return None
+    return fitted(repository, width, glyphs)
+
+
 def card_detail(
     facts: tuple[str, str, str, str],
     width: int,
@@ -932,14 +938,12 @@ def card_detail(
     timed_facts = separator.join(part for part in (time_text, repository) if part)
     coarse_time = coarse_time_text(time_text)
     coarse_facts = separator.join(part for part in (coarse_time, repository) if part)
-    facts_repository_width = width - len(coarse_time) - len(separator) if coarse_time else width
+    cut_repository = cut_repository_text(
+        repository, width - len(coarse_time) - len(separator) if coarse_time else width, glyphs
+    )
     cut_facts = (
-        separator.join(
-            part
-            for part in (coarse_time, fitted(repository, facts_repository_width, glyphs))
-            if part
-        )
-        if facts_repository_width >= min(len(repository), MIN_CARD_REPOSITORY_WIDTH)
+        separator.join(part for part in (coarse_time, cut_repository) if part)
+        if cut_repository is not None
         else time_text
     )
     fitted_facts = next(
@@ -964,11 +968,12 @@ def card_detail(
             [(time_text, cut_reason, repository)] if repository and is_reason_cuttable else []
         )
         shortest_facts = separator.join(part for part in (time_text, shortest_reason) if part)
-        repository_width = width - len(shortest_facts) - len(separator)
-        is_repository_cuttable = repository_width >= min(len(repository), MIN_CARD_REPOSITORY_WIDTH)
+        shortest_repository = cut_repository_text(
+            repository, width - len(shortest_facts) - len(separator), glyphs
+        )
         cut_repository_facts = (
-            [(time_text, shortest_reason, fitted(repository, repository_width, glyphs))]
-            if repository and is_repository_cuttable
+            [(time_text, shortest_reason, shortest_repository)]
+            if repository and shortest_repository is not None
             else []
         )
         options = [
@@ -1186,9 +1191,9 @@ def boxed_card_segments(
     context: FrameContext,
     *,
     is_selected: bool,
-    height: int,
+    style: CardStyle,
 ) -> list[Segment]:
-    is_compact = height < BOXED_CARD.height
+    is_compact = style.height < BOXED_CARD.height
     glyphs, now, changed_task_ids = context.glyphs, context.now, context.changed_task_ids
     color, frame_color = card_colors(row, context, is_selected=is_selected)
     corners = glyphs.heavy_corners if is_selected else glyphs.corners
@@ -1244,16 +1249,8 @@ def boxed_card_segments(
         (fitted(label, status_width - 1, glyphs), STYLE_PLAIN, frame_color),
         (time_part, STYLE_PLAIN, frame_color) if is_warning else (time_part, STYLE_DIM, None),
     ]
-    detail = card_detail(
-        ("", reason, short_reason, "" if is_repository_on_status_line(row) else repository),
-        content_width,
-        glyphs,
-        is_live=is_live_card(row, context),
-    )
-    if row.status == ledger.STATUS_RUNNING and not detail:
-        detail = IDLE_CARD_TEXT
     if is_compact:
-        is_thin = height == THIN_BOXED_CARD.height
+        is_thin = style == THIN_BOXED_CARD
         compact_width = content_width - (3 if is_thin else 2)
         compact_detail = fitted_words(
             card_detail(facts, compact_width, glyphs, is_live=is_live_card(row, context)),
@@ -1280,7 +1277,7 @@ def boxed_card_segments(
             return [*part_segments(y, x, top_parts), *part_segments(y + 1, x, bottom_parts)]
     background = SELECTION_BACKGROUND if is_selected else None
     segments = part_segments(y, x, top_parts)
-    for offset in range(1, height - 1):
+    for offset in range(1, style.height - 1):
         segments += [
             Segment(y + offset, x, vertical, color=frame_color),
             *highlighted([Segment(y + offset, x + 1, " " * (width - 2))], background),
@@ -1291,12 +1288,20 @@ def boxed_card_segments(
         *part_segments(y + 1, x + width - 2 - parts_width(right_parts), right_parts),
     ]
     if not is_compact:
+        detail = card_detail(
+            ("", reason, short_reason, "" if is_repository_on_status_line(row) else repository),
+            content_width,
+            glyphs,
+            is_live=is_live_card(row, context),
+        )
+        if row.status == ledger.STATUS_RUNNING and not detail:
+            detail = IDLE_CARD_TEXT
         content_segments.append(
             Segment(y + 2, x + 2, fitted_words(detail, content_width, glyphs), STYLE_DIM)
         )
     segments += highlighted(content_segments, background)
     bottom = f"{corners[2]}{horizontal * (width - 2)}{corners[3]}"
-    return [*segments, Segment(y + height - 1, x, bottom, color=frame_color)]
+    return [*segments, Segment(y + style.height - 1, x, bottom, color=frame_color)]
 
 
 def column_segments(
@@ -1353,7 +1358,7 @@ def column_segments(
                 row,
                 context,
                 is_selected=is_selected,
-                height=style.height,
+                style=style,
             )
             continue
         segments += card_segments(
@@ -2557,6 +2562,10 @@ def is_tool_line(line: str) -> bool:
     return line.startswith(TOOL_LINE_PREFIX)
 
 
+def is_folded_tool_run(run_lines: list[str]) -> bool:
+    return len(run_lines) > 1 and is_tool_line(run_lines[0])
+
+
 def activity_view_lines(
     activity: list[str], width: int, glyphs: Glyphs, activity_level: int
 ) -> list[list[Part]]:
@@ -2572,7 +2581,7 @@ def activity_view_lines(
     for is_tool, group in itertools.groupby(activity, key=is_tool_line):
         group_lines = list(group)
         style = STYLE_DIM if is_tool else STYLE_PLAIN
-        if is_tool and activity_level == ACTIVITY_MESSAGES and len(group_lines) > 1:
+        if activity_level == ACTIVITY_MESSAGES and is_folded_tool_run(group_lines):
             summary = f"{FOLD_MARKER} {counted_text(len(group_lines), 'tool call')}"
             lines += wrapped_lines(summary, width, style, "  ")
             continue
@@ -2659,8 +2668,8 @@ def task_view_segments(
     ]
     activity = task_activity(row, snapshot)
     has_folded_tool_calls = any(
-        is_tool and len(list(group)) > 1
-        for is_tool, group in itertools.groupby(activity, key=is_tool_line)
+        is_folded_tool_run(list(group))
+        for _, group in itertools.groupby(activity, key=is_tool_line)
     )
     state.activity_level_limit = (
         ACTIVITY_FULL
@@ -3250,6 +3259,18 @@ def flash(state: BoardState, text: str) -> None:
     state.flash_until = time.monotonic() + FLASH_SECONDS
 
 
+def start_gate_check(task_id: str) -> GateCheck:
+    # A file, not a pipe: the executor a passing gate starts inherits stderr and outlives it.
+    with tempfile.TemporaryFile() as error_file:
+        process = subprocess.Popen(
+            [*GOLEM_COMMAND, ACTION_RERUN_GATE, task_id],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=error_file,
+        )
+        return GateCheck(process, os.dup(error_file.fileno()))
+
+
 def run_action(
     screen: curses.window,
     state: BoardState,
@@ -3266,15 +3287,8 @@ def run_action(
         run_attached(screen, [*GOLEM_COMMAND, action, row.task_id])
         return
     if action == ACTION_RERUN_GATE:
-        # A file, not a pipe: the executor a passing gate starts inherits stderr and outlives it.
-        with tempfile.TemporaryFile() as error_file:
-            process = subprocess.Popen(
-                [*GOLEM_COMMAND, action, row.task_id],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=error_file,
-            )
-            state.gate_checks[row.task_id] = GateCheck(process, os.dup(error_file.fileno()))
+        if row.task_id not in state.gate_checks:
+            state.gate_checks[row.task_id] = start_gate_check(row.task_id)
         flash(state, f"Rechecking the gate for {task_label(snapshot.tasks, row.task_id)}")
         return
     if action == ACTION_RETRY:

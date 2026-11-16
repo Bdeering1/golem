@@ -6,7 +6,6 @@ import sys
 import time
 from datetime import date, datetime
 from pathlib import Path
-from typing import cast
 
 import pexpect
 import pyte
@@ -575,20 +574,17 @@ def test_board_closes_a_finished_chain_only_after_confirmation(
 
 
 def test_board_reports_a_gate_check_without_waiting_for_the_executor_it_starts(monkeypatch):
-    monkeypatch.setattr(board, "GOLEM_COMMAND", ("/bin/sh", "-c", "sleep 3 &"))
+    command = "sleep 3 & echo 'golem: 3 failed' >&2; exit 1"
+    monkeypatch.setattr(board, "GOLEM_COMMAND", ("/bin/sh", "-c", command))
     tasks = {"task": support.task_record(ledger.STATUS_BLOCKED)}
-    snapshot = board.board_snapshot(tasks, NOW)
-    state = board.BoardState()
-    board.run_action(
-        cast("curses.window", None), state, snapshot, board.ACTION_RERUN_GATE, snapshot.rows[0]
-    )
+    state = board.BoardState(gate_checks={"task": board.start_gate_check("task")})
     state.gate_checks["task"].process.wait()
 
     started = time.monotonic()
     board.report_gate_checks(state, tasks)
 
     assert time.monotonic() - started < 1
-    assert not state.gate_checks
+    assert "3 failed" in state.flash_text
 
 
 def test_board_opens_a_task_and_returns_to_the_board(pty_board):
