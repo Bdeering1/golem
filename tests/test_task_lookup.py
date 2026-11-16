@@ -1,3 +1,4 @@
+import io
 import sys
 
 import pytest
@@ -78,6 +79,11 @@ def test_picker_cancels(labelled_tasks, monkeypatch, answers, on_first_read):
         task_lookup.resolved_task_id(support.LABEL)
 
 
-def test_shared_label_without_terminal_lists_matching_ids(labelled_tasks):
+def test_shared_label_without_terminal_lists_matching_ids(labelled_tasks, monkeypatch):
+    monkeypatch.setattr(sys, "stdin", io.StringIO())
     with pytest.raises(SystemExit, match=f"{NEWER_ID}, {OLDER_ID}"):
         task_lookup.resolved_task_id(support.LABEL)
+
+
+def test_unknown_argument_is_kept_when_requested(labelled_tasks):
+    assert task_lookup.resolved_task_id("missing", is_unknown_kept=True) == "missing"

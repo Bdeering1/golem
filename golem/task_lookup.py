@@ -37,13 +37,15 @@ def picked_task_id(task_ids: list[str]) -> str:
             return task_ids[int(answer) - 1]
 
 
-def resolved_task_id(argument: str) -> str:
+def resolved_task_id(argument: str, *, is_unknown_kept: bool = False) -> str:
     tasks = ledger.load_tasks()
     if argument in tasks:
         return argument
     matching_ids = [
         task_id for task_id, task in reversed(tasks.items()) if task.get("label") == argument
     ]
+    if not matching_ids and is_unknown_kept:
+        return argument
     if not matching_ids:
         raise SystemExit(f"golem: task not found: {argument}")
     if len(matching_ids) == 1:

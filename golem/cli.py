@@ -545,7 +545,10 @@ def add_delete_command(add_parser: Callable[..., argparse.ArgumentParser]) -> No
     set_command_handler(
         delete_command,
         lambda arguments: delete.delete_tasks(
-            [task_lookup.resolved_task_id(task_id) for task_id in arguments.ids],
+            [
+                task_lookup.resolved_task_id(task_id, is_unknown_kept=True)
+                for task_id in arguments.ids
+            ],
             is_chain=arguments.chain,
             is_removing_worktree=arguments.remove_worktree,
         ),
