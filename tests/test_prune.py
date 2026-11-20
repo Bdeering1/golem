@@ -101,7 +101,7 @@ ASKED_IDS = ["first", "second", "third"]
         pytest.param([ALL_KEY, support.ENTER_KEY], 0, set(ASKED_IDS), id="all"),
         pytest.param([ALL_KEY, ALL_KEY, support.ENTER_KEY], 0, set(), id="all-cleared"),
         pytest.param([support.ENTER_KEY], 0, set(), id="nothing-selected"),
-        pytest.param([ALL_KEY, *support.ESCAPE_KEYS], 1, None, id="escape"),
+        pytest.param([ALL_KEY, board.ESCAPE_KEY], 1, None, id="escape"),
         pytest.param([ALL_KEY, support.interrupt], 130, None, id="ctrl-c"),
     ],
 )

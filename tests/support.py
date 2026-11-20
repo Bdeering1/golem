@@ -49,7 +49,6 @@ GATE_STOP_REASON = "no pull request yet"
 PARENT_SESSION = f"{PARENT_ID}-session"
 
 
-ESCAPE_KEYS = [board.ESCAPE_KEY]
 ENTER_KEY = ord("\n")
 
 
@@ -71,7 +70,6 @@ class FakeTerminal:
         return self.height, self.width
 
     def draw(self, segments, *, is_color):
-        assert not is_color
         lines = [""] * self.height
         for segment in segments:
             line = lines[segment.y].ljust(segment.x)

@@ -120,9 +120,10 @@ def style_codes(segment: board.Segment, *, is_color: bool) -> list[str]:
     return codes
 
 
-def styled_lines(segments: list[board.Segment], height: int, *, is_color: bool) -> list[str]:
-    lines = [""] * height
-    line_widths = [0] * height
+def styled_lines(segments: list[board.Segment], *, is_color: bool) -> list[str]:
+    line_count = max(segment.y for segment in segments) + 1
+    lines = [""] * line_count
+    line_widths = [0] * line_count
     for segment in sorted(segments, key=lambda segment: (segment.y, segment.x)):
         gap = " " * (segment.x - line_widths[segment.y])
         codes = ";".join(style_codes(segment, is_color=is_color))
@@ -143,22 +144,22 @@ def read_byte() -> int:
     return os.read(sys.stdin.fileno(), 1)[0]
 
 
-def read_key(timeout_seconds: float = RESIZE_POLL_SECONDS) -> int | None:
-    if not is_input_ready(timeout_seconds):
+def read_key() -> int | None:
+    if not is_input_ready(RESIZE_POLL_SECONDS):
         return None
     key = read_byte()
     if key != board.ESCAPE_KEY:
         return key
-    sequence = ""
+    if not is_input_ready(ESCAPE_DELAY_SECONDS):
+        return board.ESCAPE_KEY
+    sequence = chr(read_byte())
+    if sequence not in board.ESCAPE_SEQUENCE_STARTS:
+        return board.ESCAPE_KEY
     while is_input_ready(ESCAPE_DELAY_SECONDS):
         char = read_byte()
         sequence += chr(char)
-        if sequence[0] not in board.ESCAPE_SEQUENCE_STARTS:
+        if char in board.ESCAPE_SEQUENCE_FINAL_KEYS:
             break
-        if len(sequence) > 1 and char in board.ESCAPE_SEQUENCE_FINAL_KEYS:
-            break
-    if not sequence:
-        return board.ESCAPE_KEY
     return ARROW_KEYS.get(sequence)
 
 
@@ -174,7 +175,7 @@ class InlineTerminal:
         return read_key()
 
     def draw(self, segments: list[board.Segment], *, is_color: bool) -> None:
-        lines = styled_lines(segments, self.size()[0], is_color=is_color)
+        lines = styled_lines(segments, is_color=is_color)
         write_terminal(RESTORE_CURSOR + CLEAR_TO_END + "\r\n".join(lines))
 
 
@@ -228,8 +229,11 @@ def picked_indices(
                     (SELECTED_MARK if index in selected_indices else UNSELECTED_MARK, *row)
                     for index, row in enumerate(rows)
                 ]
+            shown_title = title
+            if len(rows) > row_count:
+                shown_title = f"{title} ({highlight_index + 1}/{len(rows)})"
             segments = picker_segments(
-                board.fitted(title, width, glyphs),
+                board.fitted(shown_title, width, glyphs),
                 fitted_lines(marked_rows, width, glyphs),
                 highlight_index,
                 top_index,

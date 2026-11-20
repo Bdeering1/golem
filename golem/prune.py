@@ -68,9 +68,7 @@ def chain_row(tasks: ledger.Tasks, candidate: ChainCandidate) -> tuple[str, ...]
 
 def picked_asked_indices(
     tasks: ledger.Tasks, candidates: list[ChainCandidate], asked_indices: list[int]
-) -> tuple[set[int] | None, bool]:
-    if not board.is_terminal():
-        return set(), True
+) -> set[int] | None:
     picked_indices = picker.picked_indices(
         "Pick which tasks to prune",
         [chain_row(tasks, candidates[index]) for index in asked_indices],
@@ -78,8 +76,8 @@ def picked_asked_indices(
         is_multi_select=True,
     )
     if picked_indices is None:
-        return None, False
-    return {asked_indices[index] for index in picked_indices}, False
+        return None
+    return {asked_indices[index] for index in picked_indices}
 
 
 def prune_selection(
@@ -128,11 +126,10 @@ def prune_tasks(*, is_confirmed: bool) -> int:
         candidates = chain_candidates(tasks)
         asked_indices = [index for index, candidate in enumerate(candidates) if candidate.is_asked]
         accepted_indices: set[int] | None = set(asked_indices) if is_confirmed else set()
-        has_kept_asked_chains = False
-        if asked_indices and not is_confirmed:
-            accepted_indices, has_kept_asked_chains = picked_asked_indices(
-                tasks, candidates, asked_indices
-            )
+        is_asking = bool(asked_indices) and not is_confirmed
+        has_kept_asked_chains = is_asking and not board.is_terminal()
+        if is_asking and not has_kept_asked_chains:
+            accepted_indices = picked_asked_indices(tasks, candidates, asked_indices)
     except KeyboardInterrupt:
         print()
         return board.INTERRUPTED_EXIT_STATUS
