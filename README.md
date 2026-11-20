@@ -92,8 +92,6 @@ claude = ["6am", "11am"]
 "work@example.com" = ["8am", "1pm"]
 ```
 
-golem can't wake a sleeping Mac to open a window. Use `sudo pmset repeat` to wake it each day.
-
 Worktrees stay on disk after you delete their task. To clean them up:
 
 ```bash
