@@ -1,9 +1,7 @@
 import os
-import signal
 import subprocess
 import sys
 import tempfile
-from contextlib import suppress
 from pathlib import Path
 
 from golem import accounts, ledger, task_processes
@@ -72,8 +70,7 @@ def shell_command_outcome(
             finally:
                 # Unreaped, so the group ID is still ours; macOS fails with EPERM once only zombies remain.
                 if process.returncode is None:
-                    with suppress(OSError):
-                        os.killpg(process.pid, signal.SIGKILL)
+                    task_processes.stop_command_process_group(process.pid)
         if process.returncode == 0:
             stdout_file.seek(0)
             return None, stdout_file.read()

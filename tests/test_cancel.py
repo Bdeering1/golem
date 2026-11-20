@@ -190,3 +190,35 @@ def test_prune_deletes_started_cancelled_task_without_asking(ledger_path, monkey
     assert cli.main(["prune"]) == 0
 
     assert ledger.load_tasks() == {}
+
+
+def test_cancelling_running_dependent_still_runs_its_sibling(
+    installed_launch_agent, fake_commands, ledger_path
+):
+    support.write_tasks(
+        ledger_path,
+        {
+            support.PARENT_ID: support.task_record(ledger.STATUS_FINISHED, no_worktree=True),
+            support.CHILD_ID: support.task_record(
+                ledger.STATUS_WAITING,
+                task_id=support.CHILD_ID,
+                after=support.PARENT_ID,
+                no_worktree=True,
+                setup=HELD_COMMAND,
+            ),
+            support.SIBLING_ID: support.task_record(
+                ledger.STATUS_WAITING,
+                task_id=support.SIBLING_ID,
+                after=support.PARENT_ID,
+                no_worktree=True,
+            ),
+        },
+    )
+    executor_thread = start_executor(ledger_path, support.PARENT_ID)
+    wait_for_field(ledger_path, task_processes.FIELD_COMMAND_PROCESS_GROUP, support.CHILD_ID)
+
+    cancel_and_join(executor_thread, support.CHILD_ID)
+
+    tasks = support.read_tasks(ledger_path)
+    assert tasks[support.CHILD_ID]["status"] == ledger.STATUS_CANCELLED
+    assert tasks[support.SIBLING_ID]["status"] == ledger.STATUS_FINISHED

@@ -1,7 +1,6 @@
 import os
 import time
 import uuid
-from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 
@@ -96,17 +95,6 @@ def print_dependents(records: ledger.Tasks) -> None:
         print(f"golem: {task_id} will run after {record.get('after')}")
 
 
-def interrupt_t3_code_thread(thread_id: str) -> None:
-    if not t3_code.is_running():
-        return
-    with suppress(*t3_code.T3_CODE_ERRORS):
-        t3_code.dispatch_command(
-            t3_code.server_origin(),
-            t3_code.issue_token(),
-            {"type": "thread.stop", "commandId": str(uuid.uuid4()), "threadId": thread_id},
-        )
-
-
 def wait_for_run_lock(task_id: str, session_id: str) -> None:
     deadline = time.monotonic() + RUN_LOCK_WAIT_SECONDS
     while not locks.is_run_lock_free(session_id):
@@ -125,7 +113,7 @@ def stop_task_processes(task_id: str, task: ledger.Task, previous_status: str) -
         and previous_status == ledger.STATUS_RUNNING
         and thread_id is not None
     ):
-        interrupt_t3_code_thread(thread_id)
+        t3_code.stop_thread(thread_id)
     agent_pid = task.get("agent_pid")
     if agent_pid is not None:
         task_processes.stop_agent(agent_pid)

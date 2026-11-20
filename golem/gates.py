@@ -63,7 +63,7 @@ def run_pending_gate(task_id: str) -> None:
 
 def continue_task(task_id: str, *, is_forced: bool) -> int:
     task = ledger.existing_task(ledger.load_tasks(), task_id)
-    if "gate_stop_reason" not in task:
+    if "gate_stop_reason" not in task or task["status"] != ledger.STATUS_BLOCKED:
         raise SystemExit(f"golem: task is not stopped at a gate: {task_id}")
     if not is_forced:
         directory_lock_file = locks.acquire_task_directory_lock(task)
@@ -90,7 +90,7 @@ def release_gate_stop(task_id: str, *, stderr: int | None = None) -> bool:
         task = tasks.get(task_id)
         if task is None:
             return False
-        if "gate_stop_reason" not in task:
+        if "gate_stop_reason" not in task or task["status"] != ledger.STATUS_BLOCKED:
             return False
         del task["gate_stop_reason"]
         task["status"] = ledger.STATUS_FINISHED
