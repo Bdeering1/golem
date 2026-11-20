@@ -1,8 +1,13 @@
 [project]
 name = "golem"
 version = "0.1.0"
-description = "Run and review Claude and Codex tasks"
+description = "Queue and chain coding agent sessions using a scriptable CLI."
+readme = "README.md"
 requires-python = ">=3.14"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Bryn Deering" }]
+keywords = ["agent-orchestration", "claude-code", "cli", "codex", "macos", "tui"]
 dependencies = [
     "websockets>=17.4",
 ]
