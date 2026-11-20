@@ -380,13 +380,13 @@ def send_outcome(
     )
 
 
-def has_active_run(projection: ledger.JsonObject) -> bool:
-    run = t3_code.latest_run(projection)
+def has_active_run(run: ledger.JsonObject | None) -> bool:
     return run is not None and run.get("status") not in TERMINAL_RUN_STATUSES
 
 
-def has_unfinished_subagent_work(projection: ledger.JsonObject) -> bool:
-    run = t3_code.latest_run(projection)
+def has_unfinished_subagent_work(
+    projection: ledger.JsonObject, run: ledger.JsonObject | None
+) -> bool:
     if run is None:
         return False
     subagents = [
@@ -433,9 +433,9 @@ def last_reply(projection: ledger.JsonObject, run: ledger.JsonObject | None) -> 
 def latest_run_outcome(
     outcome: common.RunOutcome,
     projection: ledger.JsonObject,
+    run: ledger.JsonObject | None,
     watcher: ThreadWatcher,
 ) -> common.RunOutcome:
-    run = t3_code.latest_run(projection)
     if run is None or watcher.run_id is None or run.get("id") == watcher.run_id:
         return outcome
     watcher.run_id = cast("str | None", run.get("id"))
@@ -455,11 +455,12 @@ def wait_for_quiet_thread(
     # T3 Code runs a subagent's follow-up in a new run, which `thread send --wait` doesn't follow.
     while True:
         if projection is not None:
+            run = t3_code.latest_run(projection)
             if is_request_pending(projection):
-                return waiting_outcome(last_reply(projection, t3_code.latest_run(projection)))
-            is_active = has_active_run(projection)
-            if not is_active and not has_unfinished_subagent_work(projection):
-                return latest_run_outcome(outcome, projection, watcher)
+                return waiting_outcome(last_reply(projection, run))
+            is_active = has_active_run(run)
+            if not is_active and not has_unfinished_subagent_work(projection, run):
+                return latest_run_outcome(outcome, projection, run, watcher)
             if not is_active and is_session_ended(projection):
                 return failed_outcome(SESSION_STOPPED_REASON)
         if not t3_code.is_running():

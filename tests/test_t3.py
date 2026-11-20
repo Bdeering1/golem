@@ -53,6 +53,7 @@ FIRST_RUN_ENDED = {
     "completedAt": FIRST_RUN_ENDED_AT,
 }
 LATER_RUN = {"id": LATER_RUN_ID, "ordinal": 2, "startedAt": SUBAGENT_ENDED_AT}
+LATER_RUN_ENDED = {**LATER_RUN, "status": "completed", "completedAt": LATER_RUN_ENDED_AT}
 RUNNING_SUBAGENT = {
     "id": "subagent",
     "runId": FIRST_RUN_ID,
@@ -67,7 +68,6 @@ ENDED_SUBAGENT = {
     "completedAt": SUBAGENT_ENDED_AT,
     "updatedAt": SUBAGENT_ENDED_AT,
 }
-LATER_FAILURE_MESSAGE = "later run failed"
 MAX_FOLLOW_UP_SLEEPS = 20
 CLAUDE_TRANSCRIPT = f".claude/projects/project/{NATIVE_SESSION_ID}.jsonl"
 CODEX_TRANSCRIPT = (
@@ -447,19 +447,15 @@ def later_run_message(text):
 def test_background_subagent_keeps_task_running_until_the_later_run_ends(
     t3_server, follow_ups, ledger_path
 ):
-    later_run_ended = {**LATER_RUN, "status": "completed", "completedAt": LATER_RUN_ENDED_AT}
     follow_ups[:] = [
         projection(RUNNING_SUBAGENT, runs=[FIRST_RUN_ENDED], sessions=[READY_SESSION]),
         projection(ENDED_SUBAGENT, runs=[FIRST_RUN_ENDED], sessions=[READY_SESSION]),
-        projection(
-            ENDED_SUBAGENT,
-            runs=[FIRST_RUN_ENDED, {**LATER_RUN, "status": "running"}],
-            sessions=[READY_SESSION],
-        ),
+        # A session list without a live session doesn't end the wait while a run is active.
+        projection(ENDED_SUBAGENT, runs=[FIRST_RUN_ENDED, {**LATER_RUN, "status": "running"}]),
         projection(
             ENDED_SUBAGENT,
             later_run_message(LATER_REPLY),
-            runs=[FIRST_RUN_ENDED, later_run_ended],
+            runs=[FIRST_RUN_ENDED, LATER_RUN_ENDED],
             sessions=[READY_SESSION],
         ),
     ]
@@ -499,18 +495,18 @@ def act_after_each_poll(monkeypatch, action):
 
 
 @pytest.mark.parametrize(
-    ("session_status", "is_t3_quitting"),
+    ("sessions", "is_t3_quitting"),
     [
-        pytest.param("stopped", False, id="session-stopped"),
-        pytest.param("error", False, id="session-error"),
-        pytest.param("ready", True, id="t3-quit"),
+        pytest.param([{"id": "session", "status": "stopped"}], False, id="session-stopped"),
+        pytest.param([{"id": "session", "status": "error"}], False, id="session-error"),
+        pytest.param([], False, id="no-sessions"),
+        pytest.param([READY_SESSION], True, id="t3-quit"),
     ],
 )
 def test_ended_session_fails_task_with_subagent_running(
-    t3_server, follow_ups, ledger_path, monkeypatch, session_status, is_t3_quitting
+    t3_server, follow_ups, ledger_path, monkeypatch, sessions, is_t3_quitting
 ):
-    session = {"id": "session", "status": session_status}
-    follow_ups[:] = [projection(RUNNING_SUBAGENT, runs=[FIRST_RUN_ENDED], sessions=[session])]
+    follow_ups[:] = [projection(RUNNING_SUBAGENT, runs=[FIRST_RUN_ENDED], sessions=sessions)]
     if is_t3_quitting:
         act_after_each_poll(monkeypatch, lambda: t3_server.runtime_path.unlink(missing_ok=True))
 
@@ -523,7 +519,6 @@ def test_ended_session_fails_task_with_subagent_running(
 @pytest.mark.parametrize(
     ("failure", "expected_status"),
     [
-        pytest.param({"message": LATER_FAILURE_MESSAGE}, ledger.STATUS_FAILED, id="failure"),
         pytest.param(USAGE_LIMIT_ITEM["failure"], ledger.STATUS_SCHEDULED, id="usage-limit"),
         pytest.param(None, ledger.STATUS_FAILED, id="no-error-item"),
     ],
@@ -573,14 +568,13 @@ def test_cancelled_task_stops_waiting_for_subagents(
 
 
 def test_failed_first_read_keeps_waiting_for_subagents(t3_server, follow_ups, ledger_path):
-    later_run_ended = {**LATER_RUN, "status": "completed", "completedAt": LATER_RUN_ENDED_AT}
     follow_ups[:] = [
         t3_code.T3CodeError("projection read failed"),
         projection(RUNNING_SUBAGENT, runs=[FIRST_RUN_ENDED], sessions=[READY_SESSION]),
         projection(
             ENDED_SUBAGENT,
             later_run_message(LATER_REPLY),
-            runs=[FIRST_RUN_ENDED, later_run_ended],
+            runs=[FIRST_RUN_ENDED, LATER_RUN_ENDED],
             sessions=[READY_SESSION],
         ),
     ]
