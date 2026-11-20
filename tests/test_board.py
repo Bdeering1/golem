@@ -547,7 +547,8 @@ def test_board_paints_no_background_beyond_the_selection(pty_board, is_color):
     assert has_foreground_color == is_color
 
 
-def test_board_keeps_unicode_rules_when_the_terminal_declares_rep(pty_board, tmp_path):
+@pytest.fixture
+def rep_terminfo_directory(tmp_path):
     source = subprocess.run(
         ["/usr/bin/infocmp", "-x", "-1", "xterm-256color"],
         capture_output=True,
@@ -561,8 +562,22 @@ def test_board_keeps_unicode_rules_when_the_terminal_declares_rep(pty_board, tmp
     subprocess.run(
         ["/usr/bin/tic", "-x", "-o", ".", "xterm-rep.terminfo"], cwd=tmp_path, check=True
     )
+    return tmp_path
 
-    running_board = pty_board(environment={"TERMINFO": str(tmp_path)})
+
+@pytest.mark.parametrize("is_tic_failing", [False, True])
+def test_board_keeps_unicode_rules_when_the_terminal_declares_rep(
+    pty_board, rep_terminfo_directory, tmp_path_factory, is_tic_failing
+):
+    environment = {"TERMINFO": str(rep_terminfo_directory)}
+    if is_tic_failing:
+        fake_bin = tmp_path_factory.mktemp("bin")
+        fake_tic = fake_bin / "tic"
+        fake_tic.write_text("#!/bin/sh\nexit 1\n")
+        fake_tic.chmod(0o755)
+        environment["PATH"] = f"{fake_bin}:{os.environ['PATH']}"
+
+    running_board = pty_board(environment=environment)
 
     assert any(line.lstrip().startswith("──") for line in running_board.screen.display)
 
