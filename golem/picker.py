@@ -27,6 +27,10 @@ def fitted_lines(rows: list[tuple[str, ...]], width: int, glyphs: board.Glyphs) 
     return lines
 
 
+def visible_row_count(height: int) -> int:
+    return max(1, height - CHROME_LINE_COUNT)
+
+
 def key_hint_sets(
     glyphs: board.Glyphs, enter_label: str, *, is_multi_select: bool
 ) -> list[list[tuple[str, str]]]:
@@ -58,7 +62,7 @@ def picker_segments(
 ) -> list[board.Segment]:
     height, width = size
     segments = [board.Segment(0, 0, title, board.STYLE_BOLD)]
-    visible_lines = lines[top_index : top_index + max(0, height - CHROME_LINE_COUNT)]
+    visible_lines = lines[top_index : top_index + visible_row_count(height)]
     for offset, line in enumerate(visible_lines, start=top_index):
         is_highlighted = offset == highlight_index
         segments.append(
@@ -83,7 +87,7 @@ def picked_indices(
         key_sets = key_hint_sets(glyphs, enter_label, is_multi_select=is_multi_select)
         while True:
             height, width = screen.getmaxyx()
-            row_count = max(1, height - CHROME_LINE_COUNT)
+            row_count = visible_row_count(height)
             top_index = min(max(top_index, highlight_index - row_count + 1), highlight_index)
             marked_rows = rows
             if is_multi_select:
