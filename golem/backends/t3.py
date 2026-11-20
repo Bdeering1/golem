@@ -28,6 +28,11 @@ TOKEN_REISSUE_SECONDS = 60 * 60
 EXIT_WAITING_FOR_ANSWER = 2
 WAITING_FOR_ANSWER_REASON = "waiting for an answer in T3 Code"
 TERMINAL_ITEM_STATUSES = {"completed", "failed", "cancelled", "interrupted"}
+TERMINAL_RUN_STATUSES = {*TERMINAL_ITEM_STATUSES, "rolled_back"}
+COMPLETED_STATUS = "completed"
+SUBAGENT_ITEM_TYPE = "subagent"
+SESSION_ENDED_STATUSES = {"stopped", "error"}
+SESSION_STOPPED_REASON = "T3 Code stopped the session before its subagents finished"
 USAGE_LIMIT_FAILURE_CLASS = "usage_limit"
 
 
@@ -186,6 +191,7 @@ class ThreadWatcher:
     previous_item_ids: set[str] = field(default_factory=set)
     run_items: dict[str, ledger.JsonObject] = field(default_factory=dict)
     recorded_item_ids: set[str] = field(default_factory=set)
+    run_id: str | None = None
 
     def current_token(self) -> str:
         now = time.monotonic()
@@ -202,7 +208,7 @@ class ThreadWatcher:
             items = json_objects(self.projection().get("turnItems"))
             self.previous_item_ids = {cast("str", item["id"]) for item in items}
 
-    def poll(self) -> None:
+    def poll(self) -> ledger.JsonObject | None:
         with suppress(*t3_code.T3_CODE_ERRORS):
             projection = self.projection()
             for item in json_objects(projection.get("turnItems")):
@@ -223,12 +229,24 @@ class ThreadWatcher:
                     self.task_id, self.session_id, "native_session_id", native_session_id
                 )
                 self.native_session_id = native_session_id
+            return projection
+        return None
+
+    def is_task_running(self) -> bool:
+        task = ledger.load_tasks().get(self.task_id)
+        return (
+            task is not None
+            and task["session_id"] == self.session_id
+            and task["status"] == ledger.STATUS_RUNNING
+        )
 
     def last_failed_error(self) -> ledger.JsonObject:
         failed_errors = [
             item
             for item in self.run_items.values()
-            if item.get("type") == "error" and item.get("status") == "failed"
+            if item.get("type") == "error"
+            and item.get("status") == "failed"
+            and self.run_id in (None, item.get("runId"))
         ]
         return failed_errors[-1] if failed_errors else {}
 
@@ -298,56 +316,159 @@ def send_message(
                 process.kill()
                 process.wait()
                 raise
-        watcher.poll()
         stdout_file.seek(0)
         stderr_file.seek(0)
         return returncode, stdout_file.read(), stderr_file.read()
 
 
-def parsed_reset_time(failure: ledger.JsonObject) -> datetime | None:
-    reset_at = failure.get("resetAt")
-    if not isinstance(reset_at, str):
+def parsed_timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str):
         return None
     try:
-        return datetime.fromisoformat(reset_at)
+        return datetime.fromisoformat(value)
     except ValueError:
         return None
 
 
-def send_outcome(
-    returncode: int, stdout: str, stderr: str, watcher: ThreadWatcher
-) -> common.RunOutcome:
+def send_output(stdout: str) -> ledger.JsonObject:
     try:
         parsed_output = cast("object", json.loads(stdout))
     except json.JSONDecodeError:
-        parsed_output = None
-    output = cast("ledger.JsonObject", parsed_output) if isinstance(parsed_output, dict) else {}
-    reply = output.get("reply")
-    reply_text = reply if isinstance(reply, str) else None
-    if returncode == 0:
-        return common.RunOutcome(returncode, reply_text, is_usage_limit=False)
-    if returncode == EXIT_WAITING_FOR_ANSWER:
-        return common.RunOutcome(
-            returncode, reply_text, is_usage_limit=False, stop_reason=WAITING_FOR_ANSWER_REASON
-        )
-    failure = watcher.last_failure()
-    error = output.get("error")
-    failure_message = failure.get("message")
-    result = next(
-        (
-            text
-            for text in (error, failure_message, stderr.strip(), stdout.strip())
-            if isinstance(text, str) and text
-        ),
-        None,
+        return {}
+    return cast("ledger.JsonObject", parsed_output) if isinstance(parsed_output, dict) else {}
+
+
+def waiting_outcome(reply_text: str | None) -> common.RunOutcome:
+    return common.RunOutcome(
+        EXIT_WAITING_FOR_ANSWER,
+        reply_text,
+        is_usage_limit=False,
+        stop_reason=WAITING_FOR_ANSWER_REASON,
     )
+
+
+def failed_run_outcome(
+    returncode: int, failure: ledger.JsonObject, *messages: object
+) -> common.RunOutcome:
+    result = next((text for text in messages if isinstance(text, str) and text), None)
     is_usage_limit = failure.get("class") == USAGE_LIMIT_FAILURE_CLASS
     return common.RunOutcome(
         returncode,
         result,
         is_usage_limit,
-        reset_time=parsed_reset_time(failure) if is_usage_limit else None,
+        reset_time=parsed_timestamp(failure.get("resetAt")) if is_usage_limit else None,
     )
+
+
+def send_outcome(
+    returncode: int, output: ledger.JsonObject, stdout: str, stderr: str, watcher: ThreadWatcher
+) -> common.RunOutcome:
+    reply = output.get("reply")
+    reply_text = reply if isinstance(reply, str) else None
+    if returncode == 0:
+        return common.RunOutcome(returncode, reply_text, is_usage_limit=False)
+    if returncode == EXIT_WAITING_FOR_ANSWER:
+        return waiting_outcome(reply_text)
+    failure = watcher.last_failure()
+    return failed_run_outcome(
+        returncode,
+        failure,
+        output.get("error"),
+        failure.get("message"),
+        stderr.strip(),
+        stdout.strip(),
+    )
+
+
+def has_active_run(run: ledger.JsonObject | None) -> bool:
+    return run is not None and run.get("status") not in TERMINAL_RUN_STATUSES
+
+
+def has_unfinished_subagent_work(
+    projection: ledger.JsonObject, run: ledger.JsonObject | None
+) -> bool:
+    if run is None:
+        return False
+    subagents = [
+        item
+        for item in json_objects(projection.get("turnItems"))
+        if item.get("type") == SUBAGENT_ITEM_TYPE
+    ]
+    if any(item.get("status") not in TERMINAL_ITEM_STATUSES for item in subagents):
+        return True
+    run_ended_at = parsed_timestamp(run.get("completedAt"))
+    if run_ended_at is None:
+        return False
+    subagent_ended_times = [
+        parsed_timestamp(item.get("completedAt") or item.get("updatedAt")) for item in subagents
+    ]
+    return any(
+        ended_at is not None and ended_at > run_ended_at for ended_at in subagent_ended_times
+    )
+
+
+def is_session_ended(projection: ledger.JsonObject) -> bool:
+    sessions = json_objects(projection.get("providerSessions"))
+    return all(session.get("status") in SESSION_ENDED_STATUSES for session in sessions)
+
+
+def is_request_pending(projection: ledger.JsonObject) -> bool:
+    return any(
+        request.get("status") == "pending"
+        for request in json_objects(projection.get("runtimeRequests"))
+    )
+
+
+def last_reply(projection: ledger.JsonObject, run: ledger.JsonObject | None) -> str | None:
+    if run is None:
+        return None
+    replies = [
+        turn_item_progress(item)
+        for item in json_objects(projection.get("turnItems"))
+        if item.get("type") == "assistant_message" and item.get("runId") == run.get("id")
+    ]
+    return next((reply for reply in reversed(replies) if reply is not None), None)
+
+
+def latest_run_outcome(
+    outcome: common.RunOutcome,
+    projection: ledger.JsonObject,
+    run: ledger.JsonObject | None,
+    watcher: ThreadWatcher,
+) -> common.RunOutcome:
+    if run is None or watcher.run_id is None or run.get("id") == watcher.run_id:
+        return outcome
+    watcher.run_id = cast("str | None", run.get("id"))
+    if run.get("status") == COMPLETED_STATUS:
+        return common.RunOutcome(
+            0, last_reply(projection, run) or outcome.result, is_usage_limit=False
+        )
+    failure = watcher.last_failure()
+    return failed_run_outcome(1, failure, failure.get("message"), run.get("status"))
+
+
+def wait_for_quiet_thread(
+    outcome: common.RunOutcome,
+    watcher: ThreadWatcher,
+    projection: ledger.JsonObject | None,
+) -> common.RunOutcome:
+    # T3 Code runs a subagent's follow-up in a new run, which `thread send --wait` doesn't follow.
+    while True:
+        if projection is not None:
+            run = t3_code.latest_run(projection)
+            if is_request_pending(projection):
+                return waiting_outcome(last_reply(projection, run))
+            is_active = has_active_run(run)
+            if not is_active and not has_unfinished_subagent_work(projection, run):
+                return latest_run_outcome(outcome, projection, run, watcher)
+            if not is_active and is_session_ended(projection):
+                return failed_outcome(SESSION_STOPPED_REASON)
+        if not t3_code.is_running():
+            return failed_outcome(SESSION_STOPPED_REASON)
+        if not watcher.is_task_running():
+            return outcome
+        time.sleep(PROJECTION_POLL_SECONDS)
+        projection = watcher.poll()
 
 
 def failed_outcome(message: str) -> common.RunOutcome:
@@ -390,7 +511,14 @@ def run(
         )
         watcher.skip_previous_items()
         returncode, stdout, stderr = send_message(task, thread_id, watcher, lock_file_descriptors)
-    outcome = send_outcome(returncode, stdout, stderr, watcher)
+        output = send_output(stdout)
+        run_id = output.get("runId")
+        watcher.run_id = run_id if isinstance(run_id, str) else None
+        first_projection = watcher.poll()
+        outcome = send_outcome(returncode, output, stdout, stderr, watcher)
+        is_thread_readable = first_projection is not None or t3_code.is_running()
+        if is_thread_readable and returncode != EXIT_WAITING_FOR_ANSWER:
+            outcome = wait_for_quiet_thread(outcome, watcher, first_projection)
     if outcome.is_usage_limit:
         watcher.disable_auto_resume()
     return outcome

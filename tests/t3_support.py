@@ -47,6 +47,8 @@ class FakeServer:
     commands: list = field(default_factory=list)
     settings_mutations: list = field(default_factory=list)
     projections: list = field(default_factory=lambda: [{"thread": {}, "turnItems": []}])
+    # After a send, each read takes the next one; the last repeats. An exception entry is raised.
+    follow_up_projections: list = field(default_factory=list)
 
     def fetch_projects(self, _origin, _token):
         added_path = self.home / "added-project"
@@ -71,6 +73,12 @@ class FakeServer:
 
     def thread_projection(self, _origin, _token, _thread_id):
         send_count = sum(call.startswith("thread send") for call in self.t3_calls())
+        if send_count and self.follow_up_projections:
+            queue = self.follow_up_projections
+            follow_up = queue.pop(0) if len(queue) > 1 else queue[0]
+            if isinstance(follow_up, Exception):
+                raise follow_up
+            return follow_up
         return self.projections[min(send_count, len(self.projections) - 1)]
 
     def mark_running(self):
