@@ -147,6 +147,16 @@ def test_board_names_a_chain_after_its_first_step_and_labels_the_shown_step():
     assert "2/3 review" in "\n".join(detail_lines)
 
 
+def test_board_shows_the_chain_label_next_to_its_name():
+    tasks = chain_tasks()
+    tasks["fix-login"]["label"] = support.LABEL
+
+    board_lines, detail_lines = board_and_detail_lines(tasks, state=board.BoardState(focus_index=1))
+
+    assert f"fix-login {support.LABEL}" in "\n".join(board_lines)
+    assert f"fix-login {support.LABEL}" in "\n".join(detail_lines)
+
+
 def test_board_task_view_shows_only_chain_states_that_cannot_be_inferred():
     text = frame_text(chain_tasks(), state=board.BoardState(focus_index=1, view=board.VIEW_TASK))
 
@@ -608,6 +618,20 @@ def test_board_filter_narrows_cards_and_escape_clears_it():
 
     assert filtered_ids == ["task-03"]
     assert board.filtered_snapshot(snapshot, state).rows == snapshot.rows
+
+
+def test_board_filter_matches_the_label_of_any_task_in_a_chain():
+    tasks = running_tasks() | chain_tasks()
+    tasks["fix-login-review"]["label"] = support.LABEL
+    snapshot = board.board_snapshot(tasks, NOW)
+    state = board.BoardState(focus_index=1)
+
+    for key in f"/{support.LABEL}\r":
+        board.apply_key(state, ord(key), snapshot)
+
+    assert [row.task_id for row in board.filtered_snapshot(snapshot, state).rows] == [
+        "fix-login-review"
+    ]
 
 
 @pytest.mark.parametrize(

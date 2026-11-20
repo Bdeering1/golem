@@ -291,6 +291,31 @@ def test_list_uses_distinct_status_colors_and_keeps_columns_aligned(
     assert ANSI_COLOR.sub("", colored_output) == plain_output
 
 
+def test_list_shows_label_column_with_the_chain_label(ledger_path, capsys):
+    support.write_tasks(
+        ledger_path,
+        {
+            support.PARENT_ID: support.task_record(
+                ledger.STATUS_FINISHED, task_id=support.PARENT_ID, label=support.LABEL
+            ),
+            support.CHILD_ID: support.task_record(
+                ledger.STATUS_RUNNING, task_id=support.CHILD_ID, after=support.PARENT_ID
+            ),
+            support.SIBLING_ID: support.task_record(
+                ledger.STATUS_RUNNING, task_id=support.SIBLING_ID
+            ),
+        },
+    )
+
+    header, *rows = support.list_output(capsys).splitlines()
+
+    assert header.split()[:2] == ["ID", "LABEL"]
+    assert [row.split()[:2] for row in rows] == [
+        [support.CHILD_ID, support.LABEL],
+        [support.SIBLING_ID, ledger.STATUS_RUNNING],
+    ]
+
+
 @pytest.mark.parametrize(
     ("is_tty", "term", "no_color"),
     [

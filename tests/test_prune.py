@@ -4,7 +4,6 @@ import itertools
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import override
 
 import pytest
 
@@ -12,22 +11,6 @@ from golem import cli, ledger, locks
 from tests import support
 
 SIBLING_CHILD_ID = "sibling-child"
-
-
-class TerminalInput(io.StringIO):
-    def __init__(self, answers, on_first_read=lambda: None):
-        super().__init__(answers)
-        self.on_first_read = on_first_read
-
-    @override
-    def isatty(self):
-        return True
-
-    @override
-    def readline(self, size: int = -1) -> str:
-        self.on_first_read()
-        self.on_first_read = lambda: None
-        return super().readline(size)
 
 
 MERGED_PULL_REQUEST: ledger.PullRequest = {
@@ -117,7 +100,7 @@ def test_prune_applies_each_answer_in_turn(ledger_path, monkeypatch, answers, re
         ledger_path,
         {task_id: done_task(task_id) for task_id in task_ids},
     )
-    monkeypatch.setattr(sys, "stdin", TerminalInput(answers))
+    monkeypatch.setattr(sys, "stdin", support.TerminalInput(answers))
 
     assert cli.main(["prune"]) == 0
 
@@ -136,7 +119,7 @@ def test_prune_interrupted_at_prompt_deletes_nothing(ledger_path, monkeypatch):
             support.SIBLING_ID: done_task(support.SIBLING_ID),
         },
     )
-    monkeypatch.setattr(sys, "stdin", TerminalInput("y\n", interrupt))
+    monkeypatch.setattr(sys, "stdin", support.TerminalInput("y\n", interrupt))
 
     assert cli.main(["prune"]) == 130
 
@@ -165,7 +148,7 @@ def test_prune_asks_once_per_chain(ledger_path, monkeypatch, capsys, answers, re
     write_chain(
         ledger_path, [ledger.STATUS_FINISHED, ledger.STATUS_FINISHED, ledger.STATUS_CANCELLED]
     )
-    monkeypatch.setattr(sys, "stdin", TerminalInput(answers))
+    monkeypatch.setattr(sys, "stdin", support.TerminalInput(answers))
 
     assert cli.main(["prune"]) == 0
 
@@ -179,7 +162,7 @@ def test_prune_asks_once_per_chain(ledger_path, monkeypatch, capsys, answers, re
 
 def test_prune_keeps_cancelled_parent_of_declined_task(ledger_path, monkeypatch, capsys):
     write_chain(ledger_path, [ledger.STATUS_CANCELLED, ledger.STATUS_FINISHED])
-    monkeypatch.setattr(sys, "stdin", TerminalInput("n\n"))
+    monkeypatch.setattr(sys, "stdin", support.TerminalInput("n\n"))
 
     assert cli.main(["prune"]) == 0
 
@@ -211,7 +194,7 @@ def test_prune_applies_all_and_quit_per_chain(
             support.TASK_ID: support.task_record(ledger.STATUS_CANCELLED),
         },
     )
-    monkeypatch.setattr(sys, "stdin", TerminalInput(answers))
+    monkeypatch.setattr(sys, "stdin", support.TerminalInput(answers))
 
     assert cli.main(["prune"]) == 0
 
@@ -304,7 +287,9 @@ def test_prune_keeps_only_task_that_changes_while_prompting(
 
     with contextlib.ExitStack() as exit_stack:
         monkeypatch.setattr(
-            sys, "stdin", TerminalInput("y\ny\n", lambda: change_task(ledger_path, exit_stack))
+            sys,
+            "stdin",
+            support.TerminalInput("y\ny\n", lambda: change_task(ledger_path, exit_stack)),
         )
         assert cli.main(["prune"]) == 0
 

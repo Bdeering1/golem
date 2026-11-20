@@ -117,6 +117,14 @@ def test_pickup_all_opens_task_in_t3_code_default_client(
     assert support.read_task(ledger_path)["status"] == ledger.STATUS_FINISHED
 
 
+def test_labelled_task_thread_title_is_its_name(server, ledger_path):
+    support.write_task(ledger_path, ledger.STATUS_FINISHED, label=support.LABEL)
+
+    assert cli.main(["pickup", support.LABEL, "--client", "t3-code"]) == 0
+
+    assert t3_support.created_thread(server)["title"] == f"{support.TASK_ID} {support.LABEL}"
+
+
 def test_repeat_pickup_opens_existing_thread(server, claude_task, ledger_path, fake_commands):
     (server.home / "thread-present").touch()
 

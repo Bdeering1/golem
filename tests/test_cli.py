@@ -265,3 +265,31 @@ def test_invalid_default_backend_fails_run_only(
 
     assert not ledger_path.exists()
     assert cli.main(["alias", "list"]) == 0
+
+
+@pytest.mark.parametrize("label", ["", "two words"])
+def test_run_rejects_empty_or_whitespace_label(installed_launch_agent, ledger_path, label):
+    with pytest.raises(SystemExit, match="--label"):
+        cli.main(["run", support.TASK_ID, support.PROMPT, "--now", "--label", label])
+
+    assert not ledger_path.exists()
+
+
+def test_run_after_parent_label_labels_only_the_new_task(installed_launch_agent, ledger_path):
+    support.write_task(
+        ledger_path, ledger.STATUS_SCHEDULED, task_id=support.PARENT_ID, label="parent-label"
+    )
+
+    assert (
+        cli.main(
+            [
+                *["run", support.CHILD_ID, support.CHILD_PROMPT, "--after", "parent-label"],
+                *["--label", support.LABEL, "--then", support.GRANDCHILD_ID, support.PROMPT],
+            ]
+        )
+        == 0
+    )
+
+    child = support.read_task(ledger_path, support.CHILD_ID)
+    assert (child["after"], child["label"]) == (support.PARENT_ID, support.LABEL)
+    assert "label" not in support.read_task(ledger_path, support.GRANDCHILD_ID)

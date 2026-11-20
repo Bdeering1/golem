@@ -521,7 +521,7 @@ def board_snapshot(tasks: ledger.Tasks, now: datetime) -> BoardSnapshot:
 
 def is_matching(row: display.ListRow, tasks: ledger.Tasks, query: str) -> bool:
     searched_text = " ".join(
-        f"{task_id} {tasks[task_id].get('prompt', '')}"
+        f"{task_id} {tasks[task_id].get('label', '')} {tasks[task_id].get('prompt', '')}"
         for task_id in chains.chain_task_ids(tasks, row.task_id)
     )
     return query.casefold() in f"{row.directory} {searched_text}".casefold()
@@ -770,6 +770,20 @@ def fitted_task_id(task_id: str, width: int, glyphs: Glyphs) -> str:
     if is_word_cut and word_end > 0 and len(head) - word_end <= MAX_WORD_SNAP:
         head = head[:word_end]
     return f"{head.rstrip('-')}{glyphs.ellipsis}{tail}"
+
+
+def fitted_chain_name(tasks: ledger.Tasks, task_id: str, width: int, glyphs: Glyphs) -> str:
+    root_id = chains.root_task_id(tasks, task_id)
+    label = tasks[root_id].get("label")
+    id_text = fitted_task_id(root_id, width, glyphs)
+    if label is None:
+        return id_text
+    if len(root_id) + 1 + len(label) <= width:
+        return f"{root_id} {label}"
+    label_width = width - len(id_text) - 1
+    if label_width <= len(glyphs.ellipsis):
+        return id_text
+    return f"{id_text} {fitted(label, label_width, glyphs)}"
 
 
 def duration_text(seconds: float) -> str:
@@ -1117,9 +1131,7 @@ def card_segments(
     color, mark_color = card_colors(row, context, is_selected=is_selected)
     right_parts = card_badge_parts(row, context)
     right_width = parts_width(right_parts) + (1 if right_parts else 0)
-    title = fitted_task_id(
-        chain_name(context.snapshot.tasks, row.task_id), width - CARD_INDENT, glyphs
-    )
+    title = fitted_chain_name(context.snapshot.tasks, row.task_id, width - CARD_INDENT, glyphs)
     detail_width = width - CARD_INDENT - right_width
     facts = card_facts(row, context)
     time_text, reason, short_reason, repository = facts
@@ -1208,7 +1220,7 @@ def boxed_card_segments(
     horizontal = glyphs.heavy_horizontal if is_selected else glyphs.horizontal
     vertical = glyphs.heavy_vertical if is_selected else glyphs.vertical
     content_width = width - BOX_BORDER_WIDTH
-    name = chain_name(context.snapshot.tasks, row.task_id)
+    name = chain_display_name(context.snapshot.tasks, row.task_id)
     facts = card_facts(row, context)
     status_time = status_line_time(row, context, facts)
     badge_parts = card_badge_parts(row, context, is_named=True)
@@ -1223,7 +1235,7 @@ def boxed_card_segments(
     )
     right_parts = [] if is_compact else badge_parts
     title_width = content_width - parts_width(border_parts)
-    title = fitted_task_id(name, title_width - 1, glyphs)
+    title = fitted_chain_name(context.snapshot.tasks, row.task_id, title_width - 1, glyphs)
     is_changed = row.task_id in changed_task_ids
     title_style = card_title_style(row, context, is_selected=is_selected)
     top_parts: list[Part] = [
@@ -1701,7 +1713,7 @@ def detail_title_segments(
             (f" {compact_status_text(row, context)} ", STYLE_DIM, None),
         ],
     ]
-    name = chain_name(snapshot.tasks, row.task_id)
+    name = chain_display_name(snapshot.tasks, row.task_id)
     right_parts = next(
         (
             option
@@ -1711,7 +1723,8 @@ def detail_title_segments(
         right_options[-1],
     )
     name_width = max(1, title_width - CARD_INDENT - 2 - parts_width(right_parts) - 1)
-    title_parts: list[Part] = [(f" {fitted_task_id(name, name_width, glyphs)} ", STYLE_BOLD, None)]
+    title = fitted_chain_name(snapshot.tasks, row.task_id, name_width, glyphs)
+    title_parts: list[Part] = [(f" {title} ", STYLE_BOLD, None)]
     right_x = title_width - 1 - parts_width(right_parts)
     segments += part_segments(rule_y, CARD_INDENT - 1, title_parts)
     return [*segments, *part_segments(rule_y, right_x, right_parts)]
@@ -1953,10 +1966,10 @@ def task_heading_parts(
     facts = [text for text in (when, f"step {step}" if step else "") if text]
     facts_text = f" {glyphs.separator} ".join(facts)
     facts_text = f"  {facts_text}" if facts_text else ""
-    task_id = fitted(chain_name(snapshot.tasks, row.task_id), line_width - len(status_text), glyphs)
-    facts_text = fitted(facts_text, max(0, line_width - len(task_id) - len(status_text)), glyphs)
+    title = fitted_chain_name(snapshot.tasks, row.task_id, line_width - len(status_text), glyphs)
+    facts_text = fitted(facts_text, max(0, line_width - len(title) - len(status_text)), glyphs)
     return [
-        (task_id, STYLE_BOLD, None),
+        (title, STYLE_BOLD, None),
         (status_text, STYLE_PLAIN, color),
         (facts_text, STYLE_DIM, None),
     ]
@@ -1988,27 +2001,29 @@ def detail_reason_text(row: display.ListRow, snapshot: BoardSnapshot) -> str:
     return row_reason(row, snapshot)
 
 
-def chain_name(tasks: ledger.Tasks, task_id: str) -> str:
-    parent_id = tasks[task_id].get("after")
-    while parent_id is not None and parent_id in tasks:
-        task_id = parent_id
-        parent_id = tasks[task_id].get("after")
-    return task_id
-
-
 def step_name(tasks: ledger.Tasks, task_id: str) -> str:
-    root_id = chain_name(tasks, task_id)
+    root_id = chains.root_task_id(tasks, task_id)
     return "" if task_id == root_id else task_id.removeprefix(f"{root_id}-")
 
 
-def task_label(tasks: ledger.Tasks, task_id: str) -> str:
+def chain_display_name(tasks: ledger.Tasks, task_id: str) -> str:
+    root_id = chains.root_task_id(tasks, task_id)
+    return ledger.task_name(root_id, tasks[root_id])
+
+
+def step_display_name(tasks: ledger.Tasks, task_id: str) -> str:
     step = step_name(tasks, task_id)
-    name = chain_name(tasks, task_id)
+    return ledger.task_name(step, tasks[task_id]) if step else ""
+
+
+def task_display_name(tasks: ledger.Tasks, task_id: str) -> str:
+    step = step_display_name(tasks, task_id)
+    name = chain_display_name(tasks, task_id)
     return f"{name} ({step})" if step else name
 
 
 def step_text(row: display.ListRow, tasks: ledger.Tasks) -> str:
-    return f"{row.step} {step_name(tasks, row.task_id)}".strip()
+    return f"{row.step} {step_display_name(tasks, row.task_id)}".strip()
 
 
 def chain_pull_requests(snapshot: BoardSnapshot, task_id: str) -> list[ledger.PullRequest]:
@@ -2090,14 +2105,15 @@ def status_line_segments(
 ) -> list[Segment] | None:
     if state.pending_action == ACTION_CLOSE_ALL:
         closable_count = len(closable_task_ids(snapshot))
-        verb, step_suffix = "Close", ""
+        verb, step_suffix, task_id = "Close", "", None
         name = (
             f"{'all ' if closable_count > 1 else ''}{counted_text(closable_count, 'finished task')}"
         )
     elif state.pending_action is not None and row is not None:
         verb = ACTION_LABELS[state.pending_action].capitalize()
-        name = chain_name(snapshot.tasks, row.task_id)
-        step = step_name(snapshot.tasks, row.task_id)
+        task_id = row.task_id
+        name = chain_display_name(snapshot.tasks, row.task_id)
+        step = step_display_name(snapshot.tasks, row.task_id)
         step_suffix = f" ({step})" if step else ""
     elif state.flash_text and time.monotonic() < state.flash_until:
         return [Segment(y, 0, fitted(state.flash_text, width - 1, glyphs), STYLE_BOLD)]
@@ -2107,7 +2123,12 @@ def status_line_segments(
     if len(verb) + len(name) + len(step_suffix) + len(answer) + 4 >= width:
         answer = CONFIRM_SHORT_ANSWER_TEXT
     name_width = width - len(verb) - len(answer) - 5 - len(step_suffix)
-    subject = f"{fitted_task_id(name, name_width, glyphs)}{step_suffix}"
+    fitted_name = (
+        fitted(name, name_width, glyphs)
+        if task_id is None
+        else fitted_chain_name(snapshot.tasks, task_id, name_width, glyphs)
+    )
+    subject = f"{fitted_name}{step_suffix}"
     prompt = f"{verb} {subject}? "
     return [
         Segment(y, 0, prompt, STYLE_BOLD),
@@ -2490,7 +2511,7 @@ def chain_steps_text(tasks: ledger.Tasks, chain_ids: set[str], glyphs: Glyphs) -
         is_inferable = (status == ledger.STATUS_FINISHED and index < active_index) or (
             status == ledger.STATUS_WAITING and index > active_index
         )
-        name = step_name(tasks, chain_id) or chain_id
+        name = step_display_name(tasks, chain_id) or ledger.task_name(chain_id, tasks[chain_id])
         steps.append(name if is_inferable else f"{name} ({status})")
     return f" {glyphs.right} ".join(steps)
 
@@ -2502,7 +2523,10 @@ def task_fields(
     due_at = task.get("due_at") if row.status == ledger.STATUS_SCHEDULED else None
     chain_ids = chains.chain_task_ids(snapshot.tasks, row.task_id)
     fields: list[tuple[str, str]] = [
-        ("Task ID", row.task_id if step_name(snapshot.tasks, row.task_id) else ""),
+        (
+            "Task ID",
+            ledger.task_name(row.task_id, task) if step_name(snapshot.tasks, row.task_id) else "",
+        ),
         ("Directory", display.display_directory(row.directory)),
         ("Worktree", display.display_directory(task.get("worktree", ""))),
         ("Backend", task["backend"]),
@@ -3285,7 +3309,7 @@ def run_action(
     if action == ACTION_RERUN_GATE:
         if row.task_id not in state.gate_checks:
             state.gate_checks[row.task_id] = start_gate_check(row.task_id)
-        flash(state, f"Rechecking the gate for {task_label(snapshot.tasks, row.task_id)}")
+        flash(state, f"Rechecking the gate for {task_display_name(snapshot.tasks, row.task_id)}")
         return
     if action == ACTION_RETRY:
         returncode, output = run_captured([*GOLEM_COMMAND, action, row.task_id])
@@ -3313,7 +3337,7 @@ def run_action(
         flash(state, opened_text if returncode == 0 else output)
         return
     returncode, output = run_captured([*GOLEM_COMMAND, action, row.task_id])
-    done_text = f"{ACTION_DONE_VERBS[action]} {task_label(snapshot.tasks, row.task_id)}"
+    done_text = f"{ACTION_DONE_VERBS[action]} {task_display_name(snapshot.tasks, row.task_id)}"
     flash(state, done_text if returncode == 0 else output)
 
 
@@ -3338,7 +3362,7 @@ def report_gate_checks(state: BoardState, tasks: ledger.Tasks) -> None:
             error_file.seek(0)
             error_output = error_file.read()
         reason = display.first_line(error_output.strip()).removeprefix(GOLEM_PREFIX)
-        label = task_label(tasks, task_id) if task_id in tasks else task_id
+        label = task_display_name(tasks, task_id) if task_id in tasks else task_id
         if process.returncode == 0:
             flash(state, f"Gate passed for {label}; follow-ups started")
         else:
@@ -3362,7 +3386,7 @@ def handle_action_key(
             run_action(screen, state, snapshot, action, row)
             return True
         declined_text = (
-            f"Didn't {ACTION_LABELS[action]} {task_label(snapshot.tasks, row.task_id)}"
+            f"Didn't {ACTION_LABELS[action]} {task_display_name(snapshot.tasks, row.task_id)}"
             if action != ACTION_CLOSE_ALL and row is not None
             else CLOSE_ALL_DECLINED_TEXT
         )
@@ -3404,7 +3428,7 @@ def mark_changed_tasks(state: BoardState, previous: BoardSnapshot, current: Boar
         if previous_position != position:
             state.changed_until[task_id] = until
         if previous_position is not None and previous_position[1] != position[1]:
-            status_changes.append(f"{task_label(current.tasks, task_id)} {position[1]}")
+            status_changes.append(f"{task_display_name(current.tasks, task_id)} {position[1]}")
     if status_changes:
         flash(state, ", ".join(status_changes))
     selected_task_id = state.selected_task_ids[state.focus_index]
@@ -3419,7 +3443,7 @@ def mark_changed_tasks(state: BoardState, previous: BoardSnapshot, current: Boar
         return
     state.focus_index = titles.index(column)
     state.selected_task_ids[state.focus_index] = selected_task_id
-    flash(state, f"{task_label(current.tasks, selected_task_id)} {status}, now in {column}")
+    flash(state, f"{task_display_name(current.tasks, selected_task_id)} {status}, now in {column}")
 
 
 def board_loop(screen: curses.window, *, is_color: bool, glyphs: Glyphs) -> int:

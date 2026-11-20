@@ -10,7 +10,11 @@ def thread_link(task: ledger.Task, conversation_id: str) -> str:
 
 
 def ensure_thread(
-    task: ledger.Task, conversation_id: str, thread_id: str, instance: t3_code.ClaudeInstance | None
+    task_id: str,
+    task: ledger.Task,
+    conversation_id: str,
+    thread_id: str,
+    instance: t3_code.ClaudeInstance | None,
 ) -> None:
     t3_code.ensure_app_running()
     is_present = t3_code.is_thread_present(thread_id)
@@ -32,6 +36,7 @@ def ensure_thread(
         thread_id,
         t3_code.thread_instance_id(driver, instance),
         t3_code.default_model(driver),
+        task_id=task_id,
     )
     command["importedNativeThread"] = {
         "ref": {"driver": driver, "nativeId": conversation_id, "strength": "strong"}
@@ -42,14 +47,14 @@ def ensure_thread(
 
 
 def prepare_thread(
-    task: ledger.Task, conversation_id: str, instance: t3_code.ClaudeInstance | None
+    task_id: str, task: ledger.Task, conversation_id: str, instance: t3_code.ClaudeInstance | None
 ) -> None:
     cli_path = t3_code.t3_cli_path()
     if not cli_path.exists():
         raise SystemExit(f"golem: T3 Code is not installed: {cli_path} not found")
     thread_id = t3_code.task_thread_id(task, conversation_id)
     try:
-        ensure_thread(task, conversation_id, thread_id, instance)
+        ensure_thread(task_id, task, conversation_id, thread_id, instance)
     except t3_code.T3_CODE_ERRORS as error:
         raise SystemExit(
             f"golem: T3 Code {t3_code.version()} could not open thread {thread_id}: {error}"

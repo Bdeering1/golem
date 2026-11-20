@@ -64,6 +64,7 @@ class Task(TypedDict):
     status: str
     session_id: str
     backend: str
+    label: NotRequired[str]
     environment: NotRequired[dict[str, str]]
     after: NotRequired[str]
     due_at: NotRequired[str]
@@ -116,6 +117,7 @@ class Arguments(argparse.Namespace):
     handler: Callable[[Arguments], int]
     agent_args: list[str]
     id: str | None
+    label: str | None
     prompt: str | None
     file: str | None
     backend: str
@@ -274,6 +276,11 @@ def existing_task(tasks: Tasks, task_id: str) -> Task:
     if task_id not in tasks:
         raise SystemExit(f"golem: task not found: {task_id}")
     return tasks[task_id]
+
+
+def task_name(task_id: str, task: Task) -> str:
+    label = task.get("label")
+    return task_id if label is None else f"{task_id} {label}"
 
 
 def are_pull_requests_finished(pull_requests: list[PullRequest]) -> bool:

@@ -92,7 +92,7 @@ def wait_for_thread(app: Path, conversation_id: str, lock_path: Path) -> None:
         time.sleep(LINK_INTERVAL_SECONDS)
 
 
-def prepare_thread(task: ledger.Task, conversation_id: str) -> None:
+def prepare_thread(_task_id: str, task: ledger.Task, conversation_id: str) -> None:
     app = app_path()
     if app is None:
         raise SystemExit(

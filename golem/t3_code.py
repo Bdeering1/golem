@@ -320,6 +320,12 @@ def worktree_and_branch(task: ledger.Task, root: str) -> tuple[str | None, str |
     return directory, branch or None
 
 
+def thread_title(task_id: str, task: ledger.Task, thread_id: str) -> str:
+    if task.get("label") is None:
+        return (task["prompt"].strip().splitlines() or [thread_id])[0]
+    return ledger.task_name(task_id, task)
+
+
 def thread_create_command(
     origin: str,
     token: str,
@@ -328,6 +334,7 @@ def thread_create_command(
     instance_id: str,
     model: str,
     *,
+    task_id: str,
     model_options: list[ledger.JsonObject] | None = None,
 ) -> ledger.JsonObject:
     root = project_root(task)
@@ -342,7 +349,7 @@ def thread_create_command(
         "commandId": str(uuid.uuid4()),
         "threadId": thread_id,
         "projectId": project_id(origin, token, root),
-        "title": (task["prompt"].strip().splitlines() or [thread_id])[0],
+        "title": thread_title(task_id, task, thread_id),
         "modelSelection": model_selection,
         "runtimeMode": "full-access",
         "interactionMode": "default",

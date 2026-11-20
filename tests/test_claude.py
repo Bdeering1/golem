@@ -133,3 +133,14 @@ def test_next_reset_time_picks_latest_exhausted_window(
     )
 
     assert claude.next_reset_time(os.environ.copy()) == expected
+
+
+def test_labelled_task_session_name_includes_label(
+    installed_launch_agent, fake_commands, ledger_path
+):
+    cli.main(["run", support.TASK_ID, support.PROMPT, "--now", "--label", support.LABEL])
+    task = support.read_task(ledger_path)
+
+    assert cli.main(["_execute", support.TASK_ID, task["session_id"]]) == 0
+    arguments = support.logged_claude_args(fake_commands)
+    assert arguments[arguments.index("--name") + 1] == f"{support.TASK_ID} {support.LABEL}"

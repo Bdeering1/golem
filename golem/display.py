@@ -19,7 +19,7 @@ STATUS_COLORS = {
 }
 DETAIL_LINE_COLOR = 245
 ANSI_RESET = "\033[0m"
-LIST_HEADERS = ("ID", "STEP", "STATUS", "DIRECTORY", "DETAIL")
+LIST_HEADERS = ("ID", "LABEL", "STEP", "STATUS", "DIRECTORY", "DETAIL")
 DETAIL_LINE_INDENT = "    "
 COLUMN_QUEUED = "Queued"
 COLUMN_RUNNING = "Running"
@@ -42,14 +42,15 @@ DONE_THREAD_STATES = {
 
 class ListRow(NamedTuple):
     task_id: str
+    label: str
     step: str
     status: str
     directory: str
     detail: str
     column: str | None
 
-    def cells(self) -> tuple[str, str, str, str, str]:
-        return (self.task_id, self.step, self.status, self.directory, self.detail)
+    def cells(self) -> tuple[str, str, str, str, str, str]:
+        return (self.task_id, self.label, self.step, self.status, self.directory, self.detail)
 
 
 LIST_STATUS_COLUMN = ListRow._fields.index("status")
@@ -243,9 +244,11 @@ def list_rows(tasks: ledger.Tasks, today: date) -> list[ListRow]:
         shown_task = tasks[shown_id]
         column, chain_reason = chain_column(tasks, chain_ids, today)
         step_count = max(chains.task_depth(tasks, chain_id) for chain_id in chain_ids)
+        root_id = chains.root_task_id(tasks, shown_id)
         rows.append(
             ListRow(
                 shown_id,
+                tasks[root_id].get("label", ""),
                 f"{chains.task_depth(tasks, shown_id)}/{step_count}" if len(chain_ids) > 1 else "",
                 shown_task["status"],
                 shown_task["cwd"],
@@ -261,6 +264,14 @@ def detail_line(detail: str, *, is_color: bool) -> str:
     if not is_color:
         return f"{DETAIL_LINE_INDENT}{detail}"
     return f"{DETAIL_LINE_INDENT}\033[38;5;{DETAIL_LINE_COLOR}m{detail}{ANSI_RESET}"
+
+
+def aligned_lines(rows: list[tuple[str, ...]]) -> list[str]:
+    widths = [max(len(row[index]) for row in rows) for index in range(len(rows[0]))]
+    return [
+        "  ".join(value.ljust(width) for value, width in zip(row, widths, strict=True)).rstrip()
+        for row in rows
+    ]
 
 
 def table_lines(

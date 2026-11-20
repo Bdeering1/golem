@@ -26,13 +26,13 @@ def accept_arguments(_agent_args: list[str]) -> None:
     pass
 
 
-def skip_preparation(_task: ledger.Task, _conversation_id: str) -> None:
+def skip_preparation(_task_id: str, _task: ledger.Task, _conversation_id: str) -> None:
     pass
 
 
-def prepare_t3_code_thread(task: ledger.Task, conversation_id: str) -> None:
+def prepare_t3_code_thread(task_id: str, task: ledger.Task, conversation_id: str) -> None:
     t3_code_threads.prepare_thread(
-        task, conversation_id, accounts.t3_claude_instance(task.get("account"))
+        task_id, task, conversation_id, accounts.t3_claude_instance(task.get("account"))
     )
 
 
@@ -44,7 +44,7 @@ class Client:
     command: Callable[[ledger.Task, str, list[str]], list[str]]
     environment: Callable[[dict[str, str]], dict[str, str]] = keep_environment
     validate_arguments: Callable[[list[str]], None] = accept_arguments
-    prepare: Callable[[ledger.Task, str], None] = skip_preparation
+    prepare: Callable[[str, ledger.Task, str], None] = skip_preparation
     has_t3_code_thread: bool = False
 
 

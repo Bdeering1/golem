@@ -39,7 +39,10 @@ def notify_task(task_id: str, task: ledger.Task, outcome: str) -> None:
         else task.get("result") or task.get("setup_failure_reason", "")
     )
     message = display.first_line(summary) or display.first_line(task["prompt"])
-    notify(f"golem: {task_id} {outcome}", message[:NOTIFICATION_MESSAGE_MAX_LENGTH])
+    notify(
+        f"golem: {ledger.task_name(task_id, task)} {outcome}",
+        message[:NOTIFICATION_MESSAGE_MAX_LENGTH],
+    )
 
 
 def notify_failed_tasks(failed_tasks: list[tuple[str, ledger.Task]]) -> None:

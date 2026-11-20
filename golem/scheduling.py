@@ -41,6 +41,7 @@ def new_task_record(
     backend: str,
     *,
     after: str | None = None,
+    label: str | None = None,
 ) -> ledger.Task:
     record: ledger.Task = {
         "cwd": placement.cwd,
@@ -51,6 +52,8 @@ def new_task_record(
         "environment": {**spawn.captured_environment(), **placement.environment},
         "backend": backend,
     }
+    if label is not None:
+        record["label"] = label
     if after is not None:
         record["after"] = after
     if placement.auto_pickup_client is not None:
@@ -132,9 +135,12 @@ def schedule_new_task(
     backend: str,
     placement: RunPlacement,
     follow_up_records: ledger.Tasks,
+    label: str | None,
 ) -> int:
     due_time = when or datetime.now(UTC).astimezone()
-    record = new_task_record(placement, prompt, agent_args, due_time, backend, after=after)
+    record = new_task_record(
+        placement, prompt, agent_args, due_time, backend, after=after, label=label
+    )
     records = {task_id: record, **follow_up_records}
     with ledger.locked_ledger() as (tasks, worktrees):
         if after is not None and chains.is_dependent_reservable(tasks, after):
@@ -180,6 +186,7 @@ def retry_task(task_id: str, *, is_now: bool, at_text: str | None) -> int:
             when,
             task["backend"],
             after=task.get("after"),
+            label=task.get("label"),
         )
         if "environment" in task:
             record["environment"] = task["environment"]
@@ -290,7 +297,13 @@ def schedule_run_task(
     task_ids = [task_id, *follow_up_records]
     if after is not None:
         dependent_record = new_task_record(
-            placement, prompt_text, task_args, None, arguments.backend, after=after
+            placement,
+            prompt_text,
+            task_args,
+            None,
+            arguments.backend,
+            after=after,
+            label=arguments.label,
         )
         open_t3_code_for_replaced_threads(task_ids, after)
         if reserve_dependent_task(
@@ -317,4 +330,5 @@ def schedule_run_task(
         backend=arguments.backend,
         placement=placement,
         follow_up_records=follow_up_records,
+        label=arguments.label,
     )

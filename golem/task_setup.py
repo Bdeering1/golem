@@ -21,6 +21,7 @@ def setup_input_json(task_id: str, task: ledger.Task) -> str:
     return json.dumps(
         {
             "task_id": task_id,
+            "label": task.get("label"),
             "session_id": registry.task_backend(task).conversation_id(task),
             "directory": ledger.task_directory(task),
             "prompt": task["prompt"],
