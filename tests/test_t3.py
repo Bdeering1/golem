@@ -1,4 +1,5 @@
 import json
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -36,14 +37,48 @@ USAGE_LIMIT_ITEM = {
         "resetAt": USAGE_LIMIT_RESET_AT,
     },
 }
+FIRST_RUN_ID = "run"
+LATER_RUN_ID = "later-run"
+LATER_REPLY = "finished after the subagent"
+STARTED_AT = "2030-01-01T10:00:00.000Z"
+FIRST_RUN_ENDED_AT = "2030-01-01T10:01:00.000Z"
+SUBAGENT_ENDED_AT = "2030-01-01T10:02:00.000Z"
+LATER_RUN_ENDED_AT = "2030-01-01T10:03:00.000Z"
+READY_SESSION = {"id": "session", "status": "ready"}
+STOPPED_SESSION = {"id": "session", "status": "stopped"}
+FIRST_RUN_ENDED = {
+    "id": FIRST_RUN_ID,
+    "ordinal": 1,
+    "status": "completed",
+    "startedAt": STARTED_AT,
+    "completedAt": FIRST_RUN_ENDED_AT,
+}
+LATER_RUN = {"id": LATER_RUN_ID, "ordinal": 2, "startedAt": SUBAGENT_ENDED_AT}
+RUNNING_SUBAGENT = {
+    "id": "subagent",
+    "runId": FIRST_RUN_ID,
+    "type": "subagent",
+    "status": "running",
+    "startedAt": STARTED_AT,
+    "updatedAt": FIRST_RUN_ENDED_AT,
+}
+ENDED_SUBAGENT = {
+    **RUNNING_SUBAGENT,
+    "status": "completed",
+    "completedAt": SUBAGENT_ENDED_AT,
+    "updatedAt": SUBAGENT_ENDED_AT,
+}
+LATER_FAILURE_MESSAGE = "later run failed"
 CLAUDE_TRANSCRIPT = f".claude/projects/project/{NATIVE_SESSION_ID}.jsonl"
 CODEX_TRANSCRIPT = (
     f".codex/sessions/2030/01/01/rollout-2030-01-01T10-00-00-{NATIVE_SESSION_ID}.jsonl"
 )
 
 
-def projection(*items: object):
+def projection(*items: object, runs=(), sessions=()):
     return {
+        "runs": list(runs),
+        "providerSessions": list(sessions),
         "thread": {"activeProviderThreadId": "provider-thread"},
         "providerThreads": [
             {
@@ -82,6 +117,12 @@ def t3_server(server, installed_launch_agent):
     server.projections.append(projection(COMMAND_ITEM, MESSAGE_ITEM))
     write_send_result(server, 0, reply=T3_REPLY)
     return server
+
+
+@pytest.fixture
+def follow_ups(t3_server, monkeypatch):
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+    return t3_server.follow_up_projections
 
 
 @pytest.mark.parametrize(
@@ -382,3 +423,99 @@ def test_run_starts_t3_code_when_it_is_not_running(
         f"-b {t3_code.APP_BUNDLE_ID}"
     ]
     assert task["status"] == ledger.STATUS_FINISHED
+
+
+def later_run_message(text):
+    return {
+        "id": "later-message",
+        "runId": LATER_RUN_ID,
+        "status": "completed",
+        "type": "assistant_message",
+        "text": text,
+    }
+
+
+def test_background_subagent_keeps_task_running_until_the_later_run_ends(
+    t3_server, follow_ups, ledger_path
+):
+    later_run_ended = {**LATER_RUN, "status": "completed", "completedAt": LATER_RUN_ENDED_AT}
+    follow_ups[:] = [
+        projection(RUNNING_SUBAGENT, runs=[FIRST_RUN_ENDED], sessions=[READY_SESSION]),
+        projection(ENDED_SUBAGENT, runs=[FIRST_RUN_ENDED], sessions=[READY_SESSION]),
+        projection(
+            ENDED_SUBAGENT,
+            runs=[FIRST_RUN_ENDED, {**LATER_RUN, "status": "running"}],
+            sessions=[READY_SESSION],
+        ),
+        projection(
+            ENDED_SUBAGENT,
+            later_run_message(LATER_REPLY),
+            runs=[FIRST_RUN_ENDED, later_run_ended],
+            sessions=[READY_SESSION],
+        ),
+    ]
+
+    task = run_t3_task(ledger_path)
+
+    assert task["status"] == ledger.STATUS_FINISHED
+    assert task["result"] == LATER_REPLY
+
+
+def test_stopped_session_fails_task_with_subagent_running(t3_server, follow_ups, ledger_path):
+    follow_ups[:] = [
+        projection(RUNNING_SUBAGENT, runs=[FIRST_RUN_ENDED], sessions=[STOPPED_SESSION])
+    ]
+
+    task = run_t3_task(ledger_path)
+
+    assert task["status"] == ledger.STATUS_FAILED
+    assert task["result"] == t3.SESSION_STOPPED_REASON
+
+
+@pytest.mark.parametrize(
+    ("failure", "is_usage_limit"),
+    [
+        pytest.param({"message": LATER_FAILURE_MESSAGE}, False, id="failure"),
+        pytest.param(USAGE_LIMIT_ITEM["failure"], True, id="usage-limit"),
+    ],
+)
+def test_failure_in_later_run_fails_or_reschedules_task(
+    t3_server, follow_ups, ledger_path, failure, is_usage_limit
+):
+    later_error = {"id": "later-error", "runId": LATER_RUN_ID, "status": "failed", "type": "error"}
+    later_run_failed = {**LATER_RUN, "status": "failed", "completedAt": LATER_RUN_ENDED_AT}
+    follow_ups[:] = [
+        projection(RUNNING_SUBAGENT, runs=[FIRST_RUN_ENDED], sessions=[READY_SESSION]),
+        projection(
+            ENDED_SUBAGENT,
+            {**later_error, "failure": failure},
+            runs=[FIRST_RUN_ENDED, later_run_failed],
+            sessions=[READY_SESSION],
+        ),
+    ]
+
+    task = run_t3_task(ledger_path)
+
+    if is_usage_limit:
+        assert task["status"] == ledger.STATUS_SCHEDULED
+        assert datetime.fromisoformat(task["due_at"]) == support.RESET_TIME
+        assert t3_support.sent_commands(t3_server)[-1]["limitRecovery"]["runId"] == LATER_RUN_ID
+        return
+    assert task["status"] == ledger.STATUS_FAILED
+    assert task["result"] == LATER_FAILURE_MESSAGE
+
+
+def test_cancelled_task_stops_waiting_for_subagents(
+    t3_server, follow_ups, ledger_path, monkeypatch
+):
+    follow_ups[:] = [projection(RUNNING_SUBAGENT, runs=[FIRST_RUN_ENDED], sessions=[READY_SESSION])]
+
+    def cancel_while_sleeping(_seconds: float) -> None:
+        with ledger.locked_tasks() as tasks:
+            tasks[support.TASK_ID]["status"] = ledger.STATUS_CANCELLED
+
+    monkeypatch.setattr(time, "sleep", cancel_while_sleeping)
+
+    task = run_t3_task(ledger_path)
+
+    assert task["status"] == ledger.STATUS_CANCELLED
