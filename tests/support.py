@@ -18,13 +18,16 @@ if TYPE_CHECKING:
 DEFAULT_EMAIL = "me@example.com"
 WORK_EMAIL = "work@example.com"
 CREDENTIALS = ".credentials.json"
-TASK_ID = "fix-thing"
+# Both directories give the task ID prefix "wor", so TASK_ID is the first ID golem generates.
+WORK_DIRECTORY = "work"
+REPOSITORY_DIRECTORY = "workspace"
+TASK_ID = "wor1"
 PROMPT = "fix the thing"
 LABEL = "GH-115"
-PARENT_ID = "parent"
-CHILD_ID = "child"
-GRANDCHILD_ID = "grandchild"
-SIBLING_ID = "sibling"
+PARENT_ID = TASK_ID
+CHILD_ID = f"{PARENT_ID}-2"
+GRANDCHILD_ID = f"{PARENT_ID}-3"
+SIBLING_ID = f"{CHILD_ID}-b"
 PARENT_PROMPT = "run the parent"
 CHILD_PROMPT = "run the child"
 GRANDCHILD_PROMPT = "run the grandchild"
@@ -177,14 +180,14 @@ def golem_worktree_resource(repository_path, worktree_path, *, released_at=None)
     resource = {
         "owner": task_directories.WORKTREE_OWNER_GOLEM,
         "repository": git.git_common_directory(str(repository_path)),
-        "session_id": "fix-thing-session",
+        "session_id": f"{TASK_ID}-session",
         "created_at": datetime.now(UTC).isoformat(),
     }
     if released_at is not None:
         resource["released_at"] = released_at
     marker_path = task_directories.worktree_owner_marker_path(str(worktree_path))
     assert marker_path is not None
-    marker_path.write_text("fix-thing-session", encoding="utf-8")
+    marker_path.write_text(f"{TASK_ID}-session", encoding="utf-8")
     return {str(worktree_path.resolve()): resource}
 
 
@@ -279,10 +282,10 @@ def write_claude_output(
 
 
 def create_waiting_chain():
-    cli.main(["run", PARENT_ID, PARENT_PROMPT, "--at", AT_TEXT, "--", *AGENT_ARGS])
-    cli.main(["run", CHILD_ID, CHILD_PROMPT, "--after", PARENT_ID, "--", *AGENT_ARGS])
-    cli.main(["run", GRANDCHILD_ID, GRANDCHILD_PROMPT, "--after", CHILD_ID, "--", *AGENT_ARGS])
-    cli.main(["run", SIBLING_ID, SIBLING_PROMPT, "--after", PARENT_ID, "--", *AGENT_ARGS])
+    cli.main(["run", PARENT_PROMPT, "--at", AT_TEXT, "--", *AGENT_ARGS])
+    cli.main(["run", CHILD_PROMPT, "--after", PARENT_ID, "--", *AGENT_ARGS])
+    cli.main(["run", GRANDCHILD_PROMPT, "--after", CHILD_ID, "--", *AGENT_ARGS])
+    cli.main(["run", SIBLING_PROMPT, "--after", PARENT_ID, "--", *AGENT_ARGS])
 
 
 def gate_command(tmp_path, *, exit_code=0, stderr=""):
@@ -296,8 +299,8 @@ def gate_command(tmp_path, *, exit_code=0, stderr=""):
 def schedule_gated_chain(ledger_path, gate, *extra_arguments: str, then_arguments=()):
     cli.main(
         [
-            *["run", PARENT_ID, PARENT_PROMPT, "--now", "--gate", gate, *extra_arguments],
-            *["--then", CHILD_ID, CHILD_PROMPT, *then_arguments],
+            *["run", PARENT_PROMPT, "--now", "--gate", gate, *extra_arguments],
+            *["--then", CHILD_PROMPT, *then_arguments],
         ]
     )
     return read_task(ledger_path, PARENT_ID)

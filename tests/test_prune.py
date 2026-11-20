@@ -9,9 +9,6 @@ import pytest
 from golem import board, cli, ledger, locks
 from tests import support
 
-SIBLING_CHILD_ID = "sibling-child"
-
-
 MERGED_PULL_REQUEST: ledger.PullRequest = {
     "url": "merged",
     "state": ledger.PULL_REQUEST_STATE_MERGED,
@@ -203,7 +200,7 @@ def test_delete_and_prune_leave_in_place_directory_alone(
     installed_launch_agent, git_repository, ledger_path, monkeypatch, command
 ):
     monkeypatch.chdir(git_repository)
-    cli.main(["run", support.TASK_ID, support.PROMPT, "--now", "--no-worktree"])
+    cli.main(["run", support.PROMPT, "--now", "--no-worktree"])
     cli.main(["_execute", support.TASK_ID, support.read_task(ledger_path)["session_id"]])
     tasks = support.read_tasks(ledger_path)
     tasks[support.TASK_ID]["status"] = ledger.STATUS_CANCELLED

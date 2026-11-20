@@ -63,8 +63,8 @@ def test_registered_backend_runs_through_task_lifecycle(
     assert (
         cli.main(
             [
-                *["run", support.PARENT_ID, support.PARENT_PROMPT, "--backend", STUB_BACKEND_ID],
-                *["--then", support.CHILD_ID, support.CHILD_PROMPT, "--", *support.AGENT_ARGS],
+                *["run", support.PARENT_PROMPT, "--backend", STUB_BACKEND_ID],
+                *["--then", support.CHILD_PROMPT, "--", *support.AGENT_ARGS],
             ]
         )
         == 0
@@ -97,9 +97,7 @@ def test_registered_backend_refuses_auto_pickup_without_default_client(stub_back
     with pytest.raises(
         SystemExit, match="--auto-pickup requires a default app client for Stub tasks"
     ):
-        cli.main(
-            ["run", support.TASK_ID, support.PROMPT, "--backend", STUB_BACKEND_ID, "--auto-pickup"]
-        )
+        cli.main(["run", support.PROMPT, "--backend", STUB_BACKEND_ID, "--auto-pickup"])
 
 
 def test_session_field_is_not_recorded_on_a_newer_session(ledger_path):

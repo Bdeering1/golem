@@ -1,5 +1,4 @@
 from contextlib import ExitStack
-from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from golem import chains, ledger, progress_log, t3_code
@@ -7,24 +6,9 @@ from golem.backends import claude_hooks, registry
 from golem.worktrees import git, task_directories, worktree_cleanup
 
 
-@dataclass(frozen=True)
-class ReplacedTasks:
-    task_ids: list[str]
-    session_ids: list[str]
-    directories: set[str]
-    t3_code_thread_ids: list[str]
-
-
 def delete_task_and_release_worktrees(
     tasks: ledger.Tasks, worktrees: ledger.Worktrees, task_ids: list[str]
 ) -> None:
-    for session_id in pop_tasks_and_release_worktrees(tasks, worktrees, task_ids):
-        progress_log.remove_progress(session_id)
-
-
-def pop_tasks_and_release_worktrees(
-    tasks: ledger.Tasks, worktrees: ledger.Worktrees, task_ids: list[str]
-) -> list[str]:
     selected_tasks = [tasks[task_id] for task_id in task_ids]
     worktree_paths = [
         path
@@ -40,50 +24,8 @@ def pop_tasks_and_release_worktrees(
             and not task_directories.worktree_task_ids(tasks, path)
         ):
             resource.setdefault("released_at", datetime.now(UTC).isoformat())
-    return session_ids
-
-
-def is_replaceable_task(task: ledger.Task) -> bool:
-    return task["status"] == ledger.STATUS_FINISHED and ledger.has_finished_pull_requests(task)
-
-
-def replaceable_chain_ids(
-    tasks: ledger.Tasks, task_ids: list[str], parent_id: str | None
-) -> list[str]:
-    replaced_ids: set[str] = set()
-    for task_id in task_ids:
-        if task_id not in tasks:
-            continue
-        chain_ids = chains.chain_task_ids(tasks, task_id)
-        if parent_id in chain_ids or not all(
-            is_replaceable_task(tasks[chain_id]) for chain_id in chain_ids
-        ):
-            raise SystemExit(f"golem: task already exists: {task_id}")
-        replaced_ids |= chain_ids
-    return [task_id for task_id in tasks if task_id in replaced_ids]
-
-
-def remove_replaceable_tasks(
-    tasks: ledger.Tasks, worktrees: ledger.Worktrees, task_ids: list[str], parent_id: str | None
-) -> ReplacedTasks:
-    ordered_ids = replaceable_chain_ids(tasks, task_ids, parent_id)
-    directories: set[str] = set()
-    for task_id in ordered_ids:
-        directories |= claude_hooks.hook_affected_directories(tasks, tasks[task_id])
-    thread_ids = t3_code.recorded_thread_ids(tasks[task_id] for task_id in ordered_ids)
-    t3_code.require_running_to_delete(thread_ids)
-    session_ids = pop_tasks_and_release_worktrees(tasks, worktrees, ordered_ids)
-    return ReplacedTasks(ordered_ids, session_ids, directories, thread_ids)
-
-
-def finish_task_replacement(replaced: ReplacedTasks) -> None:
-    for session_id in replaced.session_ids:
+    for session_id in session_ids:
         progress_log.remove_progress(session_id)
-    for task_id in replaced.task_ids:
-        print(f"golem: replaced task: {task_id}")
-    for directory in replaced.directories:
-        claude_hooks.sync_hooks(directory)
-    t3_code.delete_threads(replaced.t3_code_thread_ids)
 
 
 def selected_delete_task_ids(

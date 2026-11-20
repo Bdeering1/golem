@@ -14,5 +14,5 @@ def test_ledger_falls_back_to_home_when_xdg_state_home_is_not_absolute(
         monkeypatch.setenv("XDG_STATE_HOME", state_home)
     cli.main(["agent", "install"])
 
-    assert cli.main(["run", support.TASK_ID, support.PROMPT, "--now"]) == 0
+    assert cli.main(["run", support.PROMPT, "--now"]) == 0
     assert (tmp_path / ".local" / "state" / "golem" / "tasks.json").exists()

@@ -39,35 +39,31 @@ def test_scheduled_task_runs_waiting_chain(installed_launch_agent, fake_commands
 
 
 @pytest.mark.parametrize(
-    ("parents", "schedule_arguments"),
+    ("parent_prompts", "schedule_arguments"),
     [
         pytest.param([], ["--now"], id="now"),
         pytest.param(
-            [(support.PARENT_ID, support.PARENT_PROMPT)],
-            ["--after", support.PARENT_ID],
-            id="after-pending-parent",
+            [support.PARENT_PROMPT], ["--after", support.PARENT_ID], id="after-pending-parent"
         ),
     ],
 )
 def test_run_then_chain_runs_in_order_with_shared_agent_arguments(
-    installed_launch_agent, fake_commands, ledger_path, parents, schedule_arguments
+    installed_launch_agent, fake_commands, ledger_path, parent_prompts, schedule_arguments
 ):
-    for task_id, prompt in parents:
-        cli.main(["run", task_id, prompt, "--at", support.AT_TEXT, "--", *support.AGENT_ARGS])
-        support.set_task_due_now(ledger_path, task_id)
-    follow_ups = [
-        (support.GRANDCHILD_ID, support.GRANDCHILD_PROMPT),
-        (support.SIBLING_ID, support.SIBLING_PROMPT),
-    ]
-    then_arguments = [argument for follow_up in follow_ups for argument in ("--then", *follow_up)]
-    chain = [*parents, (support.CHILD_ID, support.CHILD_PROMPT), *follow_ups]
-    first_id = chain[0][0]
+    for prompt in parent_prompts:
+        cli.main(["run", prompt, "--at", support.AT_TEXT, "--", *support.AGENT_ARGS])
+        support.set_task_due_now(ledger_path, support.PARENT_ID)
+    follow_up_prompts = [support.GRANDCHILD_PROMPT, support.SIBLING_PROMPT]
+    then_arguments = [argument for prompt in follow_up_prompts for argument in ("--then", prompt)]
+    prompts = [*parent_prompts, support.CHILD_PROMPT, *follow_up_prompts]
+    step_ids = [f"{support.PARENT_ID}-{step}" for step in range(2, len(prompts) + 1)]
+    chain = list(zip([support.PARENT_ID, *step_ids], prompts, strict=True))
+    first_id = support.PARENT_ID
 
     assert (
         cli.main(
             [
                 "run",
-                support.CHILD_ID,
                 support.CHILD_PROMPT,
                 *schedule_arguments,
                 *then_arguments,
@@ -97,15 +93,12 @@ def test_run_then_auto_pickup_opens_only_last_task(
         cli.main(
             [
                 "run",
-                support.TASK_ID,
                 support.PROMPT,
                 "--now",
                 "--auto-pickup",
                 "--then",
-                support.CHILD_ID,
                 support.CHILD_PROMPT,
                 "--then",
-                support.GRANDCHILD_ID,
                 support.GRANDCHILD_PROMPT,
             ]
         )
@@ -129,15 +122,12 @@ def test_failed_follow_up_auto_pickup_opens_last_success(
     cli.main(
         [
             "run",
-            support.TASK_ID,
             support.PROMPT,
             "--now",
             "--auto-pickup",
             "--then",
-            support.CHILD_ID,
             support.CHILD_PROMPT,
             "--then",
-            support.GRANDCHILD_ID,
             support.GRANDCHILD_PROMPT,
         ]
     )
@@ -162,10 +152,7 @@ def test_after_parent_with_pending_gate_waits_for_the_gate(
     monkeypatch.setattr(claude, "next_reset_time", lambda _environment: support.RESET_TIME)
     support.write_parent_with_waiting_child(ledger_path, gate="true")
 
-    assert (
-        cli.main(["run", support.SIBLING_ID, support.SIBLING_PROMPT, "--after", support.PARENT_ID])
-        == 0
-    )
+    assert cli.main(["run", support.SIBLING_PROMPT, "--after", support.PARENT_ID]) == 0
     assert support.read_task(ledger_path, support.SIBLING_ID)["status"] == ledger.STATUS_WAITING
 
 
@@ -180,9 +167,7 @@ def test_after_succeeded_auto_pickup_parent_does_not_pass_to_child(
         auto_pickup=True,
     )
 
-    assert (
-        cli.main(["run", support.CHILD_ID, support.CHILD_PROMPT, "--after", support.PARENT_ID]) == 0
-    )
+    assert cli.main(["run", support.CHILD_PROMPT, "--after", support.PARENT_ID]) == 0
     assert "auto_pickup_client" not in support.read_task(ledger_path, support.CHILD_ID)
 
 

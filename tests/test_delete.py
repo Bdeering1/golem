@@ -11,6 +11,8 @@ from golem.backends import claude_hooks
 from golem.worktrees import git, task_directories
 from tests import support
 
+UNRELATED_ID = "unrelated"
+
 
 @pytest.mark.parametrize(
     "status", [ledger.STATUS_SCHEDULED, ledger.STATUS_WAITING, ledger.STATUS_CANCELLED]
@@ -117,13 +119,13 @@ def test_delete_chain_removes_ancestors_dependents_and_branches(ledger_path):
             support.SIBLING_ID: support.task_record(
                 ledger.STATUS_FINISHED, task_id=support.SIBLING_ID, after=support.PARENT_ID
             ),
-            support.TASK_ID: support.task_record(ledger.STATUS_FINISHED),
+            UNRELATED_ID: support.task_record(ledger.STATUS_FINISHED, task_id=UNRELATED_ID),
         },
     )
 
     assert cli.main(["delete", support.CHILD_ID, "--chain"]) == 0
 
-    assert set(ledger.load_tasks()) == {support.TASK_ID}
+    assert set(ledger.load_tasks()) == {UNRELATED_ID}
 
 
 def test_delete_chain_keeps_ledger_when_any_task_is_running(ledger_path):
@@ -142,22 +144,6 @@ def test_delete_chain_keeps_ledger_when_any_task_is_running(ledger_path):
         cli.main(["delete", support.CHILD_ID, "--chain"])
 
     assert support.read_tasks(ledger_path) == tasks
-
-
-def test_deleted_task_id_reuse_ignores_earlier_executor(
-    installed_launch_agent, fake_commands, ledger_path
-):
-    cli.main(["run", support.TASK_ID, support.PROMPT, "--now"])
-    old_task = support.read_task(ledger_path)
-
-    assert cli.main(["delete", support.TASK_ID]) == 0
-    assert cli.main(["run", support.TASK_ID, support.PROMPT, "--now"]) == 0
-    new_task = support.read_task(ledger_path)
-    assert new_task["session_id"] != old_task["session_id"]
-
-    assert cli.main(["_execute", support.TASK_ID, old_task["session_id"]]) == 0
-    assert support.read_task(ledger_path)["status"] == ledger.STATUS_SCHEDULED
-    assert fake_commands["claude-args"].read_text(encoding="utf-8") == ""
 
 
 def test_reused_parent_id_does_not_claim_waiting_dependent(ledger_path):
@@ -532,13 +518,13 @@ def test_delete_retains_worktree_in_use(
     ("reason", "is_process_missing", "is_removed"),
     [
         pytest.param(
-            "claude session fix-thing-session (pid 1 start 2026-10-16T00:00:00Z)",
+            f"claude session {support.TASK_ID}-session (pid 1 start 2026-10-16T00:00:00Z)",
             True,
             True,
             id="stale-claude-lock",
         ),
         pytest.param(
-            "claude session fix-thing-session (pid 1 start 2026-10-16T00:00:00Z)",
+            f"claude session {support.TASK_ID}-session (pid 1 start 2026-10-16T00:00:00Z)",
             False,
             False,
             id="live-claude-lock",

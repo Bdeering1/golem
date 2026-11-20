@@ -75,12 +75,7 @@ def test_codex_run_records_result_and_thread(
     support.write_codex_events(monkeypatch, tmp_path, events)
     monkeypatch.setenv("GOLEM_CODEX_EXIT", str(exit_code))
 
-    assert (
-        cli.main(
-            ["run", support.TASK_ID, support.PROMPT, "--backend", "codex", "--now", "--", "-m", "x"]
-        )
-        == 0
-    )
+    assert cli.main(["run", support.PROMPT, "--backend", "codex", "--now", "--", "-m", "x"]) == 0
     task = support.read_task(ledger_path)
     assert task["backend"] == ledger.BACKEND_CODEX
     assert cli.main(["_execute", support.TASK_ID, task["session_id"]]) == exit_code
@@ -158,7 +153,7 @@ def test_codex_usage_limit_resumes_saved_conversation(
     reset_time = datetime.now(UTC).replace(second=0, microsecond=0) + timedelta(hours=1)
     monkeypatch.setattr(codex, "next_codex_reset_time", lambda _environment: reset_time)
 
-    cli.main(["run", support.TASK_ID, support.PROMPT, "--backend", "codex", "--now"])
+    cli.main(["run", support.PROMPT, "--backend", "codex", "--now"])
     task = support.read_task(ledger_path)
     assert cli.main(["_execute", support.TASK_ID, task["session_id"]]) == 0
     task = support.read_task(ledger_path)
@@ -187,7 +182,7 @@ def test_codex_creates_and_uses_golem_worktree(
     installed_launch_agent, fake_commands, git_repository, ledger_path, monkeypatch
 ):
     monkeypatch.chdir(git_repository)
-    cli.main(["run", support.TASK_ID, support.PROMPT, "--backend", "codex", "--now"])
+    cli.main(["run", support.PROMPT, "--backend", "codex", "--now"])
     task = support.read_task(ledger_path)
 
     assert cli.main(["_execute", support.TASK_ID, task["session_id"]]) == 0
@@ -234,7 +229,6 @@ def test_codex_permission_arguments_suppress_unattended_default(
         cli.main(
             [
                 "run",
-                support.TASK_ID,
                 support.PROMPT,
                 "--backend",
                 "codex",
@@ -261,7 +255,7 @@ def test_codex_rejects_api_key_accounts_before_execution(
     monkeypatch.setenv("GOLEM_CODEX_ACCOUNT", str(account_path))
 
     with pytest.raises(SystemExit, match="ChatGPT subscription"):
-        cli.main(["run", support.TASK_ID, support.PROMPT, "--backend", "codex", "--now"])
+        cli.main(["run", support.PROMPT, "--backend", "codex", "--now"])
 
     assert not any(call[0] == "exec" for call in logged_codex_calls(fake_commands))
     support.write_task(ledger_path, ledger.STATUS_SCHEDULED, backend=ledger.BACKEND_CODEX)
@@ -291,7 +285,6 @@ def test_codex_run_rejects_billing_bypass_arguments(installed_launch_agent, agen
         cli.main(
             [
                 "run",
-                support.TASK_ID,
                 support.PROMPT,
                 "--backend",
                 "codex",
@@ -307,7 +300,7 @@ def test_codex_processes_remove_api_keys_from_every_child(
 ):
     monkeypatch.setenv("OPENAI_API_KEY", "forbidden")
     monkeypatch.setenv("CODEX_API_KEY", "forbidden")
-    assert cli.main(["run", support.TASK_ID, support.PROMPT, "--backend", "codex", "--now"]) == 0
+    assert cli.main(["run", support.PROMPT, "--backend", "codex", "--now"]) == 0
     task = support.read_task(ledger_path)
 
     assert cli.main(["_execute", support.TASK_ID, task["session_id"]]) == 0
@@ -369,7 +362,7 @@ def test_codex_usage_limit_stores_result_and_stops_after_resume_limit(
     monkeypatch.setenv("GOLEM_CODEX_EXIT", "1")
     reset_time = datetime.now(UTC).replace(second=0, microsecond=0) + timedelta(hours=1)
     monkeypatch.setattr(codex, "next_codex_reset_time", lambda _environment: reset_time)
-    assert cli.main(["run", support.TASK_ID, support.PROMPT, "--backend", "codex", "--now"]) == 0
+    assert cli.main(["run", support.PROMPT, "--backend", "codex", "--now"]) == 0
     session_id = support.read_task(ledger_path)["session_id"]
 
     for resume_count in range(executor.MAX_USAGE_LIMIT_RESUMES):
@@ -451,7 +444,7 @@ def test_codex_pickup_resumes_thread_in_task_worktree(
 def test_codex_non_git_run_and_retry_keep_worktree_and_arguments(
     installed_launch_agent, fake_commands, git_repository, ledger_path, monkeypatch, tmp_path
 ):
-    assert cli.main(["run", support.TASK_ID, support.PROMPT, "--backend", "codex", "--now"]) == 0
+    assert cli.main(["run", support.PROMPT, "--backend", "codex", "--now"]) == 0
     task = support.read_task(ledger_path)
     assert cli.main(["_execute", support.TASK_ID, task["session_id"]]) == 0
     assert fake_commands["codex-cwd"].read_text(encoding="utf-8").splitlines()[-1] == str(
@@ -468,13 +461,11 @@ def test_codex_non_git_run_and_retry_keep_worktree_and_arguments(
         ],
     )
     monkeypatch.setenv("GOLEM_CODEX_EXIT", "1")
-    assert (
-        cli.main(["run", "retry", support.PROMPT, "--backend", "codex", "--now", "--", "-m", "x"])
-        == 0
-    )
-    failed = support.read_task(ledger_path, "retry")
-    assert cli.main(["_execute", "retry", failed["session_id"]]) == 1
-    worktree = support.read_task(ledger_path, "retry")["worktree"]
+    assert cli.main(["run", support.PROMPT, "--backend", "codex", "--now", "--", "-m", "x"]) == 0
+    retry_id = "wor2"
+    failed = support.read_task(ledger_path, retry_id)
+    assert cli.main(["_execute", retry_id, failed["session_id"]]) == 1
+    worktree = support.read_task(ledger_path, retry_id)["worktree"]
     monkeypatch.setenv("GOLEM_CODEX_EXIT", "0")
     support.write_codex_events(
         monkeypatch,
@@ -486,12 +477,12 @@ def test_codex_non_git_run_and_retry_keep_worktree_and_arguments(
         ],
     )
 
-    assert cli.main(["retry", "retry", "--now"]) == 0
-    retried = support.read_task(ledger_path, "retry")
+    assert cli.main(["retry", retry_id, "--now"]) == 0
+    retried = support.read_task(ledger_path, retry_id)
     assert retried["backend"] == ledger.BACKEND_CODEX
     assert retried["worktree"] == worktree
     assert retried["agent_args"] == ["-m", "x"]
-    assert cli.main(["_execute", "retry", retried["session_id"]]) == 0
+    assert cli.main(["_execute", retry_id, retried["session_id"]]) == 0
     exec_calls = [call for call in logged_codex_calls(fake_commands) if call[0] == "exec"]
     assert "resume" not in exec_calls[-1]
 
@@ -512,33 +503,35 @@ def test_mixed_backend_chain_shares_worktree_and_uses_fresh_conversations(
 ):
     monkeypatch.chdir(git_repository)
     parent_backend, child_backend, grandchild_backend = backends
-    assert cli.main(["run", "parent", support.PROMPT, "--backend", parent_backend, "--now"]) == 0
+    assert cli.main(["run", support.PROMPT, "--backend", parent_backend, "--now"]) == 0
     assert (
-        cli.main(["run", "child", support.PROMPT, "--backend", child_backend, "--after", "parent"])
+        cli.main(["run", support.PROMPT, "--backend", child_backend, "--after", support.PARENT_ID])
         == 0
     )
     assert (
         cli.main(
             [
                 "run",
-                "grandchild",
                 support.PROMPT,
                 "--backend",
                 grandchild_backend,
                 "--after",
-                "child",
+                support.CHILD_ID,
             ]
         )
         == 0
     )
-    parent = support.read_task(ledger_path, "parent")
+    parent = support.read_task(ledger_path, support.PARENT_ID)
 
-    assert cli.main(["_execute", "parent", parent["session_id"]]) == 0
+    assert cli.main(["_execute", support.PARENT_ID, parent["session_id"]]) == 0
     tasks = support.read_tasks(ledger_path)
-    worktree = tasks["parent"]["worktree"]
+    worktree = tasks[support.PARENT_ID]["worktree"]
     assert {task["worktree"] for task in tasks.values()} == {worktree}
     assert len({task["session_id"] for task in tasks.values()}) == 3
-    assert [tasks[task_id]["status"] for task_id in ("parent", "child", "grandchild")] == [
+    assert [
+        tasks[task_id]["status"]
+        for task_id in (support.PARENT_ID, support.CHILD_ID, support.GRANDCHILD_ID)
+    ] == [
         ledger.STATUS_FINISHED,
         ledger.STATUS_FINISHED,
         ledger.STATUS_FINISHED,
@@ -559,7 +552,7 @@ def test_codex_home_reaches_launch_agent_executor(
 ):
     codex_home = tmp_path / "codex-home"
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
-    assert cli.main(["run", support.TASK_ID, support.PROMPT, "--backend", "codex", "--now"]) == 0
+    assert cli.main(["run", support.PROMPT, "--backend", "codex", "--now"]) == 0
     monkeypatch.delenv("CODEX_HOME")
     fake_commands["codex-args"].write_text("", encoding="utf-8")
     fake_commands["codex-home"].write_text("", encoding="utf-8")

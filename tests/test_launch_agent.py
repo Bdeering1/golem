@@ -38,7 +38,7 @@ UNREACHABLE_THREAD = "unreachable"
 @pytest.mark.parametrize(
     ("command", "status"),
     [
-        pytest.param(["run", support.TASK_ID, support.PROMPT], None, id="run"),
+        pytest.param(["run", support.PROMPT], None, id="run"),
         pytest.param(["retry", support.TASK_ID], ledger.STATUS_FAILED, id="retry"),
     ],
 )
@@ -61,7 +61,7 @@ def test_run_and_retry_require_an_installed_launch_agent(ledger_path, monkeypatc
 
 
 def test_run_queues_and_wakes_launch_agent(installed_launch_agent, fake_commands, ledger_path):
-    assert cli.main(["run", support.TASK_ID, support.PROMPT, "--now"]) == 0
+    assert cli.main(["run", support.PROMPT, "--now"]) == 0
     assert support.read_task(ledger_path)["status"] == ledger.STATUS_SCHEDULED
     assert fake_commands["claude-args"].read_text(encoding="utf-8") == ""
     assert "kickstart" in fake_commands["launchctl-args"].read_text(encoding="utf-8")
@@ -72,7 +72,7 @@ def test_run_warns_when_waking_launch_agent_fails(
 ):
     monkeypatch.setenv("GOLEM_LAUNCHCTL_KICKSTART_EXIT", "1")
 
-    assert cli.main(["run", support.TASK_ID, support.PROMPT, "--now"]) == 0
+    assert cli.main(["run", support.PROMPT, "--now"]) == 0
 
     assert support.read_task(ledger_path)["status"] == ledger.STATUS_SCHEDULED
     assert capsys.readouterr().err
@@ -202,7 +202,7 @@ def test_agent_cleanup_waits_for_active_ledger_write(ledger_path, monkeypatch):
 def test_launch_agent_pass_leaves_running_executor_alone(
     installed_launch_agent, ledger_path, monkeypatch
 ):
-    cli.main(["run", support.TASK_ID, support.PROMPT, "--now"])
+    cli.main(["run", support.PROMPT, "--now"])
     statuses_during_run: list[str] = []
 
     def run_claude(
@@ -270,7 +270,7 @@ def test_changed_state_home_requires_reinstall(installed_launch_agent, monkeypat
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "other-state"))
 
     with pytest.raises(SystemExit, match=LAUNCH_AGENT_ERROR_PATTERN):
-        cli.main(["run", support.TASK_ID, support.PROMPT, "--now"])
+        cli.main(["run", support.PROMPT, "--now"])
 
 
 def test_run_requires_reinstall_without_saved_agent_environment(installed_launch_agent):
@@ -279,7 +279,7 @@ def test_run_requires_reinstall_without_saved_agent_environment(installed_launch
     ledger.save_settings(settings)
 
     with pytest.raises(SystemExit, match=LAUNCH_AGENT_ERROR_PATTERN):
-        cli.main(["run", support.TASK_ID, support.PROMPT, "--now"])
+        cli.main(["run", support.PROMPT, "--now"])
 
 
 def test_launch_agent_install_removes_plist_when_bootstrap_fails(fake_commands, monkeypatch):
@@ -523,7 +523,7 @@ def test_launch_agent_starts_due_tasks_while_pull_requests_refresh(ledger_path, 
 def test_waiting_dependent_of_succeeded_parent_keeps_launch_agent_running():
     tasks: ledger.Tasks = {
         support.PARENT_ID: support.task_record(ledger.STATUS_FINISHED, task_id=support.PARENT_ID),
-        support.TASK_ID: support.task_record(ledger.STATUS_WAITING, after=support.PARENT_ID),
+        support.CHILD_ID: support.task_record(ledger.STATUS_WAITING, after=support.PARENT_ID),
     }
 
     assert launch_agent.has_pending_tasks(tasks)

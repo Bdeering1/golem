@@ -58,7 +58,7 @@ def test_codex_worktree_base_fetches_stale_default_branch(
     fetched_at = (datetime.now(UTC) - fetched_age).timestamp()
     os.utime(fetch_head_path, (fetched_at, fetched_at))
     monkeypatch.chdir(git_repository)
-    cli.main(["run", support.TASK_ID, support.PROMPT, "--backend", "codex", "--now"])
+    cli.main(["run", support.PROMPT, "--backend", "codex", "--now"])
 
     assert (
         cli.main(["_execute", support.TASK_ID, support.read_task(ledger_path)["session_id"]]) == 0

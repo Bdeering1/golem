@@ -67,15 +67,15 @@ def is_dependent_reservable(tasks: ledger.Tasks, parent_id: str) -> bool:
     return not can_start_dependents(tasks[parent_id]) or is_gate_pending(tasks, parent_id)
 
 
-def add_dependent_records(
-    tasks: ledger.Tasks, records: ledger.Tasks, parent_id: str, default_clients: dict[str, str]
+def add_parent_auto_pickup(
+    tasks: ledger.Tasks, records: list[ledger.Task], parent_id: str, default_clients: dict[str, str]
 ) -> None:
-    if ledger.has_auto_pickup(tasks[parent_id]):
-        for record in records.values():
-            client_name = default_clients.get(record["backend"])
-            if client_name is not None:
-                record["auto_pickup_client"] = client_name
-    tasks.update(records)
+    if not ledger.has_auto_pickup(tasks[parent_id]):
+        return
+    for record in records:
+        client_name = default_clients.get(record["backend"])
+        if client_name is not None:
+            record["auto_pickup_client"] = client_name
 
 
 def is_gate_pending(tasks: ledger.Tasks, task_id: str) -> bool:

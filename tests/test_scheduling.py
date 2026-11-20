@@ -17,9 +17,7 @@ def test_after_pending_parent_skips_usage_lookup(installed_launch_agent, ledger_
         claude, "next_reset_time", lambda _environment: pytest.fail("usage lookup ran")
     )
 
-    assert (
-        cli.main(["run", support.CHILD_ID, support.CHILD_PROMPT, "--after", support.PARENT_ID]) == 0
-    )
+    assert cli.main(["run", support.CHILD_PROMPT, "--after", support.PARENT_ID]) == 0
     assert support.read_task(ledger_path, support.CHILD_ID)["status"] == ledger.STATUS_WAITING
 
 
@@ -69,7 +67,7 @@ def test_run_option_rejects_backend_without_changing_ledger(
     with pytest.raises(SystemExit, match=message):
         cli.main(
             [
-                *["run", support.CHILD_ID, support.CHILD_PROMPT, "--backend", backend_id, "--now"],
+                *["run", support.CHILD_PROMPT, "--backend", backend_id, "--now"],
                 *option_arguments,
             ]
         )
@@ -93,56 +91,6 @@ def test_retry_keeps_run_options(installed_launch_agent, ledger_path, fields):
     assert support.read_task(ledger_path).items() >= fields.items()
 
 
-@pytest.mark.parametrize(
-    ("tasks", "schedule_arguments", "follow_up_ids"),
-    [
-        pytest.param(
-            {
-                support.GRANDCHILD_ID: support.task_record(
-                    ledger.STATUS_SCHEDULED, task_id=support.GRANDCHILD_ID
-                )
-            },
-            ["--now"],
-            [support.GRANDCHILD_ID],
-            id="existing-follow-up-now",
-        ),
-        pytest.param(
-            {
-                support.PARENT_ID: support.task_record(
-                    ledger.STATUS_SCHEDULED, task_id=support.PARENT_ID
-                ),
-                support.GRANDCHILD_ID: support.task_record(
-                    ledger.STATUS_SCHEDULED, task_id=support.GRANDCHILD_ID
-                ),
-            },
-            ["--after", support.PARENT_ID],
-            [support.GRANDCHILD_ID],
-            id="existing-follow-up-after-pending-parent",
-        ),
-        pytest.param(
-            {}, ["--now"], [support.GRANDCHILD_ID, support.GRANDCHILD_ID], id="repeated-follow-up"
-        ),
-        pytest.param({}, ["--now"], [support.CHILD_ID], id="follow-up-matches-run-task"),
-    ],
-)
-def test_run_then_refuses_ids_without_changing_the_ledger(
-    installed_launch_agent, ledger_path, tasks, schedule_arguments, follow_up_ids
-):
-    support.write_tasks(ledger_path, tasks)
-    then_arguments = [
-        argument
-        for task_id in follow_up_ids
-        for argument in ("--then", task_id, support.GRANDCHILD_PROMPT)
-    ]
-
-    with pytest.raises(SystemExit, match=f": {re.escape(follow_up_ids[-1])}$"):
-        cli.main(
-            ["run", support.CHILD_ID, support.CHILD_PROMPT, *schedule_arguments, *then_arguments]
-        )
-
-    assert support.read_tasks(ledger_path) == tasks
-
-
 def finished_task(task_id, status=ledger.STATUS_FINISHED, **fields: object):
     fields = {
         "pull_requests": [{"url": "merged", "state": ledger.PULL_REQUEST_STATE_MERGED}],
@@ -155,100 +103,28 @@ def finished_task(task_id, status=ledger.STATUS_FINISHED, **fields: object):
     )
 
 
-def test_run_replaces_whole_finished_chain(
-    installed_launch_agent, owned_worktree, ledger_path, capsys
-):
-    worktree = owned_worktree()
-    support.write_tasks(
-        ledger_path,
-        {
-            support.PARENT_ID: finished_task(support.PARENT_ID, worktree=str(worktree)),
-            support.CHILD_ID: finished_task(support.CHILD_ID, after=support.PARENT_ID),
-            support.SIBLING_ID: finished_task(support.SIBLING_ID, after=support.PARENT_ID),
-        },
-    )
-    old_session_id = support.read_task(ledger_path, support.CHILD_ID)["session_id"]
-
-    assert cli.main(["run", support.CHILD_ID, support.CHILD_PROMPT, "--now"]) == 0
-
-    assert f"golem: replaced task: {support.CHILD_ID}" in capsys.readouterr().out
-    tasks = support.read_tasks(ledger_path)
-    assert set(tasks) == {support.CHILD_ID}
-    assert tasks[support.CHILD_ID]["session_id"] != old_session_id
-    assert ledger.load_worktrees()[str(worktree.resolve())].get("released_at")
-
-
 @pytest.mark.parametrize(
-    ("replaced_id", "schedule_arguments", "existing_tasks"),
+    ("schedule_arguments", "new_id"),
     [
-        pytest.param(
-            support.GRANDCHILD_ID,
-            ["--now", "--then", support.GRANDCHILD_ID, support.GRANDCHILD_PROMPT],
-            {},
-            id="follow-up",
-        ),
-        pytest.param(
-            support.CHILD_ID,
-            ["--after", support.PARENT_ID],
-            {
-                support.PARENT_ID: support.task_record(
-                    ledger.STATUS_SCHEDULED, task_id=support.PARENT_ID
-                )
-            },
-            id="after-pending-parent",
-        ),
-        pytest.param(
-            support.CHILD_ID,
-            ["--after", support.PARENT_ID],
-            {support.PARENT_ID: finished_task(support.PARENT_ID)},
-            id="after-done-parent",
-        ),
+        pytest.param(["--now"], "wor2", id="root"),
+        pytest.param(["--after", support.PARENT_ID], support.SIBLING_ID, id="dependent"),
     ],
 )
-def test_run_replaces_finished_task_on_each_reserved_path(
-    installed_launch_agent,
-    ledger_path,
-    monkeypatch,
-    capsys,
-    replaced_id,
-    schedule_arguments,
-    existing_tasks,
+def test_run_keeps_existing_finished_chain(
+    installed_launch_agent, ledger_path, monkeypatch, capsys, schedule_arguments, new_id
 ):
     monkeypatch.setattr(claude, "next_reset_time", lambda _environment: None)
-    support.write_tasks(ledger_path, {**existing_tasks, replaced_id: finished_task(replaced_id)})
-    old_session_id = support.read_task(ledger_path, replaced_id)["session_id"]
-
-    assert cli.main(["run", support.CHILD_ID, support.CHILD_PROMPT, *schedule_arguments]) == 0
-
-    assert f"golem: replaced task: {replaced_id}" in capsys.readouterr().out
-    assert support.read_task(ledger_path, replaced_id)["session_id"] != old_session_id
-
-
-@pytest.mark.parametrize(
-    ("fields", "is_unfinished_task_in_chain"),
-    [
-        pytest.param({"status": ledger.STATUS_BLOCKED}, False, id="blocked"),
-        pytest.param({"pull_requests": [{"url": "open", "state": "open"}]}, False, id="open-pr"),
-        pytest.param({"pull_requests": []}, False, id="no-pr"),
-        pytest.param({"pull_requests": None}, True, id="unfinished-task-in-chain"),
-    ],
-)
-def test_run_refuses_taken_id_unless_whole_chain_is_finished(
-    installed_launch_agent, ledger_path, fields, is_unfinished_task_in_chain
-):
-    unfinished_task = finished_task(support.TASK_ID, **fields)
-    tasks = {support.TASK_ID: unfinished_task}
-    if is_unfinished_task_in_chain:
-        tasks = {
-            support.TASK_ID: finished_task(support.TASK_ID),
-            support.CHILD_ID: {**unfinished_task, "after": support.TASK_ID},
-        }
+    tasks = {
+        support.PARENT_ID: finished_task(support.PARENT_ID),
+        support.CHILD_ID: finished_task(support.CHILD_ID, after=support.PARENT_ID),
+    }
     support.write_tasks(ledger_path, tasks)
 
-    with pytest.raises(SystemExit, match=f": {support.TASK_ID}$"):
-        cli.main(["run", support.TASK_ID, support.PROMPT, "--now"])
+    assert cli.main(["run", support.PROMPT, *schedule_arguments]) == 0
 
-    assert support.read_tasks(ledger_path) == tasks
+    assert new_id in capsys.readouterr().out
+    assert support.read_tasks(ledger_path).items() >= tasks.items()
+    assert support.read_task(ledger_path, new_id)["prompt"] == support.PROMPT
 
 
 def test_run_after_refuses_when_parent_is_replaced_during_usage_lookup(
@@ -269,7 +145,7 @@ def test_run_after_refuses_when_parent_is_replaced_during_usage_lookup(
     monkeypatch.setattr(claude, "next_reset_time", replace_parent)
 
     with pytest.raises(SystemExit, match=f"parent task changed: {support.PARENT_ID}"):
-        cli.main(["run", support.CHILD_ID, support.CHILD_PROMPT, "--after", support.PARENT_ID])
+        cli.main(["run", support.CHILD_PROMPT, "--after", support.PARENT_ID])
 
     assert support.CHILD_ID not in support.read_tasks(ledger_path)
 
@@ -302,13 +178,6 @@ def fail_usage_lookup(_environment: dict[str, str]) -> Never:
             re.escape(common.USAGE_ERROR),
             id="usage-lookup-fails",
         ),
-        pytest.param(
-            finished_task(support.PARENT_ID),
-            {"after": support.PARENT_ID},
-            lambda _environment: None,
-            f"task already exists: {support.CHILD_ID}",
-            id="chain-holds-parent",
-        ),
     ],
 )
 def test_refused_run_after_keeps_finished_task_and_progress(
@@ -332,7 +201,7 @@ def test_refused_run_after_keeps_finished_task_and_progress(
     progress_path.write_text("progress", encoding="utf-8")
 
     with pytest.raises(SystemExit, match=error):
-        cli.main(["run", support.CHILD_ID, support.CHILD_PROMPT, "--after", support.PARENT_ID])
+        cli.main(["run", support.CHILD_PROMPT, "--after", support.PARENT_ID])
 
     assert support.read_tasks(ledger_path) == tasks
     assert progress_path.exists()
@@ -377,11 +246,11 @@ def test_after_successful_parent_schedules_task_normally(
     installed_launch_agent, ledger_path, monkeypatch
 ):
     monkeypatch.setattr(claude, "next_reset_time", lambda _environment: support.RESET_TIME)
-    cli.main(["run", support.PARENT_ID, support.PARENT_PROMPT, "--now"])
+    cli.main(["run", support.PARENT_PROMPT, "--now"])
     parent = support.read_task(ledger_path, support.PARENT_ID)
     cli.main(["_execute", support.PARENT_ID, parent["session_id"]])
 
-    cli.main(["run", support.CHILD_ID, support.CHILD_PROMPT, "--after", support.PARENT_ID])
+    cli.main(["run", support.CHILD_PROMPT, "--after", support.PARENT_ID])
     child = support.read_task(ledger_path, support.CHILD_ID)
     assert child["status"] == ledger.STATUS_SCHEDULED
     assert datetime.fromisoformat(child["due_at"]) == support.RESET_TIME
@@ -393,7 +262,7 @@ def test_after_refuses_missing_or_cancelled_parent(installed_launch_agent, ledge
         support.write_task(ledger_path, status, task_id=support.PARENT_ID)
 
     with pytest.raises(SystemExit, match=support.PARENT_ID):
-        cli.main(["run", support.CHILD_ID, support.CHILD_PROMPT, "--after", support.PARENT_ID])
+        cli.main(["run", support.CHILD_PROMPT, "--after", support.PARENT_ID])
 
     assert support.CHILD_ID not in ledger.load_tasks()
 
@@ -401,7 +270,7 @@ def test_after_refuses_missing_or_cancelled_parent(installed_launch_agent, ledge
 def test_cancel_marks_task_cancelled_and_does_not_run_executor(
     installed_launch_agent, fake_commands, ledger_path
 ):
-    cli.main(["run", support.TASK_ID, support.PROMPT, "--now"])
+    cli.main(["run", support.PROMPT, "--now"])
     task = support.read_task(ledger_path)
     cli.main(["cancel", support.TASK_ID])
 
@@ -439,7 +308,7 @@ def test_retry_runs_failed_task_in_new_session(
     expected_due_at,
 ):
     monkeypatch.setenv("GOLEM_CLAUDE_EXIT", "1")
-    cli.main(["run", support.TASK_ID, support.PROMPT, "--now", "--", *support.AGENT_ARGS])
+    cli.main(["run", support.PROMPT, "--now", "--", *support.AGENT_ARGS])
     failed = support.read_task(ledger_path)
     cli.main(["_execute", support.TASK_ID, failed["session_id"]])
     monkeypatch.delenv("GOLEM_CLAUDE_EXIT")
@@ -516,7 +385,7 @@ def test_retry_reuses_task_worktree_and_saved_environment(
     monkeypatch.chdir(git_repository)
     monkeypatch.setenv("LANG", support.SAVED_LANG)
     monkeypatch.setenv("GOLEM_CLAUDE_EXIT", "1")
-    cli.main(["run", support.TASK_ID, support.PROMPT, "--now"])
+    cli.main(["run", support.PROMPT, "--now"])
     first_session_id = support.read_task(ledger_path)["session_id"]
     cli.main(["_execute", support.TASK_ID, first_session_id])
     monkeypatch.delenv("GOLEM_CLAUDE_EXIT")

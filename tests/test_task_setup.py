@@ -46,14 +46,13 @@ def schedule_setup_chain(ledger_path, setup, *extra_arguments: str):
         [
             *[
                 "run",
-                support.PARENT_ID,
                 support.PARENT_PROMPT,
                 "--now",
                 "--no-worktree",
                 "--setup",
                 setup,
             ],
-            *["--then", support.CHILD_ID, support.CHILD_PROMPT, *extra_arguments],
+            *["--then", support.CHILD_PROMPT, *extra_arguments],
         ]
     )
     return support.read_task(ledger_path, support.PARENT_ID)
@@ -356,7 +355,6 @@ def test_codex_task_gets_setup_directory_and_suffix(
     cli.main(
         [
             "run",
-            support.TASK_ID,
             support.PROMPT,
             "--backend",
             "codex",
@@ -382,6 +380,6 @@ def test_codex_task_gets_setup_directory_and_suffix(
 
 def test_setup_requires_no_worktree(installed_launch_agent, ledger_path):
     with pytest.raises(SystemExit, match="--setup requires --no-worktree"):
-        cli.main(["run", support.TASK_ID, support.PROMPT, "--now", "--setup", "true"])
+        cli.main(["run", support.PROMPT, "--now", "--setup", "true"])
 
     assert not ledger_path.exists()

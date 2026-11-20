@@ -220,7 +220,7 @@ SHORT_BUSY_TEXT = "busy:"
 STUCK_PREFIX = "stuck "
 THREAD_STATE_TEXTS = {"thread unsettled": "thread open, no PR"}
 SHORT_REASON_TEXTS = {"thread open, no PR": "thread, no PR"}
-EMPTY_BOARD_LINES = ("No tasks yet", "Queue one with", 'golem run <id> "<prompt>"')
+EMPTY_BOARD_LINES = ("No tasks yet", "Queue one with", 'golem run "<prompt>"')
 UNAVAILABLE_ACTION_TEXTS = {
     ACTION_PICKUP: "Only blocked, failed or finished tasks can be picked up",
     ACTION_WATCH: "This task has no log yet",
@@ -2001,9 +2001,8 @@ def detail_reason_text(row: display.ListRow, snapshot: BoardSnapshot) -> str:
     return row_reason(row, snapshot)
 
 
-def step_name(tasks: ledger.Tasks, task_id: str) -> str:
-    root_id = chains.root_task_id(tasks, task_id)
-    return "" if task_id == root_id else task_id.removeprefix(f"{root_id}-")
+def has_chain_parent(tasks: ledger.Tasks, task_id: str) -> bool:
+    return task_id != chains.root_task_id(tasks, task_id)
 
 
 def chain_display_name(tasks: ledger.Tasks, task_id: str) -> str:
@@ -2012,8 +2011,7 @@ def chain_display_name(tasks: ledger.Tasks, task_id: str) -> str:
 
 
 def step_display_name(tasks: ledger.Tasks, task_id: str) -> str:
-    step = step_name(tasks, task_id)
-    return ledger.task_name(step, tasks[task_id]) if step else ""
+    return tasks[task_id].get("label", "") if has_chain_parent(tasks, task_id) else ""
 
 
 def task_display_name(tasks: ledger.Tasks, task_id: str) -> str:
@@ -2525,7 +2523,9 @@ def task_fields(
     fields: list[tuple[str, str]] = [
         (
             "Task ID",
-            ledger.task_name(row.task_id, task) if step_name(snapshot.tasks, row.task_id) else "",
+            ledger.task_name(row.task_id, task)
+            if has_chain_parent(snapshot.tasks, row.task_id)
+            else "",
         ),
         ("Directory", display.display_directory(row.directory)),
         ("Worktree", display.display_directory(task.get("worktree", ""))),

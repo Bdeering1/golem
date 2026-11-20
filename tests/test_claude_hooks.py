@@ -161,7 +161,7 @@ def test_hooks_stay_until_follow_up_finishes(ledger_path, parent_status, child_s
 @pytest.mark.parametrize(
     "requeue_arguments",
     [
-        ["run", support.GRANDCHILD_ID, support.CHILD_PROMPT, "--after", support.PARENT_ID],
+        ["run", support.CHILD_PROMPT, "--after", support.PARENT_ID],
         ["retry", support.CHILD_ID, "--now"],
     ],
     ids=["run-after", "retry"],
@@ -203,11 +203,9 @@ def test_ungated_chain_gets_no_hooks(installed_launch_agent, fake_commands, ledg
     cli.main(
         [
             "run",
-            support.PARENT_ID,
             support.PARENT_PROMPT,
             "--now",
             "--then",
-            support.CHILD_ID,
             support.CHILD_PROMPT,
         ]
     )

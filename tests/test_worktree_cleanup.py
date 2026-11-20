@@ -161,7 +161,7 @@ printf '%s' '{"result":"done"}'
     )
     claude_path.chmod(0o755)
     monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
-    cli.main(["run", support.TASK_ID, support.PROMPT, "--now"])
+    cli.main(["run", support.PROMPT, "--now"])
     task = support.read_task(ledger_path)
     worktree = git_repository / ".claude" / "worktrees" / task["session_id"]
     resource_before_retry = None

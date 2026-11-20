@@ -120,7 +120,7 @@ def test_auto_pickup_opens_in_client_saved_when_queued(
     installed_launch_agent, fake_commands, ledger_path, stub_clients
 ):
     support.write_config_table("default_clients", {ledger.BACKEND_CLAUDE: STUB_APP_CLIENT})
-    assert cli.main(["run", support.TASK_ID, support.PROMPT, "--now", "--auto-pickup"]) == 0
+    assert cli.main(["run", support.PROMPT, "--now", "--auto-pickup"]) == 0
     task = support.read_task(ledger_path)
 
     support.write_config_table("default_clients", {ledger.BACKEND_CLAUDE: "claude-desktop"})
@@ -134,21 +134,16 @@ def test_auto_pickup_opens_in_client_saved_when_queued(
 def test_follow_up_after_auto_pickup_parent_uses_its_backends_default(
     installed_launch_agent, ledger_path, stub_clients
 ):
-    assert (
-        cli.main(["run", support.PARENT_ID, support.PARENT_PROMPT, "--now", "--auto-pickup"]) == 0
-    )
+    assert cli.main(["run", support.PARENT_PROMPT, "--now", "--auto-pickup"]) == 0
     support.write_config_table("default_clients", {ledger.BACKEND_CLAUDE: STUB_APP_CLIENT})
 
-    for task_id, backend_id in [
-        (support.CHILD_ID, ledger.BACKEND_CLAUDE),
-        (support.GRANDCHILD_ID, ledger.BACKEND_CODEX),
-    ]:
-        command = ["run", task_id, support.PROMPT, "--backend", backend_id]
+    for backend_id in [ledger.BACKEND_CLAUDE, ledger.BACKEND_CODEX]:
+        command = ["run", support.PROMPT, "--backend", backend_id]
         assert cli.main([*command, "--after", support.PARENT_ID]) == 0
 
     tasks = support.read_tasks(ledger_path)
     assert tasks[support.CHILD_ID]["auto_pickup_client"] == STUB_APP_CLIENT
-    assert tasks[support.GRANDCHILD_ID]["auto_pickup_client"] == client_registry.CODEX_APP_CLIENT
+    assert tasks[support.SIBLING_ID]["auto_pickup_client"] == client_registry.CODEX_APP_CLIENT
 
 
 def test_then_follow_up_of_auto_pickup_run_uses_saved_default(
@@ -160,12 +155,10 @@ def test_then_follow_up_of_auto_pickup_run_uses_saved_default(
         cli.main(
             [
                 "run",
-                support.PARENT_ID,
                 support.PARENT_PROMPT,
                 "--now",
                 "--auto-pickup",
                 "--then",
-                support.CHILD_ID,
                 support.CHILD_PROMPT,
             ]
         )
@@ -238,6 +231,6 @@ def test_invalid_default_client_names_the_config_entry(
     support.write_config_table("default_clients", {backend_id: client_name})
 
     with pytest.raises(SystemExit, match=rf"default_clients\.{backend_id} "):
-        cli.main(["run", support.TASK_ID, support.PROMPT, "--now", "--auto-pickup"])
+        cli.main(["run", support.PROMPT, "--now", "--auto-pickup"])
 
     assert not ledger_path.exists()
