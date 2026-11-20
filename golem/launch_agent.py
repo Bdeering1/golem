@@ -17,6 +17,7 @@ from golem import (
     progress_log,
     spawn,
     t3_code,
+    thread_settling,
     usage_windows,
 )
 from golem.backends import claude_hooks
@@ -217,6 +218,7 @@ def refresh_thread_states() -> None:
 
 def refresh_chain_states() -> None:
     branch_pull_requests.refresh_pull_requests()
+    thread_settling.settle_pending_threads()
     refresh_thread_states()
 
 

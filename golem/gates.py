@@ -3,7 +3,7 @@ import sys
 from datetime import UTC, datetime
 from typing import cast
 
-from golem import chains, launch_agent, ledger, locks, notifications, spawn
+from golem import chains, launch_agent, ledger, locks, notifications, spawn, thread_settling
 from golem.backends import claude_hooks, registry
 
 GATE_TIMEOUT_SECONDS = 300
@@ -96,6 +96,7 @@ def release_gate_stop(task_id: str, *, stderr: int | None = None) -> bool:
         task["status"] = ledger.STATUS_FINISHED
         task["finished_at"] = datetime.now(UTC).isoformat()
         task["gate_released"] = True
+        thread_settling.mark_parent_pending(tasks, task)
     spawn.start_task_executor(task_id, task, stderr=stderr)
     return True
 
