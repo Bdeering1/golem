@@ -539,10 +539,10 @@ def test_cancelled_task_stops_waiting_for_subagents(
 ):
     follow_ups[:] = [projection(RUNNING_SUBAGENT, runs=[FIRST_RUN_ENDED], sessions=[READY_SESSION])]
 
-    bounded_sleep = time.sleep
+    fixture_sleep = time.sleep
 
     def cancel_while_sleeping(seconds: float) -> None:
-        bounded_sleep(seconds)
+        fixture_sleep(seconds)
         with ledger.locked_tasks() as tasks:
             tasks[support.TASK_ID]["status"] = ledger.STATUS_CANCELLED
 
@@ -551,3 +551,43 @@ def test_cancelled_task_stops_waiting_for_subagents(
     task = run_t3_task(ledger_path)
 
     assert task["status"] == ledger.STATUS_CANCELLED
+
+
+def test_t3_code_quitting_fails_task_with_subagent_running(
+    t3_server, follow_ups, ledger_path, monkeypatch
+):
+    follow_ups[:] = [projection(RUNNING_SUBAGENT, runs=[FIRST_RUN_ENDED], sessions=[READY_SESSION])]
+
+    fixture_sleep = time.sleep
+
+    def quit_while_sleeping(seconds: float) -> None:
+        fixture_sleep(seconds)
+        t3_server.runtime_path.unlink(missing_ok=True)
+
+    monkeypatch.setattr(time, "sleep", quit_while_sleeping)
+
+    task = run_t3_task(ledger_path)
+
+    assert task["status"] == ledger.STATUS_FAILED
+    assert task["result"] == t3.SESSION_STOPPED_REASON
+
+
+def test_earlier_usage_limit_does_not_reschedule_later_run_failure(
+    t3_server, follow_ups, ledger_path
+):
+    later_run_failed = {**LATER_RUN, "status": "failed", "completedAt": LATER_RUN_ENDED_AT}
+    follow_ups[:] = [
+        projection(
+            RUNNING_SUBAGENT, USAGE_LIMIT_ITEM, runs=[FIRST_RUN_ENDED], sessions=[READY_SESSION]
+        ),
+        projection(
+            ENDED_SUBAGENT,
+            USAGE_LIMIT_ITEM,
+            runs=[FIRST_RUN_ENDED, later_run_failed],
+            sessions=[READY_SESSION],
+        ),
+    ]
+
+    task = run_t3_task(ledger_path)
+
+    assert task["status"] == ledger.STATUS_FAILED

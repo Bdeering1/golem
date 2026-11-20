@@ -407,7 +407,7 @@ def has_unfinished_subagent_work(projection: ledger.JsonObject) -> bool:
     )
 
 
-def is_session_stopped(projection: ledger.JsonObject) -> bool:
+def is_session_ended(projection: ledger.JsonObject) -> bool:
     sessions = json_objects(projection.get("providerSessions"))
     return all(session.get("status") in SESSION_ENDED_STATUSES for session in sessions)
 
@@ -420,25 +420,23 @@ def is_request_pending(projection: ledger.JsonObject) -> bool:
 
 
 def last_reply(projection: ledger.JsonObject, run: ledger.JsonObject | None) -> str | None:
+    if run is None:
+        return None
     replies = [
         turn_item_progress(item)
         for item in json_objects(projection.get("turnItems"))
-        if item.get("type") == "assistant_message"
-        and run is not None
-        and item.get("runId") == run.get("id")
+        if item.get("type") == "assistant_message" and item.get("runId") == run.get("id")
     ]
     return next((reply for reply in reversed(replies) if reply is not None), None)
 
 
 def latest_run_outcome(
     outcome: common.RunOutcome,
-    output: ledger.JsonObject,
     projection: ledger.JsonObject,
     watcher: ThreadWatcher,
 ) -> common.RunOutcome:
     run = t3_code.latest_run(projection)
-    sent_run_id = output.get("runId")
-    if run is None or not isinstance(sent_run_id, str) or run.get("id") == sent_run_id:
+    if run is None or watcher.run_id is None or run.get("id") == watcher.run_id:
         return outcome
     watcher.run_id = cast("str | None", run.get("id"))
     if run.get("status") == COMPLETED_STATUS:
@@ -451,7 +449,6 @@ def latest_run_outcome(
 
 def wait_for_quiet_thread(
     outcome: common.RunOutcome,
-    output: ledger.JsonObject,
     watcher: ThreadWatcher,
     projection: ledger.JsonObject | None,
 ) -> common.RunOutcome:
@@ -462,8 +459,8 @@ def wait_for_quiet_thread(
                 return waiting_outcome(last_reply(projection, t3_code.latest_run(projection)))
             is_active = has_active_run(projection)
             if not is_active and not has_unfinished_subagent_work(projection):
-                return latest_run_outcome(outcome, output, projection, watcher)
-            if not is_active and is_session_stopped(projection):
+                return latest_run_outcome(outcome, projection, watcher)
+            if not is_active and is_session_ended(projection):
                 return failed_outcome(SESSION_STOPPED_REASON)
         if not t3_code.is_running():
             return failed_outcome(SESSION_STOPPED_REASON)
@@ -519,7 +516,7 @@ def run(
         first_projection = watcher.poll()
         outcome = send_outcome(returncode, output, stdout, stderr, watcher)
         if first_projection is not None and returncode != EXIT_WAITING_FOR_ANSWER:
-            outcome = wait_for_quiet_thread(outcome, output, watcher, first_projection)
+            outcome = wait_for_quiet_thread(outcome, watcher, first_projection)
     if outcome.is_usage_limit:
         watcher.disable_auto_resume()
     return outcome
