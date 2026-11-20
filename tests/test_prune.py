@@ -1,14 +1,12 @@
 import contextlib
 import curses
-import io
 import itertools
-import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
-from golem import cli, ledger, locks
+from golem import board, cli, ledger, locks
 from tests import support
 
 SIBLING_CHILD_ID = "sibling-child"
@@ -50,7 +48,7 @@ def test_prune_without_terminal_asks_for_done_chains_without_finished_prs(
     )
     tasks["closed"] = done_task("closed")
     support.write_tasks(ledger_path, tasks)
-    monkeypatch.setattr(sys, "stdin", io.StringIO("y\n"))
+    monkeypatch.setattr(board, "is_terminal", lambda: False)
 
     assert cli.main(prune_args) == 0
 
@@ -66,8 +64,11 @@ def test_prune_without_terminal_asks_for_done_chains_without_finished_prs(
         pytest.param({"finished_at": finished_days_ago(7)}, True, id="no-pr-old"),
     ],
 )
-def test_prune_deletes_only_done_chains(ledger_path, fields, is_removed):
+def test_prune_yes_deletes_only_done_chains_without_a_picker(
+    ledger_path, monkeypatch, fields, is_removed
+):
     support.write_task(ledger_path, ledger.STATUS_FINISHED, **fields)
+    support.use_fake_terminal(monkeypatch, [])
 
     assert cli.main(["prune", "--yes"]) == 0
 

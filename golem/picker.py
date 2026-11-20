@@ -1,4 +1,3 @@
-import contextlib
 import curses
 
 from golem import board, display
@@ -92,23 +91,15 @@ def picked_indices(
                     (SELECTED_MARK if index in selected_indices else UNSELECTED_MARK, *row)
                     for index, row in enumerate(rows)
                 ]
-            screen.erase()
-            for segment in picker_segments(
+            segments = picker_segments(
                 board.fitted(title, width, glyphs),
                 fitted_lines(marked_rows, width, glyphs),
                 highlight_index,
                 top_index,
                 (height, width),
                 key_sets,
-            ):
-                with contextlib.suppress(curses.error):
-                    screen.addstr(
-                        segment.y,
-                        segment.x,
-                        segment.text,
-                        board.segment_attribute(segment, is_color=is_color),
-                    )
-            screen.refresh()
+            )
+            board.draw_segments(screen, segments, is_color=is_color)
             key = board.read_key(screen)
             if key == curses.KEY_RESIZE:
                 screen.clear()

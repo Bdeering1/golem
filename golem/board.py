@@ -3171,6 +3171,16 @@ def segment_attribute(segment: Segment, *, is_color: bool) -> int:
     return attribute | curses.color_pair(COLOR_PAIRS[color, segment.background])
 
 
+def draw_segments(screen: curses.window, segments: list[Segment], *, is_color: bool) -> None:
+    screen.erase()
+    for segment in segments:
+        with contextlib.suppress(curses.error):
+            screen.addstr(
+                segment.y, segment.x, segment.text, segment_attribute(segment, is_color=is_color)
+            )
+    screen.refresh()
+
+
 def draw_board(
     screen: curses.window,
     snapshot: BoardSnapshot,
@@ -3180,14 +3190,8 @@ def draw_board(
     glyphs: Glyphs,
 ) -> None:
     height, width = screen.getmaxyx()
-    screen.erase()
     fit_state_to_layout(snapshot, width, height, state)
-    for segment in board_frame(snapshot, width, height, state, glyphs):
-        with contextlib.suppress(curses.error):
-            screen.addstr(
-                segment.y, segment.x, segment.text, segment_attribute(segment, is_color=is_color)
-            )
-    screen.refresh()
+    draw_segments(screen, board_frame(snapshot, width, height, state, glyphs), is_color=is_color)
 
 
 def start_colors() -> bool:
