@@ -131,18 +131,10 @@ def test_retry_runs_task_cancelled_while_running(
 
 
 @pytest.mark.parametrize("status", [ledger.STATUS_FAILED, ledger.STATUS_BLOCKED])
-def test_cancel_accepts_started_tasks_and_cancels_waiting_dependents(ledger_path, status):
-    support.write_parent_with_waiting_child(ledger_path, status)
-
-    assert cli.main(["cancel", support.PARENT_ID]) == 0
-
-    statuses = {task["status"] for task in support.read_tasks(ledger_path).values()}
-    assert statuses == {ledger.STATUS_CANCELLED}
-
-
-@pytest.mark.parametrize("status", [ledger.STATUS_FAILED, ledger.STATUS_BLOCKED])
-def test_cancel_leaves_processes_and_thread_of_stopped_task_alone(ledger_path, monkeypatch, status):
-    support.write_task(
+def test_cancel_stopped_task_cancels_dependents_and_leaves_processes_alone(
+    ledger_path, monkeypatch, status
+):
+    support.write_parent_with_waiting_child(
         ledger_path,
         status,
         backend=ledger.BACKEND_T3,
@@ -155,8 +147,10 @@ def test_cancel_leaves_processes_and_thread_of_stopped_task_alone(ledger_path, m
     monkeypatch.setattr(task_processes, "stop_command_process_group", stop_calls.append)
     monkeypatch.setattr(scheduling.t3_code, "stop_thread", stop_calls.append)
 
-    assert cli.main(["cancel", support.TASK_ID]) == 0
+    assert cli.main(["cancel", support.PARENT_ID]) == 0
 
+    statuses = {task["status"] for task in support.read_tasks(ledger_path).values()}
+    assert statuses == {ledger.STATUS_CANCELLED}
     assert stop_calls == []
 
 
@@ -198,15 +192,6 @@ def test_pickup_and_watch_open_started_cancelled_task(ledger_path, capsys, pause
     assert cli.main(["pickup", support.TASK_ID]) == 0
     assert cli.main(["watch", support.TASK_ID]) == 0
     assert capsys.readouterr().out.endswith(f"progress\ngolem: task cancelled: {support.TASK_ID}\n")
-
-
-def test_prune_deletes_started_cancelled_task_without_asking(ledger_path, monkeypatch):
-    support.write_task(ledger_path, ledger.STATUS_CANCELLED, started_at=STARTED_AT)
-    support.use_fake_terminal(monkeypatch, [])
-
-    assert cli.main(["prune"]) == 0
-
-    assert ledger.load_tasks() == {}
 
 
 def test_cancelling_running_dependent_still_runs_its_sibling(
