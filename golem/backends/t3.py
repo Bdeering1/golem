@@ -515,7 +515,8 @@ def run(
         watcher.run_id = run_id if isinstance(run_id, str) else None
         first_projection = watcher.poll()
         outcome = send_outcome(returncode, output, stdout, stderr, watcher)
-        if first_projection is not None and returncode != EXIT_WAITING_FOR_ANSWER:
+        is_thread_readable = first_projection is not None or t3_code.is_running()
+        if is_thread_readable and returncode != EXIT_WAITING_FOR_ANSWER:
             outcome = wait_for_quiet_thread(outcome, watcher, first_projection)
     if outcome.is_usage_limit:
         watcher.disable_auto_resume()

@@ -591,3 +591,21 @@ def test_earlier_usage_limit_does_not_reschedule_later_run_failure(
     task = run_t3_task(ledger_path)
 
     assert task["status"] == ledger.STATUS_FAILED
+
+
+def test_failed_first_read_keeps_waiting_for_subagents(t3_server, follow_ups, ledger_path):
+    later_run_ended = {**LATER_RUN, "status": "completed", "completedAt": LATER_RUN_ENDED_AT}
+    follow_ups[:] = [
+        t3_code.T3CodeError("projection read failed"),
+        projection(RUNNING_SUBAGENT, runs=[FIRST_RUN_ENDED], sessions=[READY_SESSION]),
+        projection(
+            ENDED_SUBAGENT,
+            later_run_message(LATER_REPLY),
+            runs=[FIRST_RUN_ENDED, later_run_ended],
+            sessions=[READY_SESSION],
+        ),
+    ]
+
+    task = run_t3_task(ledger_path)
+
+    assert task["result"] == LATER_REPLY
