@@ -1,4 +1,4 @@
-import io
+import contextlib
 import json
 import os
 import select
@@ -6,11 +6,14 @@ import shlex
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import cast, override
+from typing import TYPE_CHECKING, cast
 
-from golem import cli, config, ledger, spawn
+from golem import board, cli, config, ledger, picker, spawn
 from golem.backends import claude
 from golem.worktrees import git, task_directories
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
 
 DEFAULT_EMAIL = "me@example.com"
 WORK_EMAIL = "work@example.com"
@@ -46,20 +49,47 @@ GATE_STOP_REASON = "no pull request yet"
 PARENT_SESSION = f"{PARENT_ID}-session"
 
 
-class TerminalInput(io.StringIO):
-    def __init__(self, answers, on_first_read=lambda: None):
-        super().__init__(answers)
-        self.on_first_read = on_first_read
+ENTER_KEY = ord("\n")
 
-    @override
-    def isatty(self):
-        return True
 
-    @override
-    def readline(self, size: int = -1) -> str:
-        self.on_first_read()
-        self.on_first_read = lambda: None
-        return super().readline(size)
+def interrupt():
+    raise KeyboardInterrupt
+
+
+class FakeTerminal:
+    def __init__(self, keys, size):
+        self.keys = list(keys)
+        self.height, self.width = size
+        self.frames = []
+
+    def read_key(self):
+        key = self.keys.pop(0)
+        return key() if callable(key) else key
+
+    def size(self):
+        return self.height, self.width
+
+    def draw(self, segments, *, is_color):
+        lines = [""] * self.height
+        for segment in segments:
+            line = lines[segment.y].ljust(segment.x)
+            lines[segment.y] = (
+                line[: segment.x] + segment.text + line[segment.x + len(segment.text) :]
+            )
+        self.frames.append(lines)
+
+
+def use_fake_terminal(monkeypatch, keys, size=(24, 80), glyphs=board.ASCII_GLYPHS):
+    terminal = FakeTerminal(keys, size)
+
+    @contextlib.contextmanager
+    def fake_inline_terminal(row_count) -> Generator[tuple[FakeTerminal, bool, board.Glyphs]]:
+        terminal.height = picker.picker_line_count(row_count, size[0])
+        yield terminal, False, glyphs
+
+    monkeypatch.setattr(board, "is_terminal", lambda: True)
+    monkeypatch.setattr(picker, "inline_terminal", fake_inline_terminal)
+    return terminal
 
 
 def read_task(ledger_path, task_id=TASK_ID):

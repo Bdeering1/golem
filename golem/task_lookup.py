@@ -1,35 +1,17 @@
-import sys
-
-from golem import display, ledger
+from golem import board, display, ledger, picker
 
 
-def picker_lines(tasks: ledger.Tasks, task_ids: list[str]) -> list[str]:
-    return display.aligned_lines(
-        [
-            (
-                f"{number})",
-                task_id,
-                tasks[task_id].get("label", ""),
-                tasks[task_id]["status"],
-                display.display_directory(tasks[task_id]["cwd"]),
-                display.first_line(tasks[task_id]["prompt"]),
-            )
-            for number, task_id in enumerate(task_ids, start=1)
-        ]
-    )
-
-
-def picked_task_id(task_ids: list[str]) -> str:
-    while True:
-        try:
-            answer = input(f"Pick a task [1-{len(task_ids)}]: ").strip()
-        except EOFError, KeyboardInterrupt:
-            print()
-            raise SystemExit("golem: cancelled") from None
-        if not answer:
-            raise SystemExit("golem: cancelled")
-        if answer.isdigit() and 1 <= int(answer) <= len(task_ids):
-            return task_ids[int(answer) - 1]
+def picker_rows(tasks: ledger.Tasks, task_ids: list[str]) -> list[tuple[str, ...]]:
+    return [
+        (
+            task_id,
+            tasks[task_id].get("label", ""),
+            tasks[task_id]["status"],
+            display.display_directory(tasks[task_id]["cwd"]),
+            display.first_line(tasks[task_id]["prompt"]),
+        )
+        for task_id in task_ids
+    ]
 
 
 def resolved_task_id(argument: str, *, is_unknown_kept: bool = False) -> str:
@@ -45,8 +27,17 @@ def resolved_task_id(argument: str, *, is_unknown_kept: bool = False) -> str:
         raise SystemExit(f"golem: task not found: {argument}")
     if len(matching_ids) == 1:
         return matching_ids[0]
-    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+    if not board.is_terminal():
         raise SystemExit(f"golem: label {argument} matches tasks: {', '.join(matching_ids)}")
-    for line in picker_lines(tasks, matching_ids):
-        print(line)
-    return picked_task_id(matching_ids)
+    try:
+        picked_indices = picker.picked_indices(
+            f"Pick a task labelled {argument}",
+            picker_rows(tasks, matching_ids),
+            "pick",
+            is_multi_select=False,
+        )
+    except KeyboardInterrupt:
+        raise SystemExit(board.INTERRUPTED_EXIT_STATUS) from None
+    if picked_indices is None:
+        raise SystemExit(picker.CANCELLED_MESSAGE)
+    return matching_ids[picked_indices.pop()]

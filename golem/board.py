@@ -3212,9 +3212,12 @@ def has_wide_rep_bug() -> bool:
     return is_ncurses_mangling_wide_rep() and curses.tigetstr("rep") is not None
 
 
+def is_utf8_locale() -> bool:
+    return locale.nl_langinfo(locale.CODESET).lower().replace("-", "") == "utf8"
+
+
 def terminal_glyphs() -> Glyphs:
-    codeset = locale.nl_langinfo(locale.CODESET).lower().replace("-", "")
-    if codeset != "utf8" or has_wide_rep_bug():
+    if not is_utf8_locale() or has_wide_rep_bug():
         return ASCII_GLYPHS
     return UNICODE_GLYPHS
 
