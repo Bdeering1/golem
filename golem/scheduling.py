@@ -12,6 +12,7 @@ from golem import (
     spawn,
     t3_code,
     task_ids,
+    task_processes,
     usage_windows,
 )
 from golem.backends import claude_hooks, common, registry
@@ -95,8 +96,9 @@ def cancel_task(task_id: str) -> int:
         if task_id not in tasks:
             raise SystemExit(f"golem: task not found: {task_id}")
         task = tasks[task_id]
-        if task.get("status") not in {ledger.STATUS_SCHEDULED, ledger.STATUS_WAITING}:
-            raise SystemExit(f"golem: task is not scheduled: {task_id}")
+        if not ledger.is_cancellable(task):
+            raise SystemExit(f"golem: task cannot be cancelled: {task_id}")
+        previous_status = task["status"]
         task["status"] = ledger.STATUS_CANCELLED
         pending_task_ids = [task_id]
         while pending_task_ids:
@@ -106,8 +108,10 @@ def cancel_task(task_id: str) -> int:
                 waiting_task["status"] = ledger.STATUS_CANCELLED
                 pending_task_ids.append(waiting_task_id)
         directories = claude_hooks.hook_affected_directories(tasks, task)
+        cancelled_task = task.copy()
     for directory in directories:
         claude_hooks.sync_hooks(directory)
+    task_processes.stop_task_processes(task_id, cancelled_task, previous_status)
     return 0
 
 

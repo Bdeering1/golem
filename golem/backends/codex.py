@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     import io
     from collections.abc import Callable
 
-from golem import ledger, progress_log, spawn
+from golem import ledger, progress_log, spawn, task_processes
 from golem.backends import common
 from golem.worktrees import task_directories
 
@@ -233,20 +233,23 @@ def run_codex(
             encoding="utf-8",
             pass_fds=lock_file_descriptors,
         )
-        standard_input = cast("io.TextIOWrapper", process.stdin)
-        try:
-            with suppress(BrokenPipeError):
-                standard_input.write(prompt)
-        finally:
-            with suppress(BrokenPipeError):
-                standard_input.close()
-        try:
-            event_state = read_codex_events(process, task_id, session_id, record_progress)
-            returncode = process.wait()
-        except BaseException:
-            process.kill()
-            process.wait()
-            raise
+        with task_processes.recorded_process(
+            task_id, session_id, task_processes.FIELD_AGENT_PID, process
+        ):
+            standard_input = cast("io.TextIOWrapper", process.stdin)
+            try:
+                with suppress(BrokenPipeError):
+                    standard_input.write(prompt)
+            finally:
+                with suppress(BrokenPipeError):
+                    standard_input.close()
+            try:
+                event_state = read_codex_events(process, task_id, session_id, record_progress)
+                returncode = process.wait()
+            except BaseException:
+                process.kill()
+                process.wait()
+                raise
     result = (
         event_state.failed_message
         or event_state.last_agent_message

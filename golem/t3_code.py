@@ -409,6 +409,19 @@ def delete_threads(thread_ids: list[str]) -> None:
             print_delete_failure(thread_id, error)
 
 
+def stop_thread(thread_id: str) -> None:
+    if not is_running():
+        return
+    try:
+        dispatch_command(
+            server_origin(),
+            issue_token(),
+            {"type": "thread.stop", "commandId": str(uuid.uuid4()), "threadId": thread_id},
+        )
+    except T3_CODE_ERRORS as error:
+        print(f"golem: could not stop T3 Code thread {thread_id}: {error}", file=sys.stderr)
+
+
 def remove_claude_instance(instance_id: str) -> None:
     if not t3_cli_path().exists():
         return

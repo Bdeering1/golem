@@ -197,7 +197,6 @@ DURATION_PART_PATTERN = re.compile(r"(\d+)([a-z])")
 DURATION_UNIT_SIZES = {"m": 60, "h": 24}
 LOUD_STATUSES = {*STOPPED_STATUSES, ledger.STATUS_RUNNING}
 PICKUP_STATUSES = {ledger.STATUS_BLOCKED, ledger.STATUS_FAILED, ledger.STATUS_FINISHED}
-CANCEL_STATUSES = {ledger.STATUS_SCHEDULED, ledger.STATUS_WAITING}
 RETRY_STATUSES = {ledger.STATUS_FAILED, ledger.STATUS_CANCELLED}
 EMPTY_COLUMN_TEXTS = {
     display.COLUMN_QUEUED: "Nothing queued",
@@ -222,13 +221,13 @@ THREAD_STATE_TEXTS = {"thread unsettled": "thread open, no PR"}
 SHORT_REASON_TEXTS = {"thread open, no PR": "thread, no PR"}
 EMPTY_BOARD_LINES = ("No tasks yet", "Queue one with", 'golem run "<prompt>"')
 UNAVAILABLE_ACTION_TEXTS = {
-    ACTION_PICKUP: "Only blocked, failed or finished tasks can be picked up",
+    ACTION_PICKUP: "This task can't be picked up",
     ACTION_WATCH: "This task has no log yet",
     ACTION_OPEN_PULL_REQUEST: "This task has no pull request",
     ACTION_RETRY: "Only failed, cancelled or blocked tasks can be retried",
     ACTION_CLOSE: "Only finished tasks in Review can be closed",
     ACTION_CLOSE_ALL: "Review has no finished tasks to close",
-    ACTION_CANCEL: "Only queued tasks can be cancelled",
+    ACTION_CANCEL: "This task can't be cancelled",
     ACTION_COPY: "",
 }
 
@@ -2041,9 +2040,11 @@ def available_actions(snapshot: BoardSnapshot, row: display.ListRow | None) -> l
     if row is None:
         return [ACTION_CLOSE_ALL] if closable_task_ids(snapshot) else []
     actions: list[str] = []
-    if row.status in PICKUP_STATUSES:
+    task = snapshot.tasks[row.task_id]
+    is_started_cancelled = row.status == ledger.STATUS_CANCELLED and ledger.has_started(task)
+    if row.status in PICKUP_STATUSES or is_started_cancelled:
         actions.append(ACTION_PICKUP)
-    session_id = snapshot.tasks[row.task_id]["session_id"]
+    session_id = task["session_id"]
     if row.status == ledger.STATUS_RUNNING or progress_log.progress_path(session_id).exists():
         actions.append(ACTION_WATCH)
     if chain_pull_requests(snapshot, row.task_id):
@@ -2056,7 +2057,7 @@ def available_actions(snapshot: BoardSnapshot, row: display.ListRow | None) -> l
         actions.append(ACTION_CLOSE)
     if closable_task_ids(snapshot):
         actions.append(ACTION_CLOSE_ALL)
-    if row.status in CANCEL_STATUSES:
+    if ledger.is_cancellable(task):
         actions.append(ACTION_CANCEL)
     actions.append(ACTION_COPY)
     return actions
@@ -2476,7 +2477,7 @@ def wrapped_lines(text: str, width: int, style: str, hanging_indent: str = "") -
 def task_activity(row: display.ListRow, snapshot: BoardSnapshot) -> list[str]:
     if row.task_id in snapshot.activity:
         return snapshot.activity[row.task_id]
-    if row.status in ledger.NOT_STARTED_STATUSES:
+    if not ledger.has_started(snapshot.tasks[row.task_id]):
         return []
     return recent_activity(snapshot.tasks[row.task_id]["session_id"])
 
@@ -2841,7 +2842,7 @@ def help_sections(glyphs: Glyphs, *, is_task_view: bool) -> list[tuple[str, list
                 ("r", "retry, or recheck gate"),
                 ("c", "close (move to Done)"),
                 ("C", "close all finished"),
-                ("x", "cancel (if queued)"),
+                ("x", "cancel"),
                 ("y", "copy its id"),
             ],
         ),

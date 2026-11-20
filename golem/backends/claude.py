@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, TypedDict, cast
 if TYPE_CHECKING:
     import io
 
-from golem import accounts, ledger, progress_log, spawn
+from golem import accounts, ledger, progress_log, spawn, task_processes
 from golem.backends import common
 from golem.worktrees import task_directories
 
@@ -140,7 +140,12 @@ def run_claude(
             encoding="utf-8",
             pass_fds=lock_file_descriptors,
         )
-        with cast("io.TextIOWrapper", claude_process.stdout) as output:
+        with (
+            task_processes.recorded_process(
+                task_id, session_id, task_processes.FIELD_AGENT_PID, claude_process
+            ),
+            cast("io.TextIOWrapper", claude_process.stdout) as output,
+        ):
             try:
                 for line in output:
                     stdout_lines.append(line)

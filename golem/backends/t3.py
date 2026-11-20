@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-from golem import accounts, ledger, progress_log, t3_code
+from golem import accounts, ledger, progress_log, t3_code, task_processes
 from golem.backends import claude, codex, common
 from golem.worktrees import task_directories
 
@@ -279,22 +279,25 @@ def send_message(
             encoding="utf-8",
             pass_fds=lock_file_descriptors,
         )
-        try:
-            standard_input = cast("io.TextIOWrapper", process.stdin)
-            with suppress(BrokenPipeError):
-                standard_input.write(message)
-            with suppress(BrokenPipeError):
-                standard_input.close()
-            while True:
-                try:
-                    returncode = process.wait(timeout=PROJECTION_POLL_SECONDS)
-                    break
-                except subprocess.TimeoutExpired:
-                    watcher.poll()
-        except BaseException:
-            process.kill()
-            process.wait()
-            raise
+        with task_processes.recorded_process(
+            watcher.task_id, task["session_id"], task_processes.FIELD_AGENT_PID, process
+        ):
+            try:
+                standard_input = cast("io.TextIOWrapper", process.stdin)
+                with suppress(BrokenPipeError):
+                    standard_input.write(message)
+                with suppress(BrokenPipeError):
+                    standard_input.close()
+                while True:
+                    try:
+                        returncode = process.wait(timeout=PROJECTION_POLL_SECONDS)
+                        break
+                    except subprocess.TimeoutExpired:
+                        watcher.poll()
+            except BaseException:
+                process.kill()
+                process.wait()
+                raise
         watcher.poll()
         stdout_file.seek(0)
         stderr_file.seek(0)
