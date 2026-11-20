@@ -2001,7 +2001,7 @@ def detail_reason_text(row: display.ListRow, snapshot: BoardSnapshot) -> str:
     return row_reason(row, snapshot)
 
 
-def is_chain_step(tasks: ledger.Tasks, task_id: str) -> bool:
+def has_chain_parent(tasks: ledger.Tasks, task_id: str) -> bool:
     return task_id != chains.root_task_id(tasks, task_id)
 
 
@@ -2011,7 +2011,7 @@ def chain_display_name(tasks: ledger.Tasks, task_id: str) -> str:
 
 
 def step_display_name(tasks: ledger.Tasks, task_id: str) -> str:
-    return tasks[task_id].get("label", "") if is_chain_step(tasks, task_id) else ""
+    return tasks[task_id].get("label", "") if has_chain_parent(tasks, task_id) else ""
 
 
 def task_display_name(tasks: ledger.Tasks, task_id: str) -> str:
@@ -2524,7 +2524,7 @@ def task_fields(
         (
             "Task ID",
             ledger.task_name(row.task_id, task)
-            if is_chain_step(snapshot.tasks, row.task_id)
+            if has_chain_parent(snapshot.tasks, row.task_id)
             else "",
         ),
         ("Directory", display.display_directory(row.directory)),

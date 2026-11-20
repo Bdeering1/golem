@@ -9,13 +9,6 @@ from golem.worktrees import git, task_directories, worktree_cleanup
 def delete_task_and_release_worktrees(
     tasks: ledger.Tasks, worktrees: ledger.Worktrees, task_ids: list[str]
 ) -> None:
-    for session_id in pop_tasks_and_release_worktrees(tasks, worktrees, task_ids):
-        progress_log.remove_progress(session_id)
-
-
-def pop_tasks_and_release_worktrees(
-    tasks: ledger.Tasks, worktrees: ledger.Worktrees, task_ids: list[str]
-) -> list[str]:
     selected_tasks = [tasks[task_id] for task_id in task_ids]
     worktree_paths = [
         path
@@ -31,7 +24,8 @@ def pop_tasks_and_release_worktrees(
             and not task_directories.worktree_task_ids(tasks, path)
         ):
             resource.setdefault("released_at", datetime.now(UTC).isoformat())
-    return session_ids
+    for session_id in session_ids:
+        progress_log.remove_progress(session_id)
 
 
 def selected_delete_task_ids(
