@@ -227,7 +227,7 @@ UNAVAILABLE_ACTION_TEXTS = {
     ACTION_RETRY: "Only failed, cancelled or blocked tasks can be retried",
     ACTION_CLOSE: "Only finished tasks in Review can be closed",
     ACTION_CLOSE_ALL: "Review has no finished tasks to close",
-    ACTION_CANCEL: "Only queued, running, failed or blocked tasks can be cancelled",
+    ACTION_CANCEL: "This task can't be cancelled",
     ACTION_COPY: "",
 }
 
@@ -2842,7 +2842,7 @@ def help_sections(glyphs: Glyphs, *, is_task_view: bool) -> list[tuple[str, list
                 ("r", "retry, or recheck gate"),
                 ("c", "close (move to Done)"),
                 ("C", "close all finished"),
-                ("x", "cancel (unless done)"),
+                ("x", "cancel"),
                 ("y", "copy its id"),
             ],
         ),
