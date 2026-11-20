@@ -5,7 +5,6 @@ import subprocess
 import sys
 import time
 import uuid
-from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -413,12 +412,14 @@ def delete_threads(thread_ids: list[str]) -> None:
 def stop_thread(thread_id: str) -> None:
     if not is_running():
         return
-    with suppress(*T3_CODE_ERRORS):
+    try:
         dispatch_command(
             server_origin(),
             issue_token(),
             {"type": "thread.stop", "commandId": str(uuid.uuid4()), "threadId": thread_id},
         )
+    except T3_CODE_ERRORS as error:
+        print(f"golem: could not stop T3 Code thread {thread_id}: {error}", file=sys.stderr)
 
 
 def remove_claude_instance(instance_id: str) -> None:

@@ -1,9 +1,11 @@
+import subprocess
+import sys
 import threading
 from datetime import UTC, datetime
 
 import pytest
 
-from golem import cli, ledger, locks, progress_log, spawn, t3_code, task_processes
+from golem import cli, ledger, locks, progress_log, t3_code, task_processes
 from tests import support
 
 HELD_COMMAND = "sleep 30"
@@ -105,14 +107,20 @@ def test_cancel_stops_command_and_cancels_waiting_dependents(
     assert support.logged_osascript_calls(fake_commands) == []
 
 
-def test_command_started_after_cancel_is_stopped(ledger_path):
+@pytest.mark.parametrize(
+    "field", [task_processes.FIELD_AGENT_PID, task_processes.FIELD_COMMAND_PROCESS_GROUP]
+)
+def test_process_started_after_cancel_is_stopped(ledger_path, field):
     support.write_task(ledger_path, ledger.STATUS_CANCELLED)
+    session_id = support.read_task(ledger_path)["session_id"]
 
-    stop_reason, _ = spawn.shell_command_outcome(
-        HELD_COMMAND, support.TASK_ID, "gate", support.read_task(ledger_path), "{}", 300
-    )
-
-    assert stop_reason is not None
+    with (
+        subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True, text=True
+        ) as process,
+        task_processes.recorded_process(support.TASK_ID, session_id, field, process),
+    ):
+        assert process.wait(timeout=JOIN_SECONDS) < 0
 
 
 def test_retry_runs_task_cancelled_while_running(
