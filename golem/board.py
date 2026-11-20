@@ -5,6 +5,7 @@ import locale
 import os
 import re
 import signal
+import struct
 import subprocess
 import sys
 import tempfile
@@ -65,13 +66,17 @@ SELECTION_BACKGROUND = 238
 SELECTED_MUTED_COLOR = 250
 SELECTED_TITLE_COLOR = 255
 WIDE_REP_FIX_NCURSES_VERSION = (6, 0, 20170729)
-REP_LINE_PREFIX = b"\trep="
+INFOCMP_PATH_PREFIX = b"#\tReconstructed via infocmp from file: "
+LEGACY_TERMINFO_MAGIC = 0o432
+TERMINFO_HEADER = struct.Struct("<6h")
+TERMINFO_OFFSET = struct.Struct("<h")
+REP_STRING_INDEX = 121
+ABSENT_STRING_OFFSET = -1
 TOOL_LINE_PREFIX = "[tool] "
 FOLD_MARKER = "+"
 SHELL_LINE_PREFIXES = ("[tool] command ", "[tool] Bash ")
 FINISHED_AGE_SEPARATOR = "; finished "
 TERMINFO_VARIABLE = "TERMINFO"
-TERMINFO_SOURCE_NAME = "terminal.terminfo"
 BOARD_TITLE = "golem"
 NOT_A_TERMINAL_MESSAGE = "golem: board needs a terminal; use golem list"
 HELP_CLOSE_HINT = " esc closes "
@@ -3515,51 +3520,63 @@ def is_terminal() -> bool:
     return is_tty and os.environ.get("TERM", "") not in {"", "dumb"}
 
 
-def terminfo_source_without_rep() -> bytes | None:
+def terminfo_entry_path() -> Path | None:
     try:
         result = subprocess.run(
-            ["infocmp", "-x", "-1"],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            check=False,
+            ["infocmp"], stdin=subprocess.DEVNULL, capture_output=True, check=False
         )
     except OSError:
         return None
-    if result.returncode != 0:
+    header = result.stdout.split(b"\n", 1)[0]
+    if result.returncode != 0 or not header.startswith(INFOCMP_PATH_PREFIX):
         return None
-    lines = result.stdout.splitlines(keepends=True)
-    if not any(line.startswith(REP_LINE_PREFIX) for line in lines):
-        return None
-    return b"".join(line for line in lines if not line.startswith(REP_LINE_PREFIX))
+    return Path(os.fsdecode(header.removeprefix(INFOCMP_PATH_PREFIX).strip()))
 
 
-def compile_terminfo(source: bytes, directory: Path) -> bool:
-    source_path = directory / TERMINFO_SOURCE_NAME
+def terminfo_entry_without_rep(entry: bytes) -> bytes | None:
+    if len(entry) < TERMINFO_HEADER.size:
+        return None
+    header: tuple[int, ...] = TERMINFO_HEADER.unpack_from(entry)
+    magic, names_size, bool_count, number_count, string_count, _ = header
+    if magic != LEGACY_TERMINFO_MAGIC or string_count <= REP_STRING_INDEX:
+        return None
+    numbers_offset = TERMINFO_HEADER.size + names_size + bool_count
+    numbers_offset += numbers_offset % 2
+    rep_offset = numbers_offset + TERMINFO_OFFSET.size * (number_count + REP_STRING_INDEX)
+    if rep_offset + TERMINFO_OFFSET.size > len(entry):
+        return None
+    current: tuple[int, ...] = TERMINFO_OFFSET.unpack_from(entry, rep_offset)
+    if current[0] < 0:
+        return None
+    absent = TERMINFO_OFFSET.pack(ABSENT_STRING_OFFSET)
+    return entry[:rep_offset] + absent + entry[rep_offset + TERMINFO_OFFSET.size :]
+
+
+def patched_terminfo_entry() -> tuple[Path, bytes] | None:
+    entry_path = terminfo_entry_path()
+    if entry_path is None:
+        return None
     try:
-        source_path.write_bytes(source)
-        result = subprocess.run(
-            ["tic", "-x", "-o", str(directory), str(source_path)],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            check=False,
-        )
+        entry = entry_path.read_bytes()
     except OSError:
-        return False
-    return result.returncode == 0
+        return None
+    patched = terminfo_entry_without_rep(entry)
+    if patched is None:
+        return None
+    return entry_path, patched
 
 
 @contextlib.contextmanager
 def terminfo_without_rep() -> Generator[None]:
-    source = None
-    if is_ncurses_mangling_wide_rep():
-        source = terminfo_source_without_rep()
-    if source is None:
+    patch = patched_terminfo_entry() if is_ncurses_mangling_wide_rep() else None
+    if patch is None:
         yield
         return
+    entry_path, patched = patch
     with tempfile.TemporaryDirectory() as directory:
-        if not compile_terminfo(source, Path(directory)):
-            yield
-            return
+        patched_path = Path(directory) / entry_path.parent.name / entry_path.name
+        patched_path.parent.mkdir()
+        patched_path.write_bytes(patched)
         previous_terminfo = os.environ.get(TERMINFO_VARIABLE)
         os.environ[TERMINFO_VARIABLE] = directory
         try:
@@ -3572,11 +3589,7 @@ def terminfo_without_rep() -> Generator[None]:
 
 
 def start_screen() -> curses.window:
-    try:
-        with terminfo_without_rep():
-            return curses.initscr()
-    except curses.error:
-        # A tic newer than this ncurses can write an entry it can't read; use the terminal's own.
+    with terminfo_without_rep():
         return curses.initscr()
 
 
