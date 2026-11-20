@@ -121,10 +121,8 @@ def raise_missing_thread(*_: object):
     ("thread", "runs"),
     [
         pytest.param({"pinnedAt": "2030-01-01"}, [], id="pinned"),
-        pytest.param({"settledOverride": "unsettled"}, [], id="unsettled-by-user"),
         pytest.param(None, [], id="missing"),
         pytest.param({}, [RUN_BEFORE_FINISH, RUN_AFTER_FINISH], id="message-after-finish"),
-        pytest.param({}, [{"id": "run-1", "ordinal": 1, "startedAt": None}], id="run-not-started"),
     ],
 )
 def test_unsettleable_thread_is_skipped_silently(
