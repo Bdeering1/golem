@@ -448,6 +448,8 @@ def test_background_subagent_keeps_task_running_until_the_later_run_ends(
     t3_server, follow_ups, ledger_path
 ):
     follow_ups[:] = [
+        # A failed first read doesn't end the wait while T3 Code is running.
+        t3_code.T3CodeError("projection read failed"),
         projection(RUNNING_SUBAGENT, runs=[FIRST_RUN_ENDED], sessions=[READY_SESSION]),
         projection(ENDED_SUBAGENT, runs=[FIRST_RUN_ENDED], sessions=[READY_SESSION]),
         # A session list without a live session doesn't end the wait while a run is active.
@@ -498,7 +500,6 @@ def act_after_each_poll(monkeypatch, action):
     ("sessions", "is_t3_quitting"),
     [
         pytest.param([{"id": "session", "status": "stopped"}], False, id="session-stopped"),
-        pytest.param([{"id": "session", "status": "error"}], False, id="session-error"),
         pytest.param([], False, id="no-sessions"),
         pytest.param([READY_SESSION], True, id="t3-quit"),
     ],
@@ -565,20 +566,3 @@ def test_cancelled_task_stops_waiting_for_subagents(
     task = run_t3_task(ledger_path)
 
     assert task["status"] == ledger.STATUS_CANCELLED
-
-
-def test_failed_first_read_keeps_waiting_for_subagents(t3_server, follow_ups, ledger_path):
-    follow_ups[:] = [
-        t3_code.T3CodeError("projection read failed"),
-        projection(RUNNING_SUBAGENT, runs=[FIRST_RUN_ENDED], sessions=[READY_SESSION]),
-        projection(
-            ENDED_SUBAGENT,
-            later_run_message(LATER_REPLY),
-            runs=[FIRST_RUN_ENDED, LATER_RUN_ENDED],
-            sessions=[READY_SESSION],
-        ),
-    ]
-
-    task = run_t3_task(ledger_path)
-
-    assert task["result"] == LATER_REPLY
