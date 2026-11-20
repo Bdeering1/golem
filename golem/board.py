@@ -3545,8 +3545,8 @@ def terminfo_entry_without_rep(entry: bytes) -> bytes | None:
     rep_offset = numbers_offset + TERMINFO_OFFSET.size * (number_count + REP_STRING_INDEX)
     if rep_offset + TERMINFO_OFFSET.size > len(entry):
         return None
-    current: tuple[int, ...] = TERMINFO_OFFSET.unpack_from(entry, rep_offset)
-    if current[0] < 0:
+    rep_string_offsets: tuple[int, ...] = TERMINFO_OFFSET.unpack_from(entry, rep_offset)
+    if rep_string_offsets[0] < 0:
         return None
     absent = TERMINFO_OFFSET.pack(ABSENT_STRING_OFFSET)
     return entry[:rep_offset] + absent + entry[rep_offset + TERMINFO_OFFSET.size :]
