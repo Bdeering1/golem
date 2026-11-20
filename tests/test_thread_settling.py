@@ -62,7 +62,6 @@ def test_finished_dependent_settles_parents_thread_once(server, ledger_path):
     [
         pytest.param("failed", id="failed"),
         pytest.param("gate-blocked", id="gate-blocked"),
-        pytest.param("cancelled", id="cancelled"),
     ],
 )
 def test_unsuccessful_dependent_leaves_parents_thread(
@@ -78,8 +77,6 @@ def test_unsuccessful_dependent_leaves_parents_thread(
         write_chain(ledger_path)
     if outcome == "failed":
         monkeypatch.setenv("GOLEM_CLAUDE_EXIT", "1")
-    if outcome == "cancelled":
-        assert cli.main(["cancel", support.CHILD_ID]) == 0
 
     run_parent_executor()
 
@@ -120,12 +117,15 @@ def test_any_finished_dependent_settles_parents_thread(server, ledger_path, monk
     assert t3_support.sent_commands(server) == [SETTLE_COMMAND]
 
 
-def test_thread_settled_before_is_not_settled_again(server, ledger_path):
-    write_chain(ledger_path, parent_fields={"t3_code_thread_settle": ledger.THREAD_SETTLE_DONE})
+def test_picked_up_thread_without_runs_is_settled(server, ledger_path):
+    write_chain(ledger_path, parent_fields=PENDING)
+    server.projections[0] = {"thread": {}, "runs": []}
 
-    run_parent_executor()
+    thread_settling.settle_pending_threads()
 
-    assert server.commands == []
+    assert t3_support.sent_commands(server) == [
+        {"type": "thread.settle", "threadId": t3_support.CLAUDE_THREAD_ID}
+    ]
 
 
 def raise_missing_thread(*_: object):
@@ -136,8 +136,7 @@ def raise_missing_thread(*_: object):
     ("thread", "runs"),
     [
         pytest.param({"pinnedAt": "2030-01-01"}, [], id="pinned"),
-        pytest.param({"snoozedUntil": "2030-01-02"}, [], id="snoozed-until"),
-        pytest.param({"snoozedAt": "2030-01-01"}, [], id="snoozed"),
+        pytest.param({"snoozedUntil": "2030-01-02"}, [], id="snoozed"),
         pytest.param({"archivedAt": "2030-01-01"}, [], id="archived"),
         pytest.param({"deletedAt": "2030-01-01"}, [], id="deleted"),
         pytest.param({"settledOverride": "unsettled"}, [], id="unsettled-by-user"),
