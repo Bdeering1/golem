@@ -36,6 +36,7 @@ SETTLE_BLOCKING_FIELDS = (
     "archivedAt",
     "deletedAt",
     "settledAt",
+    "settledOverride",
 )
 
 
@@ -233,13 +234,11 @@ def latest_run(projection: ledger.JsonObject) -> ledger.JsonObject | None:
     return max(runs, key=lambda run: cast("int", run["ordinal"]), default=None)
 
 
-def is_thread_settleable(projection: ledger.JsonObject, finished_at: str) -> bool:
-    thread = cast("ledger.JsonObject", projection["thread"])
-    if thread.get("settledOverride") is not None:
-        return False
+def is_thread_settleable(
+    thread: ledger.JsonObject, run: ledger.JsonObject | None, finished_at: str
+) -> bool:
     if any(thread.get(field) is not None for field in SETTLE_BLOCKING_FIELDS):
         return False
-    run = latest_run(projection)
     if run is None:
         return True
     started_at = run.get("startedAt")
@@ -251,18 +250,19 @@ def is_thread_settleable(projection: ledger.JsonObject, finished_at: str) -> boo
 def settle_idle_thread(
     origin: str, token: str, thread_id: str, projection: ledger.JsonObject, finished_at: str
 ) -> None:
-    if not isinstance(projection.get("thread"), dict):
+    thread = projection.get("thread")
+    if not isinstance(thread, dict):
         if is_thread_missing(thread_id):
             return
         raise T3CodeError("the thread projection has no thread")
-    if not is_thread_settleable(projection, finished_at):
+    run = latest_run(projection)
+    if not is_thread_settleable(cast("ledger.JsonObject", thread), run, finished_at):
         return
     command: ledger.JsonObject = {
         "type": "thread.settle",
         "commandId": str(uuid.uuid4()),
         "threadId": thread_id,
     }
-    run = latest_run(projection)
     if run is not None:
         command["expectedLatestRunId"] = run["id"]
     try:

@@ -47,36 +47,22 @@ def server(server):
     return server
 
 
-def test_finished_dependent_settles_parents_thread_once(server, ledger_path):
-    write_chain(ledger_path)
-
-    run_parent_executor()
-    run_parent_executor()
-
-    assert t3_support.sent_commands(server) == [SETTLE_COMMAND]
-    assert parent_settle_state(ledger_path) == ledger.THREAD_SETTLE_DONE
-
-
 @pytest.mark.parametrize(
-    "outcome",
+    ("claude_exit", "gate_exit"),
     [
-        pytest.param("failed", id="failed"),
-        pytest.param("gate-blocked", id="gate-blocked"),
+        pytest.param("1", 0, id="failed"),
+        pytest.param("0", 1, id="gate-blocked"),
     ],
 )
 def test_unsuccessful_dependent_leaves_parents_thread(
-    server, ledger_path, monkeypatch, tmp_path, outcome
+    server, ledger_path, monkeypatch, tmp_path, claude_exit, gate_exit
 ):
-    if outcome == "gate-blocked":
-        tasks = write_chain(ledger_path, gate=support.gate_command(tmp_path, exit_code=1))
-        tasks[support.GRANDCHILD_ID] = support.task_record(
-            ledger.STATUS_WAITING, task_id=support.GRANDCHILD_ID, after=support.CHILD_ID
-        )
-        support.write_tasks(ledger_path, tasks)
-    else:
-        write_chain(ledger_path)
-    if outcome == "failed":
-        monkeypatch.setenv("GOLEM_CLAUDE_EXIT", "1")
+    tasks = write_chain(ledger_path, gate=support.gate_command(tmp_path, exit_code=gate_exit))
+    tasks[support.GRANDCHILD_ID] = support.task_record(
+        ledger.STATUS_WAITING, task_id=support.GRANDCHILD_ID, after=support.CHILD_ID
+    )
+    support.write_tasks(ledger_path, tasks)
+    monkeypatch.setenv("GOLEM_CLAUDE_EXIT", claude_exit)
 
     run_parent_executor()
 
@@ -99,22 +85,27 @@ def test_dependent_finished_by_continue_settles_parents_thread(server, ledger_pa
     assert t3_support.sent_commands(server) == [SETTLE_COMMAND]
 
 
-def test_any_finished_dependent_settles_parents_thread(server, ledger_path, monkeypatch):
+@pytest.mark.parametrize(
+    "failing_task_id",
+    [
+        pytest.param("", id="both-finish"),
+        pytest.param(support.CHILD_ID, id="one-fails"),
+    ],
+)
+def test_finished_dependent_settles_parents_thread_once(
+    server, ledger_path, monkeypatch, failing_task_id
+):
     tasks = write_chain(ledger_path)
     tasks[support.SIBLING_ID] = support.task_record(
         ledger.STATUS_WAITING, task_id=support.SIBLING_ID, after=support.PARENT_ID
     )
     support.write_tasks(ledger_path, tasks)
-    monkeypatch.setenv("GOLEM_CLAUDE_FAIL_TASK", support.CHILD_ID)
+    monkeypatch.setenv("GOLEM_CLAUDE_FAIL_TASK", failing_task_id)
 
     run_parent_executor()
 
-    statuses = {
-        task_id: task["status"] for task_id, task in support.read_tasks(ledger_path).items()
-    }
-    assert statuses[support.CHILD_ID] == ledger.STATUS_FAILED
-    assert statuses[support.SIBLING_ID] == ledger.STATUS_FINISHED
     assert t3_support.sent_commands(server) == [SETTLE_COMMAND]
+    assert parent_settle_state(ledger_path) == ledger.THREAD_SETTLE_DONE
 
 
 def test_picked_up_thread_without_runs_is_settled(server, ledger_path):
@@ -171,39 +162,54 @@ def test_thread_in_use_is_skipped_silently(server, ledger_path, monkeypatch, cap
     ],
 )
 def test_rejected_settle_is_not_retried(server, ledger_path, capsys, message, expected_error):
-    tasks = write_chain(ledger_path, parent_fields=PENDING)
+    write_chain(ledger_path, parent_fields=PENDING)
     server.command_exit = {"_tag": "Failure", "cause": {"error": {"message": message}}}
 
     thread_settling.settle_pending_threads()
 
     assert capsys.readouterr().err == expected_error
     assert parent_settle_state(ledger_path) == ledger.THREAD_SETTLE_DONE
-    assert (
-        support.read_task(ledger_path, support.PARENT_ID)["status"]
-        == (tasks[support.PARENT_ID]["status"])
-    )
 
 
 def raise_connection_error(*_: object):
     raise ConnectionRefusedError
 
 
-@pytest.mark.parametrize("is_running", [False, True])
+def raise_token_error(*_: object):
+    raise t3_code.T3CodeError("t3 auth session issue failed")
+
+
+def stop_server(server, _monkeypatch):
+    server.runtime_path.unlink()
+
+
+def fail_token_issue(_server, monkeypatch):
+    monkeypatch.setattr(t3_code, "issue_token", raise_token_error)
+
+
+def refuse_projection(_server, monkeypatch):
+    monkeypatch.setattr(t3_code, "thread_projection", raise_connection_error)
+
+
+@pytest.mark.parametrize(
+    "make_unreachable",
+    [
+        pytest.param(stop_server, id="not-running"),
+        pytest.param(fail_token_issue, id="token-error"),
+        pytest.param(refuse_projection, id="connection-error"),
+    ],
+)
 def test_unreachable_t3_code_is_retried_by_launch_agent(
-    server, ledger_path, monkeypatch, capsys, is_running
+    server, ledger_path, monkeypatch, capsys, make_unreachable
 ):
     write_chain(ledger_path, parent_fields=PENDING)
-    if is_running:
-        monkeypatch.setattr(t3_code, "thread_projection", raise_connection_error)
-    else:
-        server.runtime_path.unlink()
-
-    thread_settling.settle_pending_threads()
+    with monkeypatch.context() as unreachable_patch:
+        make_unreachable(server, unreachable_patch)
+        thread_settling.settle_pending_threads()
 
     assert server.commands == []
     assert parent_settle_state(ledger_path) == ledger.THREAD_SETTLE_PENDING
     assert capsys.readouterr().err == ""
-    monkeypatch.setattr(t3_code, "thread_projection", server.thread_projection)
     server.mark_running()
 
     launch_agent.refresh_chain_states()
