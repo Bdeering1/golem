@@ -53,9 +53,7 @@ class ClaudeInstance:
 CONNECTION_ERRORS = (OSError, http.client.HTTPException, WebSocketException)
 T3_CODE_ERRORS = (
     T3CodeError,
-    OSError,
-    http.client.HTTPException,
-    WebSocketException,
+    *CONNECTION_ERRORS,
     ValueError,
     KeyError,
     TypeError,
@@ -235,9 +233,9 @@ def latest_run(projection: ledger.JsonObject) -> ledger.JsonObject | None:
     return max(runs, key=lambda run: cast("int", run["ordinal"]), default=None)
 
 
-def is_thread_idle_since(projection: ledger.JsonObject, finished_at: str) -> bool:
+def is_thread_settleable(projection: ledger.JsonObject, finished_at: str) -> bool:
     thread = cast("ledger.JsonObject", projection["thread"])
-    if thread.get("settledOverride") == "settled":
+    if thread.get("settledOverride") is not None:
         return False
     if any(thread.get(field) is not None for field in SETTLE_BLOCKING_FIELDS):
         return False
@@ -257,7 +255,7 @@ def settle_idle_thread(
         if is_thread_missing(thread_id):
             return
         raise T3CodeError("the thread projection has no thread")
-    if not is_thread_idle_since(projection, finished_at):
+    if not is_thread_settleable(projection, finished_at):
         return
     command: ledger.JsonObject = {
         "type": "thread.settle",

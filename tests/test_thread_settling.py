@@ -140,6 +140,7 @@ def raise_missing_thread(*_: object):
         pytest.param({"snoozedAt": "2030-01-01"}, [], id="snoozed"),
         pytest.param({"archivedAt": "2030-01-01"}, [], id="archived"),
         pytest.param({"deletedAt": "2030-01-01"}, [], id="deleted"),
+        pytest.param({"settledOverride": "unsettled"}, [], id="unsettled-by-user"),
         pytest.param(None, [], id="missing"),
         pytest.param({}, [RUN_BEFORE_FINISH, RUN_AFTER_FINISH], id="message-after-finish"),
         pytest.param({}, [{"id": "run-1", "ordinal": 1, "startedAt": None}], id="run-not-started"),
@@ -147,9 +148,10 @@ def raise_missing_thread(*_: object):
 )
 def test_thread_in_use_is_skipped_silently(server, ledger_path, monkeypatch, capsys, thread, runs):
     write_chain(ledger_path, parent_fields=PENDING)
-    server.projections[0] = {"thread": thread, "runs": runs}
     if thread is None:
         monkeypatch.setattr(t3_code, "thread_projection", raise_missing_thread)
+    else:
+        server.projections[0] = {"thread": thread, "runs": runs}
 
     thread_settling.settle_pending_threads()
 

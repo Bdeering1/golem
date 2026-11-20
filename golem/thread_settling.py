@@ -58,15 +58,15 @@ def settle_pending_threads() -> None:
     except t3_code.T3_CODE_ERRORS as error:
         for thread_id, _ in pending_threads.values():
             print_settle_failure(thread_id, error)
-        settled_ids = list(pending_threads)
+        concluded_ids = list(pending_threads)
     else:
-        settled_ids = [
+        concluded_ids = [
             task_id
             for task_id, (thread_id, finished_at) in pending_threads.items()
             if settle_task_thread(origin, token, thread_id, finished_at)
         ]
     with ledger.locked_tasks() as locked_tasks_by_id:
-        for task_id in settled_ids:
+        for task_id in concluded_ids:
             task = locked_tasks_by_id.get(task_id)
             if task is not None and task["session_id"] == tasks[task_id]["session_id"]:
                 task["t3_code_thread_settle"] = ledger.THREAD_SETTLE_DONE
