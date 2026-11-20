@@ -1,5 +1,4 @@
 import contextlib
-import curses
 import json
 import os
 import select
@@ -9,7 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
-from golem import board, cli, config, ledger, spawn
+from golem import board, cli, config, ledger, picker, spawn
 from golem.backends import claude
 from golem.worktrees import git, task_directories
 
@@ -47,7 +46,7 @@ GATE_STOP_REASON = "no pull request yet"
 PARENT_SESSION = f"{PARENT_ID}-session"
 
 
-ESCAPE_KEYS = [27, -1]
+ESCAPE_KEYS = [board.ESCAPE_KEY]
 ENTER_KEY = ord("\n")
 
 
@@ -55,56 +54,41 @@ def interrupt():
     raise KeyboardInterrupt
 
 
-class FakeScreen:
+class FakeTerminal:
     def __init__(self, keys, size):
         self.keys = list(keys)
-        self.size = size
-        self.lines = {}
+        self.height, self.width = size
         self.frames = []
 
-    def getch(self):
+    def read_key(self):
         key = self.keys.pop(0)
         return key() if callable(key) else key
 
-    def getmaxyx(self):
-        return self.size
+    def size(self):
+        return self.height, self.width
 
-    def erase(self):
-        self.lines = {}
-
-    def clear(self):
-        self.lines = {}
-
-    def addstr(self, y, x, text, _attribute):
-        line = self.lines.get(y, "").ljust(x)
-        self.lines[y] = line[:x] + text + line[x + len(text) :]
-
-    def refresh(self):
-        self.frames.append([self.lines.get(y, "") for y in range(self.size[0])])
-
-    def timeout(self, _milliseconds):
-        pass
+    def draw(self, segments, *, is_color):
+        assert not is_color
+        lines = [""] * self.height
+        for segment in segments:
+            line = lines[segment.y].ljust(segment.x)
+            lines[segment.y] = (
+                line[: segment.x] + segment.text + line[segment.x + len(segment.text) :]
+            )
+        self.frames.append(lines)
 
 
 def use_fake_terminal(monkeypatch, keys, size=(24, 80), glyphs=board.ASCII_GLYPHS):
-    screen = FakeScreen(keys, size)
+    terminal = FakeTerminal(keys, size)
 
     @contextlib.contextmanager
-    def fake_terminal_screen() -> Generator[tuple[FakeScreen, bool, board.Glyphs]]:
-        yield screen, False, glyphs
+    def fake_inline_terminal(row_count) -> Generator[tuple[FakeTerminal, bool, board.Glyphs]]:
+        terminal.height = picker.picker_line_count(row_count, size[0])
+        yield terminal, False, glyphs
 
     monkeypatch.setattr(board, "is_terminal", lambda: True)
-    monkeypatch.setattr(board, "terminal_screen", fake_terminal_screen)
-    return screen
-
-
-def fail_screen_start():
-    raise curses.error
-
-
-def use_terminal_failing_to_start(monkeypatch):
-    monkeypatch.setattr(board, "is_terminal", lambda: True)
-    monkeypatch.setattr(board, "start_screen", fail_screen_start)
+    monkeypatch.setattr(picker, "inline_terminal", fake_inline_terminal)
+    return terminal
 
 
 def read_task(ledger_path, task_id=TASK_ID):

@@ -233,10 +233,6 @@ UNAVAILABLE_ACTION_TEXTS = {
 }
 
 
-class TerminalStartError(Exception):
-    pass
-
-
 class BoardColumn(NamedTuple):
     title: str
     color: int
@@ -3171,16 +3167,6 @@ def segment_attribute(segment: Segment, *, is_color: bool) -> int:
     return attribute | curses.color_pair(COLOR_PAIRS[color, segment.background])
 
 
-def draw_segments(screen: curses.window, segments: list[Segment], *, is_color: bool) -> None:
-    screen.erase()
-    for segment in segments:
-        with contextlib.suppress(curses.error):
-            screen.addstr(
-                segment.y, segment.x, segment.text, segment_attribute(segment, is_color=is_color)
-            )
-    screen.refresh()
-
-
 def draw_board(
     screen: curses.window,
     snapshot: BoardSnapshot,
@@ -3190,8 +3176,14 @@ def draw_board(
     glyphs: Glyphs,
 ) -> None:
     height, width = screen.getmaxyx()
+    screen.erase()
     fit_state_to_layout(snapshot, width, height, state)
-    draw_segments(screen, board_frame(snapshot, width, height, state, glyphs), is_color=is_color)
+    for segment in board_frame(snapshot, width, height, state, glyphs):
+        with contextlib.suppress(curses.error):
+            screen.addstr(
+                segment.y, segment.x, segment.text, segment_attribute(segment, is_color=is_color)
+            )
+    screen.refresh()
 
 
 def start_colors() -> bool:
@@ -3220,9 +3212,12 @@ def has_wide_rep_bug() -> bool:
     return is_ncurses_mangling_wide_rep() and curses.tigetstr("rep") is not None
 
 
+def is_utf8_locale() -> bool:
+    return locale.nl_langinfo(locale.CODESET).lower().replace("-", "") == "utf8"
+
+
 def terminal_glyphs() -> Glyphs:
-    codeset = locale.nl_langinfo(locale.CODESET).lower().replace("-", "")
-    if codeset != "utf8" or has_wide_rep_bug():
+    if not is_utf8_locale() or has_wide_rep_bug():
         return ASCII_GLYPHS
     return UNICODE_GLYPHS
 
@@ -3586,13 +3581,14 @@ def start_screen() -> curses.window:
         return curses.initscr()
 
 
-@contextlib.contextmanager
-def terminal_screen() -> Generator[tuple[curses.window, bool, Glyphs]]:
+def run_board() -> int:
+    if not is_terminal():
+        raise SystemExit(NOT_A_TERMINAL_MESSAGE)
     signal.signal(signal.SIGINT, signal.default_int_handler)
     try:
         screen = start_screen()
     except curses.error:
-        raise TerminalStartError from None
+        raise SystemExit(NOT_A_TERMINAL_MESSAGE) from None
     try:
         curses.noecho()
         curses.cbreak()
@@ -3600,19 +3596,10 @@ def terminal_screen() -> Generator[tuple[curses.window, bool, Glyphs]]:
         with contextlib.suppress(curses.error):
             curses.curs_set(0)
         curses.set_escdelay(ESCAPE_DELAY_MILLISECONDS)
-        yield screen, start_colors(), terminal_glyphs()
-    finally:
-        curses.endwin()
-
-
-def run_board() -> int:
-    if not is_terminal():
-        raise SystemExit(NOT_A_TERMINAL_MESSAGE)
-    try:
-        with terminal_screen() as (screen, is_color, glyphs):
-            screen.timeout(TICK_MILLISECONDS)
-            return board_loop(screen, is_color=is_color, glyphs=glyphs)
-    except TerminalStartError:
-        raise SystemExit(NOT_A_TERMINAL_MESSAGE) from None
+        is_color = start_colors()
+        screen.timeout(TICK_MILLISECONDS)
+        return board_loop(screen, is_color=is_color, glyphs=terminal_glyphs())
     except KeyboardInterrupt:
         return INTERRUPTED_EXIT_STATUS
+    finally:
+        curses.endwin()

@@ -27,9 +27,8 @@ def resolved_task_id(argument: str, *, is_unknown_kept: bool = False) -> str:
         raise SystemExit(f"golem: task not found: {argument}")
     if len(matching_ids) == 1:
         return matching_ids[0]
-    not_a_terminal_message = f"golem: label {argument} matches tasks: {', '.join(matching_ids)}"
     if not board.is_terminal():
-        raise SystemExit(not_a_terminal_message)
+        raise SystemExit(f"golem: label {argument} matches tasks: {', '.join(matching_ids)}")
     try:
         picked_indices = picker.picked_indices(
             f"Pick a task labelled {argument}",
@@ -37,8 +36,6 @@ def resolved_task_id(argument: str, *, is_unknown_kept: bool = False) -> str:
             "pick",
             is_multi_select=False,
         )
-    except board.TerminalStartError:
-        raise SystemExit(not_a_terminal_message) from None
     except KeyboardInterrupt:
         raise SystemExit(board.INTERRUPTED_EXIT_STATUS) from None
     if picked_indices is None:

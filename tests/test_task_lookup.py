@@ -63,18 +63,8 @@ def test_label_picker_cancels(labelled_tasks, monkeypatch, keys, exit_code):
     assert raised.value.code == exit_code
 
 
-@pytest.mark.parametrize(
-    "use_unusable_terminal",
-    [
-        lambda monkeypatch: monkeypatch.setattr(board, "is_terminal", lambda: False),
-        support.use_terminal_failing_to_start,
-    ],
-    ids=["no-terminal", "curses-fails"],
-)
-def test_shared_label_without_usable_terminal_lists_matching_ids(
-    labelled_tasks, monkeypatch, use_unusable_terminal
-):
-    use_unusable_terminal(monkeypatch)
+def test_shared_label_without_terminal_lists_matching_ids(labelled_tasks, monkeypatch):
+    monkeypatch.setattr(board, "is_terminal", lambda: False)
 
     with pytest.raises(SystemExit, match=f"{NEWER_ID}, {OLDER_ID}"):
         task_lookup.resolved_task_id(support.LABEL)

@@ -122,22 +122,6 @@ def test_prune_picker_prunes_selected_chains_with_unasked_ones(
     assert set(ledger.load_tasks()) == set(tasks) - expected_removed_ids
 
 
-def test_prune_without_usable_terminal_keeps_asked_chains(ledger_path, monkeypatch, capsys):
-    support.write_tasks(
-        ledger_path,
-        {
-            support.TASK_ID: support.task_record(ledger.STATUS_CANCELLED),
-            support.SIBLING_ID: done_task(support.SIBLING_ID),
-        },
-    )
-    support.use_terminal_failing_to_start(monkeypatch)
-
-    assert cli.main(["prune"]) == 0
-
-    assert set(ledger.load_tasks()) == {support.SIBLING_ID}
-    assert "--yes to prune them" in capsys.readouterr().err
-
-
 def write_chain(ledger_path, statuses):
     task_ids = [support.PARENT_ID, support.CHILD_ID, support.GRANDCHILD_ID][: len(statuses)]
     tasks = {

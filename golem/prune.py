@@ -71,15 +71,12 @@ def picked_asked_indices(
 ) -> tuple[set[int] | None, bool]:
     if not board.is_terminal():
         return set(), True
-    try:
-        picked_indices = picker.picked_indices(
-            "Prune these Done chains",
-            [chain_row(tasks, candidates[index]) for index in asked_indices],
-            "prune",
-            is_multi_select=True,
-        )
-    except board.TerminalStartError:
-        return set(), True
+    picked_indices = picker.picked_indices(
+        "Prune these Done chains",
+        [chain_row(tasks, candidates[index]) for index in asked_indices],
+        "prune",
+        is_multi_select=True,
+    )
     if picked_indices is None:
         return None, False
     return {asked_indices[index] for index in picked_indices}, False

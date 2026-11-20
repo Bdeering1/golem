@@ -1,3 +1,9 @@
+import curses
+import os
+import sys
+
+import pytest
+
 from golem import board, picker
 from tests import support
 
@@ -29,3 +35,22 @@ def test_picker_fits_narrow_ascii_terminal_by_cutting_prompt_first(monkeypatch):
     assert all(len(line) <= NARROW_WIDTH and line.isascii() for line in frame)
     assert frame[1].split()[:4] == ["t0", LABEL, "finished", "~/golem"]
     assert frame[1].rstrip().endswith(board.ASCII_GLYPHS.ellipsis)
+
+
+@pytest.mark.parametrize(
+    ("typed", "key"),
+    [
+        pytest.param(b"\x1b[A", curses.KEY_UP, id="up"),
+        pytest.param(b"\x1bOB", curses.KEY_DOWN, id="application-down"),
+        pytest.param(b"\x1b", board.ESCAPE_KEY, id="escape"),
+        pytest.param(b"\x1b[6~", None, id="unmapped-sequence"),
+    ],
+)
+def test_read_key_tells_escape_from_arrow_sequences(monkeypatch, typed, key):
+    read_fd, write_fd = os.pipe()
+    os.write(write_fd, typed)
+    with os.fdopen(read_fd, "rb", buffering=0) as typed_input:
+        monkeypatch.setattr(sys, "stdin", typed_input)
+
+        assert picker.read_key() == key
+    os.close(write_fd)
