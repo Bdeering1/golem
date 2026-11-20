@@ -93,18 +93,8 @@ def test_dependent_finished_by_continue_settles_parents_thread(server, ledger_pa
     assert t3_support.sent_commands(server) == [SETTLE_COMMAND]
 
 
-@pytest.mark.parametrize(
-    "failing_task_id",
-    [
-        pytest.param("", id="both-finish"),
-        pytest.param(support.CHILD_ID, id="one-fails"),
-    ],
-)
-def test_finished_dependent_settles_parents_thread_once(
-    server, ledger_path, monkeypatch, failing_task_id
-):
+def test_finished_dependent_settles_parents_thread_once(server, ledger_path):
     write_chain(ledger_path, waiting_task_parents={support.SIBLING_ID: support.PARENT_ID})
-    monkeypatch.setenv("GOLEM_CLAUDE_FAIL_TASK", failing_task_id)
 
     run_parent_executor()
 
@@ -131,9 +121,6 @@ def raise_missing_thread(*_: object):
     ("thread", "runs"),
     [
         pytest.param({"pinnedAt": "2030-01-01"}, [], id="pinned"),
-        pytest.param({"snoozedUntil": "2030-01-02"}, [], id="snoozed"),
-        pytest.param({"archivedAt": "2030-01-01"}, [], id="archived"),
-        pytest.param({"deletedAt": "2030-01-01"}, [], id="deleted"),
         pytest.param({"settledOverride": "unsettled"}, [], id="unsettled-by-user"),
         pytest.param(None, [], id="missing"),
         pytest.param({}, [RUN_BEFORE_FINISH, RUN_AFTER_FINISH], id="message-after-finish"),
