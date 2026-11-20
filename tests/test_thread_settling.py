@@ -15,7 +15,12 @@ PENDING = {"t3_code_thread_settle": ledger.THREAD_SETTLE_PENDING}
 
 
 def write_chain(
-    ledger_path, *, parent_fields=None, child_status=ledger.STATUS_WAITING, **child_fields: object
+    ledger_path,
+    *,
+    parent_fields=None,
+    child_status=ledger.STATUS_WAITING,
+    waiting_task_parents=None,
+    **child_fields: object,
 ):
     tasks = {
         support.PARENT_ID: support.task_record(
@@ -29,8 +34,11 @@ def write_chain(
             child_status, task_id=support.CHILD_ID, after=support.PARENT_ID, **child_fields
         ),
     }
+    for task_id, parent_id in (waiting_task_parents or {}).items():
+        tasks[task_id] = support.task_record(
+            ledger.STATUS_WAITING, task_id=task_id, after=parent_id
+        )
     support.write_tasks(ledger_path, tasks)
-    return tasks
 
 
 def run_parent_executor():
@@ -57,11 +65,11 @@ def server(server):
 def test_unsuccessful_dependent_leaves_parents_thread(
     server, ledger_path, monkeypatch, tmp_path, claude_exit, gate_exit
 ):
-    tasks = write_chain(ledger_path, gate=support.gate_command(tmp_path, exit_code=gate_exit))
-    tasks[support.GRANDCHILD_ID] = support.task_record(
-        ledger.STATUS_WAITING, task_id=support.GRANDCHILD_ID, after=support.CHILD_ID
+    write_chain(
+        ledger_path,
+        gate=support.gate_command(tmp_path, exit_code=gate_exit),
+        waiting_task_parents={support.GRANDCHILD_ID: support.CHILD_ID},
     )
-    support.write_tasks(ledger_path, tasks)
     monkeypatch.setenv("GOLEM_CLAUDE_EXIT", claude_exit)
 
     run_parent_executor()
@@ -95,11 +103,7 @@ def test_dependent_finished_by_continue_settles_parents_thread(server, ledger_pa
 def test_finished_dependent_settles_parents_thread_once(
     server, ledger_path, monkeypatch, failing_task_id
 ):
-    tasks = write_chain(ledger_path)
-    tasks[support.SIBLING_ID] = support.task_record(
-        ledger.STATUS_WAITING, task_id=support.SIBLING_ID, after=support.PARENT_ID
-    )
-    support.write_tasks(ledger_path, tasks)
+    write_chain(ledger_path, waiting_task_parents={support.SIBLING_ID: support.PARENT_ID})
     monkeypatch.setenv("GOLEM_CLAUDE_FAIL_TASK", failing_task_id)
 
     run_parent_executor()
@@ -136,7 +140,9 @@ def raise_missing_thread(*_: object):
         pytest.param({}, [{"id": "run-1", "ordinal": 1, "startedAt": None}], id="run-not-started"),
     ],
 )
-def test_thread_in_use_is_skipped_silently(server, ledger_path, monkeypatch, capsys, thread, runs):
+def test_unsettleable_thread_is_skipped_silently(
+    server, ledger_path, monkeypatch, capsys, thread, runs
+):
     write_chain(ledger_path, parent_fields=PENDING)
     if thread is None:
         monkeypatch.setattr(t3_code, "thread_projection", raise_missing_thread)

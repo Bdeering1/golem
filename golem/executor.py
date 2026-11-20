@@ -307,10 +307,11 @@ def drain_succeeded_task(task_id: str, session_id: str) -> None:
     try:
         if not gates.run_pending_gate_under_directory_lock(task_id):
             return
+        thread_settling.mark_parent_of_succeeded_task(task_id)
+        thread_settling.settle_pending_threads()
         drain_dependents(task_id, session_id)
     finally:
         locks.release_run_lock(run_lock_file, session_id)
-    thread_settling.settle_pending_threads()
 
 
 def execute_or_drain_task(task_id: str, session_id: str) -> int:

@@ -1,3 +1,4 @@
+import contextlib
 import sys
 
 from golem import chains, ledger, t3_code
@@ -21,20 +22,19 @@ def print_settle_failure(thread_id: str, error: Exception) -> None:
     print(f"golem: could not settle T3 Code thread {thread_id}: {error}", file=sys.stderr)
 
 
-def settle_task_thread(origin: str, token: str, thread_id: str, finished_at: str) -> bool:
+def settle_task_thread(origin: str, token: str, thread_id: str, finished_at: str) -> None:
     try:
         projection = t3_code.thread_projection(origin, token, thread_id)
     except t3_code.CONNECTION_ERRORS:
-        return False
+        raise
     except t3_code.T3_CODE_ERRORS as error:
         if not t3_code.is_thread_missing(thread_id):
             print_settle_failure(thread_id, error)
-        return True
+        return
     try:
         t3_code.settle_idle_thread(origin, token, thread_id, projection, finished_at)
     except t3_code.T3_CODE_ERRORS as error:
         print_settle_failure(thread_id, error)
-    return True
 
 
 def settle_pending_threads() -> None:
@@ -55,11 +55,11 @@ def settle_pending_threads() -> None:
         token = t3_code.issue_token()
     except t3_code.T3_CODE_ERRORS:
         return
-    concluded_ids = [
-        task_id
-        for task_id, (thread_id, finished_at) in pending_threads.items()
-        if settle_task_thread(origin, token, thread_id, finished_at)
-    ]
+    concluded_ids: list[str] = []
+    with contextlib.suppress(*t3_code.CONNECTION_ERRORS):
+        for task_id, (thread_id, finished_at) in pending_threads.items():
+            settle_task_thread(origin, token, thread_id, finished_at)
+            concluded_ids.append(task_id)
     with ledger.locked_tasks() as locked_tasks_by_id:
         for task_id in concluded_ids:
             task = locked_tasks_by_id.get(task_id)
