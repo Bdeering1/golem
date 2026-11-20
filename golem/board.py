@@ -2057,7 +2057,7 @@ def available_actions(snapshot: BoardSnapshot, row: display.ListRow | None) -> l
         actions.append(ACTION_CLOSE)
     if closable_task_ids(snapshot):
         actions.append(ACTION_CLOSE_ALL)
-    if ledger.is_cancellable(snapshot.tasks[row.task_id]):
+    if ledger.is_cancellable(task):
         actions.append(ACTION_CANCEL)
     actions.append(ACTION_COPY)
     return actions
