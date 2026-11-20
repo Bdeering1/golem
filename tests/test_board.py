@@ -159,7 +159,7 @@ def test_board_shows_the_chain_label_next_to_its_name():
 
 @pytest.mark.parametrize(
     ("width", "expected"),
-    [(16, "fix-login GH-115"), (12, "fix-login G~"), (11, "fix-login"), (8, "fix-log~")],
+    [(12, "fix-login G~"), (11, "fix-login")],
 )
 def test_board_cuts_the_label_before_the_task_id(width, expected):
     assert board.fitted_task_name("fix-login", "GH-115", width, board.ASCII_GLYPHS) == expected

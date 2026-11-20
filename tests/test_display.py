@@ -291,25 +291,7 @@ def test_list_uses_distinct_status_colors_and_keeps_columns_aligned(
     assert ANSI_COLOR.sub("", colored_output) == plain_output
 
 
-def test_list_shows_label_column_after_id(ledger_path, capsys):
-    support.write_tasks(
-        ledger_path,
-        {
-            support.TASK_ID: support.task_record(ledger.STATUS_RUNNING, label=support.LABEL),
-            support.SIBLING_ID: support.task_record(
-                ledger.STATUS_RUNNING, task_id=support.SIBLING_ID
-            ),
-        },
-    )
-
-    header, labelled, unlabelled = support.list_output(capsys).splitlines()
-
-    assert header.split()[:2] == ["ID", "LABEL"]
-    assert labelled.split()[:3] == [support.TASK_ID, support.LABEL, ledger.STATUS_RUNNING]
-    assert unlabelled.split()[:2] == [support.SIBLING_ID, ledger.STATUS_RUNNING]
-
-
-def test_list_shows_the_chain_label_on_a_follow_up_step(ledger_path, capsys):
+def test_list_shows_label_column_with_the_chain_label(ledger_path, capsys):
     support.write_tasks(
         ledger_path,
         {
@@ -319,12 +301,19 @@ def test_list_shows_the_chain_label_on_a_follow_up_step(ledger_path, capsys):
             support.CHILD_ID: support.task_record(
                 ledger.STATUS_RUNNING, task_id=support.CHILD_ID, after=support.PARENT_ID
             ),
+            support.SIBLING_ID: support.task_record(
+                ledger.STATUS_RUNNING, task_id=support.SIBLING_ID
+            ),
         },
     )
 
-    _, row = support.list_output(capsys).splitlines()
+    header, *rows = support.list_output(capsys).splitlines()
 
-    assert row.split()[:2] == [support.CHILD_ID, support.LABEL]
+    assert header.split()[:2] == ["ID", "LABEL"]
+    assert [row.split()[:2] for row in rows] == [
+        [support.CHILD_ID, support.LABEL],
+        [support.SIBLING_ID, ledger.STATUS_RUNNING],
+    ]
 
 
 @pytest.mark.parametrize(

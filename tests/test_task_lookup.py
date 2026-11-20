@@ -32,24 +32,21 @@ def interrupt():
     raise KeyboardInterrupt
 
 
-def test_exact_task_id_wins_over_a_label(ledger_path):
+@pytest.mark.parametrize(
+    "argument", [support.TASK_ID, support.LABEL], ids=["exact-id-wins", "unique-label"]
+)
+def test_argument_resolves_to_one_task(ledger_path, argument):
     support.write_tasks(
         ledger_path,
         {
-            support.TASK_ID: support.task_record(ledger.STATUS_FINISHED),
+            support.TASK_ID: support.task_record(ledger.STATUS_FINISHED, label=support.LABEL),
             support.SIBLING_ID: support.task_record(
                 ledger.STATUS_FINISHED, task_id=support.SIBLING_ID, label=support.TASK_ID
             ),
         },
     )
 
-    assert task_lookup.resolved_task_id(support.TASK_ID) == support.TASK_ID
-
-
-def test_unique_label_resolves_to_its_task(ledger_path):
-    support.write_task(ledger_path, ledger.STATUS_FINISHED, label=support.LABEL)
-
-    assert task_lookup.resolved_task_id(support.LABEL) == support.TASK_ID
+    assert task_lookup.resolved_task_id(argument) == support.TASK_ID
 
 
 def test_unknown_argument_fails_like_an_unknown_id(labelled_tasks):
