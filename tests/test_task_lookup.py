@@ -1,9 +1,8 @@
-import io
-import sys
+import curses
 
 import pytest
 
-from golem import ledger, task_lookup
+from golem import board, ledger, task_lookup
 from tests import support
 
 OLDER_ID = "older"
@@ -23,11 +22,6 @@ def labelled_tasks(ledger_path):
     )
 
 
-def use_terminal(monkeypatch, answers):
-    monkeypatch.setattr(sys, "stdin", support.TerminalInput(answers))
-    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
-
-
 @pytest.mark.parametrize(
     "argument", [support.TASK_ID, support.LABEL], ids=["exact-id-wins", "unique-label"]
 )
@@ -45,27 +39,53 @@ def test_argument_resolves_to_one_task(ledger_path, argument):
     assert task_lookup.resolved_task_id(argument) == support.TASK_ID
 
 
-def test_shared_label_lists_matches_newest_first_and_picks_by_number(
-    labelled_tasks, monkeypatch, capsys
-):
-    use_terminal(monkeypatch, "first\n3\n1\n")
+@pytest.mark.parametrize(
+    ("keys", "picked_id"),
+    [
+        pytest.param([support.ENTER_KEY], NEWER_ID, id="newest-first"),
+        pytest.param([ord("j"), ord("j"), support.ENTER_KEY], OLDER_ID, id="j"),
+        pytest.param([curses.KEY_DOWN, curses.KEY_UP, support.ENTER_KEY], NEWER_ID, id="arrows"),
+    ],
+)
+def test_shared_label_picks_highlighted_task(labelled_tasks, monkeypatch, keys, picked_id):
+    screen = support.use_fake_terminal(monkeypatch, keys, size=(24, 200))
 
-    assert task_lookup.resolved_task_id(support.LABEL) == NEWER_ID
-    newer_line, older_line = capsys.readouterr().out.splitlines()[:2]
-    assert newer_line.split()[:4] == ["1)", NEWER_ID, support.LABEL, ledger.STATUS_FINISHED]
-    assert newer_line.endswith(support.PROMPT)
-    assert older_line.split()[1] == OLDER_ID
+    assert task_lookup.resolved_task_id(support.LABEL) == picked_id
+    newer_line, older_line = screen.frames[0][1:3]
+    assert newer_line.split()[:3] == [NEWER_ID, support.LABEL, ledger.STATUS_FINISHED]
+    assert newer_line.rstrip().endswith(support.PROMPT)
+    assert older_line.split()[0] == OLDER_ID
 
 
-@pytest.mark.parametrize("answers", ["\n", ""], ids=["empty", "eof"])
-def test_picker_cancels(labelled_tasks, monkeypatch, answers):
-    use_terminal(monkeypatch, answers)
+@pytest.mark.parametrize(
+    ("keys", "exit_code"),
+    [
+        pytest.param(support.ESCAPE_KEYS, "golem: cancelled", id="escape"),
+        pytest.param([ord("q")], "golem: cancelled", id="q"),
+        pytest.param([support.interrupt], board.INTERRUPTED_EXIT_STATUS, id="ctrl-c"),
+    ],
+)
+def test_label_picker_cancels(labelled_tasks, monkeypatch, keys, exit_code):
+    support.use_fake_terminal(monkeypatch, keys)
 
-    with pytest.raises(SystemExit, match="cancelled"):
+    with pytest.raises(SystemExit) as raised:
         task_lookup.resolved_task_id(support.LABEL)
 
+    assert raised.value.code == exit_code
 
-def test_shared_label_without_terminal_lists_matching_ids(labelled_tasks, monkeypatch):
-    monkeypatch.setattr(sys, "stdin", io.StringIO())
+
+@pytest.mark.parametrize(
+    "use_unusable_terminal",
+    [
+        lambda monkeypatch: monkeypatch.setattr(board, "is_terminal", lambda: False),
+        support.use_terminal_failing_to_start,
+    ],
+    ids=["no-terminal", "curses-fails"],
+)
+def test_shared_label_without_usable_terminal_lists_matching_ids(
+    labelled_tasks, monkeypatch, use_unusable_terminal
+):
+    use_unusable_terminal(monkeypatch)
+
     with pytest.raises(SystemExit, match=f"{NEWER_ID}, {OLDER_ID}"):
         task_lookup.resolved_task_id(support.LABEL)

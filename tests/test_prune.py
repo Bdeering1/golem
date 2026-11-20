@@ -1,4 +1,5 @@
 import contextlib
+import curses
 import io
 import itertools
 import sys
@@ -85,33 +86,44 @@ def test_prune_keeps_done_task_with_attached_pickup(ledger_path):
     assert support.TASK_ID in ledger.load_tasks()
 
 
+SPACE_KEY = ord(" ")
+ALL_KEY = ord("a")
+ASKED_IDS = ["first", "second", "third"]
+
+
 @pytest.mark.parametrize(
-    ("answers", "removed_ids"),
+    ("keys", "status", "removed_ids"),
     [
-        pytest.param("y\nn\ny\n", {"first", "third"}, id="yes-and-no"),
-        pytest.param("n\na\n", {"second", "third"}, id="all"),
-        pytest.param("y\nq\ny\n", {"first"}, id="quit"),
-        pytest.param("y\n", {"first"}, id="end-of-input"),
+        pytest.param([SPACE_KEY, support.ENTER_KEY], 0, {"first"}, id="select-one"),
+        pytest.param(
+            [ord("j"), SPACE_KEY, curses.KEY_DOWN, SPACE_KEY, support.ENTER_KEY],
+            0,
+            {"second", "third"},
+            id="select-several",
+        ),
+        pytest.param([ALL_KEY, support.ENTER_KEY], 0, set(ASKED_IDS), id="all"),
+        pytest.param([ALL_KEY, ALL_KEY, support.ENTER_KEY], 0, set(), id="all-cleared"),
+        pytest.param([support.ENTER_KEY], 0, set(), id="nothing-selected"),
+        pytest.param([ALL_KEY, ord("q")], 1, None, id="q"),
+        pytest.param([ALL_KEY, *support.ESCAPE_KEYS], 1, None, id="escape"),
+        pytest.param([ALL_KEY, support.interrupt], 130, None, id="ctrl-c"),
     ],
 )
-def test_prune_applies_each_answer_in_turn(ledger_path, monkeypatch, answers, removed_ids):
-    task_ids = ["first", "second", "third"]
-    support.write_tasks(
-        ledger_path,
-        {task_id: done_task(task_id) for task_id in task_ids},
-    )
-    monkeypatch.setattr(sys, "stdin", support.TerminalInput(answers))
+def test_prune_picker_prunes_selected_chains_with_unasked_ones(
+    ledger_path, monkeypatch, keys, status, removed_ids
+):
+    tasks = {task_id: done_task(task_id) for task_id in ASKED_IDS}
+    tasks[support.TASK_ID] = support.task_record(ledger.STATUS_CANCELLED)
+    support.write_tasks(ledger_path, tasks)
+    support.use_fake_terminal(monkeypatch, keys)
 
-    assert cli.main(["prune"]) == 0
+    assert cli.main(["prune"]) == status
 
-    assert set(ledger.load_tasks()) == set(task_ids) - removed_ids
-
-
-def interrupt():
-    raise KeyboardInterrupt
+    expected_removed_ids = set() if removed_ids is None else removed_ids | {support.TASK_ID}
+    assert set(ledger.load_tasks()) == set(tasks) - expected_removed_ids
 
 
-def test_prune_interrupted_at_prompt_deletes_nothing(ledger_path, monkeypatch):
+def test_prune_without_usable_terminal_keeps_asked_chains(ledger_path, monkeypatch, capsys):
     support.write_tasks(
         ledger_path,
         {
@@ -119,11 +131,12 @@ def test_prune_interrupted_at_prompt_deletes_nothing(ledger_path, monkeypatch):
             support.SIBLING_ID: done_task(support.SIBLING_ID),
         },
     )
-    monkeypatch.setattr(sys, "stdin", support.TerminalInput("y\n", interrupt))
+    support.use_terminal_failing_to_start(monkeypatch)
 
-    assert cli.main(["prune"]) == 130
+    assert cli.main(["prune"]) == 0
 
-    assert set(ledger.load_tasks()) == {support.TASK_ID, support.SIBLING_ID}
+    assert set(ledger.load_tasks()) == {support.SIBLING_ID}
+    assert "--yes to prune them" in capsys.readouterr().err
 
 
 def write_chain(ledger_path, statuses):
@@ -138,68 +151,34 @@ def write_chain(ledger_path, statuses):
 
 
 @pytest.mark.parametrize(
-    ("answers", "remaining_ids"),
+    ("keys", "remaining_ids"),
     [
-        pytest.param("y\n", set(), id="yes"),
-        pytest.param("n\n", {support.PARENT_ID, support.CHILD_ID}, id="no"),
+        pytest.param([SPACE_KEY, support.ENTER_KEY], set(), id="selected"),
+        pytest.param([support.ENTER_KEY], {support.PARENT_ID, support.CHILD_ID}, id="declined"),
     ],
 )
-def test_prune_asks_once_per_chain(ledger_path, monkeypatch, capsys, answers, remaining_ids):
+def test_prune_offers_each_chain_as_one_row(ledger_path, monkeypatch, keys, remaining_ids):
     write_chain(
         ledger_path, [ledger.STATUS_FINISHED, ledger.STATUS_FINISHED, ledger.STATUS_CANCELLED]
     )
-    monkeypatch.setattr(sys, "stdin", support.TerminalInput(answers))
+    screen = support.use_fake_terminal(monkeypatch, keys)
 
     assert cli.main(["prune"]) == 0
 
-    prompt = capsys.readouterr().out
-    assert prompt.count("Remove ") == 1
-    assert (
-        f"{support.PARENT_ID}, {support.CHILD_ID}, {support.GRANDCHILD_ID} (Done, closed)" in prompt
-    )
+    chain_rows = [line for line in screen.frames[0][1:-1] if line.strip()]
+    assert len(chain_rows) == 1
+    assert f"{support.PARENT_ID}, {support.CHILD_ID}, {support.GRANDCHILD_ID}" in chain_rows[0]
     assert set(ledger.load_tasks()) == remaining_ids
 
 
 def test_prune_keeps_cancelled_parent_of_declined_task(ledger_path, monkeypatch, capsys):
     write_chain(ledger_path, [ledger.STATUS_CANCELLED, ledger.STATUS_FINISHED])
-    monkeypatch.setattr(sys, "stdin", support.TerminalInput("n\n"))
+    support.use_fake_terminal(monkeypatch, [support.ENTER_KEY])
 
     assert cli.main(["prune"]) == 0
 
     assert "no longer eligible" not in capsys.readouterr().err
     assert set(ledger.load_tasks()) == {support.PARENT_ID, support.CHILD_ID}
-
-
-@pytest.mark.parametrize(
-    ("answers", "prompt_count", "remaining_ids"),
-    [
-        pytest.param("a\n", 1, set(), id="all"),
-        pytest.param("y\nq\n", 2, {support.SIBLING_ID, SIBLING_CHILD_ID}, id="quit"),
-    ],
-)
-def test_prune_applies_all_and_quit_per_chain(
-    ledger_path, monkeypatch, capsys, answers, prompt_count, remaining_ids
-):
-    support.write_tasks(
-        ledger_path,
-        {
-            support.PARENT_ID: done_task(support.PARENT_ID),
-            support.CHILD_ID: support.task_record(
-                ledger.STATUS_FINISHED, task_id=support.CHILD_ID, after=support.PARENT_ID
-            ),
-            support.SIBLING_ID: done_task(support.SIBLING_ID),
-            SIBLING_CHILD_ID: support.task_record(
-                ledger.STATUS_FINISHED, task_id=SIBLING_CHILD_ID, after=support.SIBLING_ID
-            ),
-            support.TASK_ID: support.task_record(ledger.STATUS_CANCELLED),
-        },
-    )
-    monkeypatch.setattr(sys, "stdin", support.TerminalInput(answers))
-
-    assert cli.main(["prune"]) == 0
-
-    assert capsys.readouterr().out.count("Remove ") == prompt_count
-    assert set(ledger.load_tasks()) == remaining_ids
 
 
 def test_prune_never_offers_review_chain(ledger_path):
@@ -286,10 +265,9 @@ def test_prune_keeps_only_task_that_changes_while_prompting(
     )
 
     with contextlib.ExitStack() as exit_stack:
-        monkeypatch.setattr(
-            sys,
-            "stdin",
-            support.TerminalInput("y\ny\n", lambda: change_task(ledger_path, exit_stack)),
+        support.use_fake_terminal(
+            monkeypatch,
+            [lambda: change_task(ledger_path, exit_stack) or ALL_KEY, support.ENTER_KEY],
         )
         assert cli.main(["prune"]) == 0
 

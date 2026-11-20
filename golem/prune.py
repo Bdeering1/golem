@@ -1,29 +1,19 @@
 import sys
 from datetime import datetime
+from typing import NamedTuple
 
-from golem import chains, delete, display, ledger, locks, t3_code
+from golem import board, chains, delete, display, ledger, locks, picker, t3_code
 
-PRUNE_ANSWER_YES = "y"
-PRUNE_ANSWER_NO = "n"
-PRUNE_ANSWER_ALL = "a"
-PRUNE_ANSWER_QUIT = "q"
-PRUNE_ANSWERS = (PRUNE_ANSWER_YES, PRUNE_ANSWER_NO, PRUNE_ANSWER_ALL, PRUNE_ANSWER_QUIT)
+
+class ChainCandidate(NamedTuple):
+    chain_ids: list[str]
+    reason: str
+    is_prunable: bool
+    is_asked: bool
 
 
 def is_task_directory_busy(task: ledger.Task) -> bool:
     return locks.is_directory_busy(ledger.directory_to_lock(task, task.get("worktree")))
-
-
-def prune_answer(task_ids: list[str], reason: str) -> str:
-    prompt = f"Remove {', '.join(task_ids)} ({display.COLUMN_DONE}, {reason})? [{','.join(PRUNE_ANSWERS)}] "
-    while True:
-        try:
-            answer = input(prompt).strip().lower()
-        except EOFError:
-            print()
-            return PRUNE_ANSWER_QUIT
-        if answer in PRUNE_ANSWERS:
-            return answer
 
 
 def chain_prune_selection(
@@ -42,17 +32,12 @@ def chain_prune_selection(
     return selected_tasks
 
 
-def prune_selection(
-    tasks: ledger.Tasks, *, is_confirmed: bool, is_keeping_asked_chains: bool
-) -> tuple[ledger.Tasks, bool, bool]:
-    selected_tasks: ledger.Tasks = {}
-    has_candidates = False
-    has_kept_asked_chains = False
-    answer = PRUNE_ANSWER_ALL if is_confirmed else None
+def chain_candidates(tasks: ledger.Tasks) -> list[ChainCandidate]:
     today = datetime.now().astimezone().date()
     root_task_ids = sorted(
         task_id for task_id, task in tasks.items() if task.get("after") not in tasks
     )
+    candidates: list[ChainCandidate] = []
     for root_task_id in root_task_ids:
         chain_ids = chains.dependents_first_task_ids(tasks, [root_task_id])
         chain_id_set = set(chain_ids)
@@ -63,23 +48,53 @@ def prune_selection(
         is_asked = is_prunable_done_chain and not ledger.are_pull_requests_finished(
             display.chain_pull_requests(tasks, chain_id_set)
         )
-        has_candidates = has_candidates or is_prunable_done_chain
-        is_chain_selected = is_prunable_done_chain
-        if is_asked and is_keeping_asked_chains:
-            has_kept_asked_chains = True
-            is_chain_selected = False
-        elif is_asked and answer != PRUNE_ANSWER_ALL:
-            if answer != PRUNE_ANSWER_QUIT:
-                answer = prune_answer(
-                    [task_id for task_id in tasks if task_id in chain_id_set], reason
-                )
-            is_chain_selected = answer in {PRUNE_ANSWER_YES, PRUNE_ANSWER_ALL}
-        chain_selected_tasks = chain_prune_selection(
-            tasks, chain_ids, is_chain_selected=is_chain_selected
+        candidates.append(ChainCandidate(chain_ids, reason, is_prunable_done_chain, is_asked))
+    return candidates
+
+
+def chain_row(tasks: ledger.Tasks, candidate: ChainCandidate) -> tuple[str, ...]:
+    root_task = tasks[candidate.chain_ids[-1]]
+    return (
+        ", ".join(
+            ledger.task_name(task_id, task)
+            for task_id, task in tasks.items()
+            if task_id in candidate.chain_ids
+        ),
+        candidate.reason,
+        display.display_directory(root_task["cwd"]),
+        display.first_line(root_task["prompt"]),
+    )
+
+
+def picked_asked_indices(
+    tasks: ledger.Tasks, candidates: list[ChainCandidate], asked_indices: list[int]
+) -> set[int] | None:
+    picked_indices = picker.picked_indices(
+        "Prune these Done chains",
+        [chain_row(tasks, candidates[index]) for index in asked_indices],
+        "prune",
+        is_multi_select=True,
+    )
+    if picked_indices is None:
+        return None
+    return {asked_indices[index] for index in picked_indices}
+
+
+def prune_selection(
+    tasks: ledger.Tasks, candidates: list[ChainCandidate], accepted_indices: set[int]
+) -> tuple[ledger.Tasks, bool]:
+    selected_tasks: ledger.Tasks = {}
+    has_candidates = False
+    for index, candidate in enumerate(candidates):
+        is_chain_selected = candidate.is_prunable and (
+            not candidate.is_asked or index in accepted_indices
         )
-        has_candidates = has_candidates or bool(chain_selected_tasks)
+        chain_selected_tasks = chain_prune_selection(
+            tasks, candidate.chain_ids, is_chain_selected=is_chain_selected
+        )
+        has_candidates = has_candidates or candidate.is_prunable or bool(chain_selected_tasks)
         selected_tasks |= chain_selected_tasks
-    return selected_tasks, has_candidates, has_kept_asked_chains
+    return selected_tasks, has_candidates
 
 
 def delete_pruned_tasks(selected_tasks: ledger.Tasks) -> None:
@@ -108,14 +123,24 @@ def delete_pruned_tasks(selected_tasks: ledger.Tasks) -> None:
 def prune_tasks(*, is_confirmed: bool) -> int:
     tasks = ledger.load_tasks()
     try:
-        selected_tasks, has_candidates, has_kept_asked_chains = prune_selection(
-            tasks,
-            is_confirmed=is_confirmed,
-            is_keeping_asked_chains=not is_confirmed and not sys.stdin.isatty(),
-        )
+        candidates = chain_candidates(tasks)
+        asked_indices = [index for index, candidate in enumerate(candidates) if candidate.is_asked]
+        accepted_indices: set[int] | None = set(asked_indices) if is_confirmed else set()
+        has_kept_asked_chains = False
+        if asked_indices and not is_confirmed and board.is_terminal():
+            try:
+                accepted_indices = picked_asked_indices(tasks, candidates, asked_indices)
+            except board.TerminalStartError:
+                has_kept_asked_chains = True
+        elif asked_indices and not is_confirmed:
+            has_kept_asked_chains = True
     except KeyboardInterrupt:
         print()
-        return 130
+        return board.INTERRUPTED_EXIT_STATUS
+    if accepted_indices is None:
+        print(picker.CANCELLED_MESSAGE, file=sys.stderr)
+        return 1
+    selected_tasks, has_candidates = prune_selection(tasks, candidates, accepted_indices)
     if has_kept_asked_chains:
         print(
             "golem: kept done chains without a terminal; use --yes to prune them", file=sys.stderr

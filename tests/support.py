@@ -1,4 +1,5 @@
-import io
+import contextlib
+import curses
 import json
 import os
 import select
@@ -6,11 +7,14 @@ import shlex
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import cast, override
+from typing import TYPE_CHECKING, cast
 
-from golem import cli, config, ledger, spawn
+from golem import board, cli, config, ledger, spawn
 from golem.backends import claude
 from golem.worktrees import git, task_directories
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
 
 DEFAULT_EMAIL = "me@example.com"
 WORK_EMAIL = "work@example.com"
@@ -43,20 +47,64 @@ GATE_STOP_REASON = "no pull request yet"
 PARENT_SESSION = f"{PARENT_ID}-session"
 
 
-class TerminalInput(io.StringIO):
-    def __init__(self, answers, on_first_read=lambda: None):
-        super().__init__(answers)
-        self.on_first_read = on_first_read
+ESCAPE_KEYS = [27, -1]
+ENTER_KEY = ord("\n")
 
-    @override
-    def isatty(self):
-        return True
 
-    @override
-    def readline(self, size: int = -1) -> str:
-        self.on_first_read()
-        self.on_first_read = lambda: None
-        return super().readline(size)
+def interrupt():
+    raise KeyboardInterrupt
+
+
+class FakeScreen:
+    def __init__(self, keys, size):
+        self.keys = list(keys)
+        self.size = size
+        self.lines = {}
+        self.frames = []
+
+    def getch(self):
+        key = self.keys.pop(0)
+        return key() if callable(key) else key
+
+    def getmaxyx(self):
+        return self.size
+
+    def erase(self):
+        self.lines = {}
+
+    def clear(self):
+        self.lines = {}
+
+    def addstr(self, y, x, text, _attribute):
+        line = self.lines.get(y, "").ljust(x)
+        self.lines[y] = line[:x] + text + line[x + len(text) :]
+
+    def refresh(self):
+        self.frames.append([self.lines.get(y, "") for y in range(self.size[0])])
+
+    def timeout(self, _milliseconds):
+        pass
+
+
+def use_fake_terminal(monkeypatch, keys, size=(24, 80), glyphs=board.ASCII_GLYPHS):
+    screen = FakeScreen(keys, size)
+
+    @contextlib.contextmanager
+    def fake_terminal_screen() -> Generator[tuple[FakeScreen, bool, board.Glyphs]]:
+        yield screen, False, glyphs
+
+    monkeypatch.setattr(board, "is_terminal", lambda: True)
+    monkeypatch.setattr(board, "terminal_screen", fake_terminal_screen)
+    return screen
+
+
+def fail_screen_start():
+    raise curses.error
+
+
+def use_terminal_failing_to_start(monkeypatch):
+    monkeypatch.setattr(board, "is_terminal", lambda: True)
+    monkeypatch.setattr(board, "start_screen", fail_screen_start)
 
 
 def read_task(ledger_path, task_id=TASK_ID):

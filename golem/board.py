@@ -233,6 +233,10 @@ UNAVAILABLE_ACTION_TEXTS = {
 }
 
 
+class TerminalStartError(Exception):
+    pass
+
+
 class BoardColumn(NamedTuple):
     title: str
     color: int
@@ -3578,14 +3582,13 @@ def start_screen() -> curses.window:
         return curses.initscr()
 
 
-def run_board() -> int:
-    if not is_terminal():
-        raise SystemExit(NOT_A_TERMINAL_MESSAGE)
+@contextlib.contextmanager
+def terminal_screen() -> Generator[tuple[curses.window, bool, Glyphs]]:
     signal.signal(signal.SIGINT, signal.default_int_handler)
     try:
         screen = start_screen()
     except curses.error:
-        raise SystemExit(NOT_A_TERMINAL_MESSAGE) from None
+        raise TerminalStartError from None
     try:
         curses.noecho()
         curses.cbreak()
@@ -3593,10 +3596,19 @@ def run_board() -> int:
         with contextlib.suppress(curses.error):
             curses.curs_set(0)
         curses.set_escdelay(ESCAPE_DELAY_MILLISECONDS)
-        is_color = start_colors()
-        screen.timeout(TICK_MILLISECONDS)
-        return board_loop(screen, is_color=is_color, glyphs=terminal_glyphs())
-    except KeyboardInterrupt:
-        return INTERRUPTED_EXIT_STATUS
+        yield screen, start_colors(), terminal_glyphs()
     finally:
         curses.endwin()
+
+
+def run_board() -> int:
+    if not is_terminal():
+        raise SystemExit(NOT_A_TERMINAL_MESSAGE)
+    try:
+        with terminal_screen() as (screen, is_color, glyphs):
+            screen.timeout(TICK_MILLISECONDS)
+            return board_loop(screen, is_color=is_color, glyphs=glyphs)
+    except TerminalStartError:
+        raise SystemExit(NOT_A_TERMINAL_MESSAGE) from None
+    except KeyboardInterrupt:
+        return INTERRUPTED_EXIT_STATUS
