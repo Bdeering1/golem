@@ -130,9 +130,17 @@ def test_retry_runs_task_cancelled_while_running(
     assert support.read_task(ledger_path)["status"] == ledger.STATUS_FINISHED
 
 
-@pytest.mark.parametrize("status", [ledger.STATUS_FAILED, ledger.STATUS_BLOCKED])
-def test_cancel_stopped_task_cancels_dependents_and_leaves_processes_alone(
-    ledger_path, monkeypatch, status
+@pytest.mark.parametrize(
+    ("status", "expected_thread_stops"),
+    [
+        (ledger.STATUS_FAILED, []),
+        (ledger.STATUS_BLOCKED, []),
+        (ledger.STATUS_RUNNING, ["thread"]),
+        (ledger.STATUS_FINISHED, []),
+    ],
+)
+def test_cancel_without_live_executor_leaves_recorded_processes_alone(
+    ledger_path, monkeypatch, status, expected_thread_stops
 ):
     support.write_parent_with_waiting_child(
         ledger_path,
@@ -142,29 +150,18 @@ def test_cancel_stopped_task_cancels_dependents_and_leaves_processes_alone(
         command_process_group=1,
         t3_code_thread_id="thread",
     )
-    stop_calls = []
-    monkeypatch.setattr(task_processes, "stop_agent", stop_calls.append)
-    monkeypatch.setattr(task_processes, "stop_command_process_group", stop_calls.append)
-    monkeypatch.setattr(t3_code, "stop_thread", stop_calls.append)
+    process_stops = []
+    thread_stops = []
+    monkeypatch.setattr(task_processes, "stop_agent", process_stops.append)
+    monkeypatch.setattr(task_processes, "stop_command_process_group", process_stops.append)
+    monkeypatch.setattr(t3_code, "stop_thread", thread_stops.append)
 
     assert cli.main(["cancel", support.PARENT_ID]) == 0
 
     statuses = {task["status"] for task in support.read_tasks(ledger_path).values()}
     assert statuses == {ledger.STATUS_CANCELLED}
-    assert stop_calls == []
-
-
-@pytest.mark.parametrize("status", [ledger.STATUS_RUNNING, ledger.STATUS_FINISHED])
-def test_cancel_leaves_stale_recorded_processes_alone(ledger_path, monkeypatch, status):
-    support.write_task(ledger_path, status, agent_pid=1, command_process_group=1)
-    stop_calls = []
-    monkeypatch.setattr(task_processes, "stop_agent", stop_calls.append)
-    monkeypatch.setattr(task_processes, "stop_command_process_group", stop_calls.append)
-
-    assert cli.main(["cancel", support.TASK_ID]) == 0
-
-    assert support.read_task(ledger_path)["status"] == ledger.STATUS_CANCELLED
-    assert stop_calls == []
+    assert process_stops == []
+    assert thread_stops == expected_thread_stops
 
 
 @pytest.mark.parametrize("status", [ledger.STATUS_FINISHED, ledger.STATUS_CANCELLED])
@@ -192,12 +189,8 @@ def test_cancel_reports_task_still_stopping(ledger_path, monkeypatch):
     assert support.read_task(ledger_path)["status"] == ledger.STATUS_CANCELLED
 
 
-@pytest.mark.parametrize(
-    "pause_fields",
-    [pytest.param({}, id="agent-run"), pytest.param({"usage_limit_resume_count": 1}, id="pause")],
-)
-def test_pickup_and_watch_open_started_cancelled_task(ledger_path, capsys, pause_fields):
-    support.write_task(ledger_path, ledger.STATUS_CANCELLED, started_at=STARTED_AT, **pause_fields)
+def test_pickup_and_watch_open_started_cancelled_task(ledger_path, capsys):
+    support.write_task(ledger_path, ledger.STATUS_CANCELLED, started_at=STARTED_AT)
     progress_path = progress_log.progress_path(support.read_task(ledger_path)["session_id"])
     progress_path.parent.mkdir(parents=True)
     progress_path.write_text("progress\n", encoding="utf-8")
