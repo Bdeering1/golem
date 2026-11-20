@@ -6,12 +6,12 @@ from datetime import UTC, datetime, timedelta
 from golem import (
     accounts,
     chains,
-    delete,
     launch_agent,
     ledger,
     progress_log,
     spawn,
     t3_code,
+    task_ids,
     usage_windows,
 )
 from golem.backends import claude_hooks, common, registry
@@ -73,23 +73,21 @@ def new_task_record(
 
 
 def new_follow_up_records(
-    run_task_id: str,
-    follow_ups: list[list[str]],
+    follow_ups: list[tuple[str | None, str]],
     agent_args: tuple[str, ...],
     backend: str,
     placement: RunPlacement,
-) -> ledger.Tasks:
-    records: ledger.Tasks = {}
-    previous_task_id = run_task_id
+) -> list[ledger.Task]:
     placement = replace(placement, setup=None)
-    for task_id, prompt in follow_ups:
-        if task_id == run_task_id or task_id in records:
-            raise SystemExit(f"golem: task ID used more than once: {task_id}")
-        records[task_id] = new_task_record(
-            placement, prompt, agent_args, None, backend, after=previous_task_id
-        )
-        previous_task_id = task_id
-    return records
+    return [
+        new_task_record(placement, prompt, agent_args, None, backend, label=label)
+        for label, prompt in follow_ups
+    ]
+
+
+def print_dependents(records: ledger.Tasks) -> None:
+    for task_id, record in records.items():
+        print(f"golem: {task_id} will run after {record.get('after')}")
 
 
 def cancel_task(task_id: str) -> int:
@@ -126,7 +124,6 @@ def scheduled_time(value: str) -> datetime:
 
 
 def schedule_new_task(
-    task_id: str,
     prompt: str,
     agent_args: tuple[str, ...],
     when: datetime | None,
@@ -134,21 +131,26 @@ def schedule_new_task(
     *,
     backend: str,
     placement: RunPlacement,
-    follow_up_records: ledger.Tasks,
+    follow_up_records: list[ledger.Task],
     label: str | None,
 ) -> int:
     due_time = when or datetime.now(UTC).astimezone()
-    record = new_task_record(
-        placement, prompt, agent_args, due_time, backend, after=after, label=label
+    record = new_task_record(placement, prompt, agent_args, due_time, backend, label=label)
+    prefix = (
+        task_ids.task_id_prefix(task_ids.repository_name(placement.cwd)) if after is None else ""
     )
-    records = {task_id: record, **follow_up_records}
-    with ledger.locked_ledger() as (tasks, worktrees):
+    with ledger.locked_tasks() as tasks:
         if after is not None and chains.is_dependent_reservable(tasks, after):
             raise SystemExit(f"golem: parent task changed: {after}")
-        replaced = delete.remove_replaceable_tasks(tasks, worktrees, list(records), after)
-        tasks.update(records)
-    delete.finish_task_replacement(replaced)
-    return launch_agent.wake_launch_agent_and_report(task_id, due_time)
+        if after is None:
+            task_id = task_ids.new_root_task_id(tasks, prefix)
+            tasks[task_id] = record
+        else:
+            task_id = next(iter(task_ids.insert_dependents(tasks, [record], after)))
+        inserted_follow_ups = task_ids.insert_dependents(tasks, follow_up_records, task_id)
+    exit_code = launch_agent.wake_launch_agent_and_report(task_id, due_time)
+    print_dependents(inserted_follow_ups)
+    return exit_code
 
 
 def retryable_task(tasks: ledger.Tasks, task_id: str) -> ledger.Task:
@@ -266,53 +268,37 @@ def planned_execution_time(
 
 
 def reserve_dependent_task(
-    records: ledger.Tasks, parent_id: str, default_clients: dict[str, str]
-) -> bool:
-    with ledger.locked_ledger() as (tasks, worktrees):
+    records: list[ledger.Task], parent_id: str, default_clients: dict[str, str]
+) -> ledger.Tasks | None:
+    with ledger.locked_tasks() as tasks:
         if not chains.is_dependent_reservable(tasks, parent_id):
-            return False
-        replaced = delete.remove_replaceable_tasks(tasks, worktrees, list(records), parent_id)
-        chains.add_dependent_records(tasks, records, parent_id, default_clients)
-    delete.finish_task_replacement(replaced)
-    return True
-
-
-def open_t3_code_for_replaced_threads(task_ids: list[str], parent_id: str | None) -> None:
-    tasks = ledger.load_tasks()
-    replaced_ids = delete.replaceable_chain_ids(tasks, task_ids, parent_id)
-    t3_code.open_to_delete(t3_code.recorded_thread_ids(tasks[task_id] for task_id in replaced_ids))
+            return None
+        chains.add_parent_auto_pickup(tasks, records, parent_id, default_clients)
+        return task_ids.insert_dependents(tasks, records, parent_id)
 
 
 def schedule_run_task(
     arguments: ledger.Arguments,
-    task_id: str,
     prompt_text: str,
     task_args: tuple[str, ...],
-    follow_up_records: ledger.Tasks,
+    follow_up_records: list[ledger.Task],
     placement: RunPlacement,
     *,
     default_clients: dict[str, str],
 ) -> int:
     after = arguments.after if isinstance(arguments.after, str) else None
-    task_ids = [task_id, *follow_up_records]
     if after is not None:
         dependent_record = new_task_record(
-            placement,
-            prompt_text,
-            task_args,
-            None,
-            arguments.backend,
-            after=after,
-            label=arguments.label,
+            placement, prompt_text, task_args, None, arguments.backend, label=arguments.label
         )
-        open_t3_code_for_replaced_threads(task_ids, after)
-        if reserve_dependent_task(
-            {task_id: dependent_record, **follow_up_records}, after, default_clients
-        ):
+        inserted = reserve_dependent_task(
+            [dependent_record, *follow_up_records], after, default_clients
+        )
+        if inserted is not None:
             claude_hooks.sync_hooks(
                 ledger.task_directory(ledger.existing_task(ledger.load_tasks(), after))
             )
-            print(f"golem: {task_id} will run after {after}")
+            print_dependents(inserted)
             return 0
     when = planned_execution_time(
         registry.usage_backend(arguments.backend, list(task_args)),
@@ -320,9 +306,7 @@ def schedule_run_task(
         is_now=arguments.now,
         at_text=arguments.at,
     )
-    open_t3_code_for_replaced_threads(task_ids, after)
     return schedule_new_task(
-        task_id,
         prompt_text,
         task_args,
         when,

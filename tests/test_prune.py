@@ -11,6 +11,7 @@ from golem import cli, ledger, locks
 from tests import support
 
 SIBLING_CHILD_ID = "sibling-child"
+CANCELLED_ID = "cancelled"
 
 
 MERGED_PULL_REQUEST: ledger.PullRequest = {
@@ -191,7 +192,7 @@ def test_prune_applies_all_and_quit_per_chain(
             SIBLING_CHILD_ID: support.task_record(
                 ledger.STATUS_FINISHED, task_id=SIBLING_CHILD_ID, after=support.SIBLING_ID
             ),
-            support.TASK_ID: support.task_record(ledger.STATUS_CANCELLED),
+            CANCELLED_ID: support.task_record(ledger.STATUS_CANCELLED, task_id=CANCELLED_ID),
         },
     )
     monkeypatch.setattr(sys, "stdin", support.TerminalInput(answers))
@@ -241,7 +242,7 @@ def test_delete_and_prune_leave_in_place_directory_alone(
     installed_launch_agent, git_repository, ledger_path, monkeypatch, command
 ):
     monkeypatch.chdir(git_repository)
-    cli.main(["run", support.TASK_ID, support.PROMPT, "--now", "--no-worktree"])
+    cli.main(["run", support.PROMPT, "--now", "--no-worktree"])
     cli.main(["_execute", support.TASK_ID, support.read_task(ledger_path)["session_id"]])
     tasks = support.read_tasks(ledger_path)
     tasks[support.TASK_ID]["status"] = ledger.STATUS_CANCELLED

@@ -15,7 +15,7 @@ LATER_RESET_TIME = datetime(2030, 1, 2, 11, tzinfo=UTC)
 
 @pytest.fixture
 def empty_git_repository(tmp_path):
-    repository_path = tmp_path / "empty-repository"
+    repository_path = tmp_path / f"{support.REPOSITORY_DIRECTORY}-empty"
     repository_path.mkdir()
     subprocess.run(["/usr/bin/git", "init", "-q"], cwd=repository_path, check=True)
     return repository_path
@@ -74,7 +74,7 @@ def test_headless_defaults_respect_agent_arguments(
 ):
     if repository_fixture is not None:
         monkeypatch.chdir(request.getfixturevalue(repository_fixture))
-    cli.main(["run", support.TASK_ID, support.PROMPT, "--now", "--", *agent_args])
+    cli.main(["run", support.PROMPT, "--now", "--", *agent_args])
     task = support.read_task(ledger_path)
 
     assert cli.main(["_execute", support.TASK_ID, task["session_id"]]) == 0
@@ -138,7 +138,7 @@ def test_next_reset_time_picks_latest_exhausted_window(
 def test_labelled_task_session_name_includes_label(
     installed_launch_agent, fake_commands, ledger_path
 ):
-    cli.main(["run", support.TASK_ID, support.PROMPT, "--now", "--label", support.LABEL])
+    cli.main(["run", support.PROMPT, "--now", "--label", support.LABEL])
     task = support.read_task(ledger_path)
 
     assert cli.main(["_execute", support.TASK_ID, task["session_id"]]) == 0

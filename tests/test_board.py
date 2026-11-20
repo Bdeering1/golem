@@ -129,11 +129,11 @@ def test_board_shows_a_chain_as_one_card_with_its_step_and_list_detail():
 def chain_tasks():
     return {
         "fix-login": support.task_record(ledger.STATUS_FINISHED, task_id="fix-login"),
-        "fix-login-review": support.task_record(
-            ledger.STATUS_RUNNING, task_id="fix-login-review", after="fix-login"
+        "fix-login-2": support.task_record(
+            ledger.STATUS_RUNNING, task_id="fix-login-2", after="fix-login", label="review"
         ),
-        "fix-login-docs": support.task_record(
-            ledger.STATUS_WAITING, task_id="fix-login-docs", after="fix-login-review"
+        "fix-login-3": support.task_record(
+            ledger.STATUS_WAITING, task_id="fix-login-3", after="fix-login-2"
         ),
     }
 
@@ -143,7 +143,7 @@ def test_board_names_a_chain_after_its_first_step_and_labels_the_shown_step():
         chain_tasks(), state=board.BoardState(focus_index=1)
     )
 
-    assert "fix-login-review" not in "\n".join(board_lines + detail_lines)
+    assert "fix-login-2" not in "\n".join(board_lines + detail_lines)
     assert "2/3 review" in "\n".join(detail_lines)
 
 
@@ -160,7 +160,7 @@ def test_board_shows_the_chain_label_next_to_its_name():
 def test_board_task_view_shows_only_chain_states_that_cannot_be_inferred():
     text = frame_text(chain_tasks(), state=board.BoardState(focus_index=1, view=board.VIEW_TASK))
 
-    assert "fix-login → review (running) → docs" in text
+    assert "fix-login → review (running) → fix-login-3" in text
 
 
 def test_board_preview_shows_the_result_in_whole_sentences_without_markdown():
@@ -622,16 +622,14 @@ def test_board_filter_narrows_cards_and_escape_clears_it():
 
 def test_board_filter_matches_the_label_of_any_task_in_a_chain():
     tasks = running_tasks() | chain_tasks()
-    tasks["fix-login-review"]["label"] = support.LABEL
+    tasks["fix-login-2"]["label"] = support.LABEL
     snapshot = board.board_snapshot(tasks, NOW)
     state = board.BoardState(focus_index=1)
 
     for key in f"/{support.LABEL}\r":
         board.apply_key(state, ord(key), snapshot)
 
-    assert [row.task_id for row in board.filtered_snapshot(snapshot, state).rows] == [
-        "fix-login-review"
-    ]
+    assert [row.task_id for row in board.filtered_snapshot(snapshot, state).rows] == ["fix-login-2"]
 
 
 @pytest.mark.parametrize(

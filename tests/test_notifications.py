@@ -20,7 +20,7 @@ def test_finished_task_notifies_with_result(
     result = "finished the task\nwith details"
     monkeypatch.setenv("GOLEM_CLAUDE_EXIT", str(exit_code))
     support.write_claude_output(fake_commands, result)
-    cli.main(["run", support.TASK_ID, support.PROMPT, "--now"])
+    cli.main(["run", support.PROMPT, "--now"])
     task = support.read_task(ledger_path)
 
     assert cli.main(["_execute", support.TASK_ID, task["session_id"]]) == exit_code
@@ -36,11 +36,9 @@ def test_only_final_chain_task_notifies_when_ready_for_review(
     cli.main(
         [
             "run",
-            support.PARENT_ID,
             support.PARENT_PROMPT,
             "--now",
             "--then",
-            support.CHILD_ID,
             support.CHILD_PROMPT,
         ]
     )

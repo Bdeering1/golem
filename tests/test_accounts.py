@@ -27,7 +27,7 @@ def t3_upsert_mutation():
 
 
 def run_and_execute(ledger_path, *arguments: str):
-    assert cli.main(["run", support.TASK_ID, support.PROMPT, "--now", *arguments]) == 0
+    assert cli.main(["run", support.PROMPT, "--now", *arguments]) == 0
     task = support.read_task(ledger_path)
     assert cli.main(["_execute", support.TASK_ID, task["session_id"]]) == 0
 
@@ -132,7 +132,7 @@ def test_run_account_selects_account(
     add_account(support.WORK_EMAIL, "org-other", "Other")
     add_account(SOLO_EMAIL, "org-solo", "Solo")
 
-    assert cli.main(["run", support.TASK_ID, support.PROMPT, "--now", "--account", value]) == 0
+    assert cli.main(["run", support.PROMPT, "--now", "--account", value]) == 0
 
     assert support.read_task(ledger_path).get("account") == expected_account
 
@@ -153,7 +153,7 @@ def test_run_account_refuses_before_ledger_changes(
     tasks = support.read_tasks(ledger_path)
 
     with pytest.raises(SystemExit) as error:
-        cli.main(["run", support.CHILD_ID, support.PROMPT, "--now", "--account", value])
+        cli.main(["run", support.PROMPT, "--now", "--account", value])
 
     assert [line.split()[-1] for line in str(error.value).splitlines()[1:]] == expected_numbers
     assert support.read_tasks(ledger_path) == tasks
@@ -220,7 +220,7 @@ def test_gate_runs_on_task_account(installed_launch_agent, add_account, ledger_p
 
 
 def schedule_account_run(ledger_path) -> None:
-    assert cli.main(["run", support.TASK_ID, support.PROMPT, "--account", support.WORK_EMAIL]) == 0
+    assert cli.main(["run", support.PROMPT, "--account", support.WORK_EMAIL]) == 0
 
 
 def pause_usage_limited_account_task(ledger_path) -> None:
@@ -236,7 +236,6 @@ def retry_account_task(ledger_path) -> None:
 def schedule_t3_account_run(ledger_path) -> None:
     command = [
         "run",
-        support.TASK_ID,
         support.PROMPT,
         "--backend",
         "t3",
@@ -292,9 +291,7 @@ def test_after_does_not_inherit_parent_account(installed_launch_agent, add_accou
     add_account()
     support.write_task(ledger_path, ledger.STATUS_RUNNING, task_id=support.PARENT_ID, account=1)
 
-    assert (
-        cli.main(["run", support.CHILD_ID, support.CHILD_PROMPT, "--after", support.PARENT_ID]) == 0
-    )
+    assert cli.main(["run", support.CHILD_PROMPT, "--after", support.PARENT_ID]) == 0
 
     assert "account" not in support.read_task(ledger_path, support.CHILD_ID)
 
