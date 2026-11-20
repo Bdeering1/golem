@@ -71,6 +71,9 @@ if [ -n "$worktree" ]; then
         mkdir -p "$(dirname "$common")/.claude/worktrees/$worktree"
     fi
 fi
+if [ -n "${GOLEM_CLAUDE_IGNORE_TERM-}" ]; then
+    trap '' TERM
+fi
 if [ -n "$GOLEM_CLAUDE_STARTED" ]; then
     : > "$GOLEM_CLAUDE_STARTED"
 fi

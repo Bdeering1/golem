@@ -36,6 +36,7 @@ class SetupError(Exception):
 def setup_directory_and_prompt(task_id: str, task: ledger.Task, setup: str) -> tuple[str, str]:
     failure_reason, stdout = spawn.shell_command_outcome(
         setup,
+        task_id,
         "setup",
         task,
         setup_input_json(task_id, task),

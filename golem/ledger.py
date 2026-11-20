@@ -34,6 +34,13 @@ LIST_STATUS_ORDER = (
 ALL_STATUSES: set[str] = set(LIST_STATUS_ORDER)
 CLEAN_EXIT_STATUSES = {STATUS_BLOCKED, STATUS_FINISHED}
 UNFINISHED_STATUSES = {STATUS_SCHEDULED, STATUS_RUNNING, STATUS_WAITING, STATUS_BLOCKED}
+CANCELLABLE_STATUSES = {
+    STATUS_SCHEDULED,
+    STATUS_WAITING,
+    STATUS_RUNNING,
+    STATUS_FAILED,
+    STATUS_BLOCKED,
+}
 CHAIN_DONE_AGE_DAYS = 7
 ThreadState = Literal["unsettled", "settled", "archived", "deleted"]
 THREAD_STATE_UNSETTLED: ThreadState = "unsettled"
@@ -95,6 +102,8 @@ class Task(TypedDict):
     repository_branches: NotRequired[list[RepositoryBranch]]
     pull_requests: NotRequired[list[PullRequest]]
     account: NotRequired[int]
+    agent_pid: NotRequired[int]
+    command_process_group: NotRequired[int]
 
 
 class WorktreeResource(TypedDict):
@@ -262,6 +271,18 @@ def task_directory(task: Task) -> str:
     if worktree is not None and Path(worktree).is_dir():
         return worktree
     return task["cwd"]
+
+
+def has_started(task: Task) -> bool:
+    if task.get("status") == STATUS_CANCELLED:
+        return "started_at" in task
+    return task.get("status") not in NOT_STARTED_STATUSES
+
+
+def is_cancellable(task: Task) -> bool:
+    if task.get("status") == STATUS_FINISHED:
+        return "command_process_group" in task
+    return task.get("status") in CANCELLABLE_STATUSES
 
 
 def has_auto_pickup(task: Task) -> bool:

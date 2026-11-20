@@ -30,6 +30,7 @@ case "$1 $2" in
     "thread send")
         pwd > "$T3CODE_HOME/send-cwd"
         cat > "$T3CODE_HOME/sent-message"
+        while [ -e "$T3CODE_HOME/send-hold" ]; do sleep 0.05; done
         [ -f "$T3CODE_HOME/send-output" ] && cat "$T3CODE_HOME/send-output"
         exit "$(cat "$T3CODE_HOME/send-exit" 2>/dev/null || echo 0)" ;;
 esac

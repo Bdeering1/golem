@@ -35,7 +35,7 @@ def gate_stop_reason(
     if timeout_seconds is None:
         timeout_seconds = GATE_TIMEOUT_SECONDS
     stop_reason, _ = spawn.shell_command_outcome(
-        gate, "gate", task, gate_input_json(task_id, task), timeout_seconds
+        gate, task_id, "gate", task, gate_input_json(task_id, task), timeout_seconds
     )
     return stop_reason
 

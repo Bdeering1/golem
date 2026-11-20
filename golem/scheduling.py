@@ -1,5 +1,7 @@
 import os
+import time
 import uuid
+from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 
@@ -8,14 +10,18 @@ from golem import (
     chains,
     launch_agent,
     ledger,
+    locks,
     progress_log,
     spawn,
     t3_code,
     task_ids,
+    task_processes,
     usage_windows,
 )
 from golem.backends import claude_hooks, common, registry
 from golem.worktrees import task_directories
+
+RUN_LOCK_WAIT_SECONDS = 10
 
 
 def new_session_id() -> str:
@@ -90,13 +96,50 @@ def print_dependents(records: ledger.Tasks) -> None:
         print(f"golem: {task_id} will run after {record.get('after')}")
 
 
+def interrupt_t3_code_thread(thread_id: str) -> None:
+    if not t3_code.is_running():
+        return
+    with suppress(*t3_code.T3_CODE_ERRORS):
+        t3_code.dispatch_command(
+            t3_code.server_origin(),
+            t3_code.issue_token(),
+            {"type": "thread.stop", "commandId": str(uuid.uuid4()), "threadId": thread_id},
+        )
+
+
+def wait_for_run_lock(task_id: str, session_id: str) -> None:
+    deadline = time.monotonic() + RUN_LOCK_WAIT_SECONDS
+    while not locks.is_run_lock_free(session_id):
+        if time.monotonic() >= deadline:
+            raise SystemExit(f"golem: task cancelled, but it is still stopping: {task_id}")
+        time.sleep(task_processes.STOP_POLL_SECONDS)
+
+
+def stop_task_processes(task_id: str, task: ledger.Task, previous_status: str) -> None:
+    command_process_group = task.get("command_process_group")
+    if command_process_group is not None:
+        task_processes.stop_command_process_group(command_process_group)
+    thread_id = task.get("t3_code_thread_id")
+    if (
+        task["backend"] == ledger.BACKEND_T3
+        and previous_status == ledger.STATUS_RUNNING
+        and thread_id is not None
+    ):
+        interrupt_t3_code_thread(thread_id)
+    agent_pid = task.get("agent_pid")
+    if agent_pid is not None:
+        task_processes.stop_agent(agent_pid)
+    wait_for_run_lock(task_id, task["session_id"])
+
+
 def cancel_task(task_id: str) -> int:
     with ledger.locked_tasks() as tasks:
         if task_id not in tasks:
             raise SystemExit(f"golem: task not found: {task_id}")
         task = tasks[task_id]
-        if task.get("status") not in {ledger.STATUS_SCHEDULED, ledger.STATUS_WAITING}:
-            raise SystemExit(f"golem: task is not scheduled: {task_id}")
+        if not ledger.is_cancellable(task):
+            raise SystemExit(f"golem: task cannot be cancelled: {task_id}")
+        previous_status = task["status"]
         task["status"] = ledger.STATUS_CANCELLED
         pending_task_ids = [task_id]
         while pending_task_ids:
@@ -106,8 +149,10 @@ def cancel_task(task_id: str) -> int:
                 waiting_task["status"] = ledger.STATUS_CANCELLED
                 pending_task_ids.append(waiting_task_id)
         directories = claude_hooks.hook_affected_directories(tasks, task)
+        cancelled_task = task.copy()
     for directory in directories:
         claude_hooks.sync_hooks(directory)
+    stop_task_processes(task_id, cancelled_task, previous_status)
     return 0
 
 

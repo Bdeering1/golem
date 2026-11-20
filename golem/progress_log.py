@@ -100,7 +100,7 @@ def follow_progress_until_stopped(task_id: str, path: Path, progress_file: Binar
 
 def watch_task(task_id: str) -> int:
     task = ledger.existing_task(ledger.load_tasks(), task_id)
-    if task.get("status") in ledger.NOT_STARTED_STATUSES and not is_usage_limit_pause(task):
+    if not ledger.has_started(task) and not is_usage_limit_pause(task):
         raise SystemExit(f"golem: task has not started: {task_id}")
     session_id = task["session_id"]
     rotated_path = rotated_progress_path(session_id)

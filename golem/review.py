@@ -48,7 +48,7 @@ def pickup(
         task = tasks[task_id]
         if is_ready_to_open_required and not chains.is_ready_to_open(tasks, task_id):
             return 0
-        if task.get("status") in ledger.NOT_STARTED_STATUSES:
+        if not ledger.has_started(task):
             raise SystemExit(f"golem: task has not started: {task_id}")
         task_directories.reject_missing_worktree(task, worktrees)
         directory = ledger.directory_to_lock(task, task.get("worktree"))

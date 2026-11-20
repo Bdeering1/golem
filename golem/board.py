@@ -197,7 +197,6 @@ DURATION_PART_PATTERN = re.compile(r"(\d+)([a-z])")
 DURATION_UNIT_SIZES = {"m": 60, "h": 24}
 LOUD_STATUSES = {*STOPPED_STATUSES, ledger.STATUS_RUNNING}
 PICKUP_STATUSES = {ledger.STATUS_BLOCKED, ledger.STATUS_FAILED, ledger.STATUS_FINISHED}
-CANCEL_STATUSES = {ledger.STATUS_SCHEDULED, ledger.STATUS_WAITING}
 RETRY_STATUSES = {ledger.STATUS_FAILED, ledger.STATUS_CANCELLED}
 EMPTY_COLUMN_TEXTS = {
     display.COLUMN_QUEUED: "Nothing queued",
@@ -228,7 +227,7 @@ UNAVAILABLE_ACTION_TEXTS = {
     ACTION_RETRY: "Only failed, cancelled or blocked tasks can be retried",
     ACTION_CLOSE: "Only finished tasks in Review can be closed",
     ACTION_CLOSE_ALL: "Review has no finished tasks to close",
-    ACTION_CANCEL: "Only queued tasks can be cancelled",
+    ACTION_CANCEL: "Only queued, running, failed or blocked tasks can be cancelled",
     ACTION_COPY: "",
 }
 
@@ -2056,7 +2055,7 @@ def available_actions(snapshot: BoardSnapshot, row: display.ListRow | None) -> l
         actions.append(ACTION_CLOSE)
     if closable_task_ids(snapshot):
         actions.append(ACTION_CLOSE_ALL)
-    if row.status in CANCEL_STATUSES:
+    if ledger.is_cancellable(snapshot.tasks[row.task_id]):
         actions.append(ACTION_CANCEL)
     actions.append(ACTION_COPY)
     return actions
@@ -2476,7 +2475,7 @@ def wrapped_lines(text: str, width: int, style: str, hanging_indent: str = "") -
 def task_activity(row: display.ListRow, snapshot: BoardSnapshot) -> list[str]:
     if row.task_id in snapshot.activity:
         return snapshot.activity[row.task_id]
-    if row.status in ledger.NOT_STARTED_STATUSES:
+    if not ledger.has_started(snapshot.tasks[row.task_id]):
         return []
     return recent_activity(snapshot.tasks[row.task_id]["session_id"])
 
@@ -2841,7 +2840,7 @@ def help_sections(glyphs: Glyphs, *, is_task_view: bool) -> list[tuple[str, list
                 ("r", "retry, or recheck gate"),
                 ("c", "close (move to Done)"),
                 ("C", "close all finished"),
-                ("x", "cancel (if queued)"),
+                ("x", "cancel (unless done)"),
                 ("y", "copy its id"),
             ],
         ),

@@ -279,17 +279,6 @@ def test_cancel_marks_task_cancelled_and_does_not_run_executor(
 
 
 @pytest.mark.parametrize(
-    "status",
-    [ledger.STATUS_RUNNING, ledger.STATUS_BLOCKED, ledger.STATUS_FAILED, ledger.STATUS_FINISHED],
-)
-def test_cancel_refuses_non_scheduled_tasks(ledger_path, status):
-    support.write_task(ledger_path, status)
-
-    with pytest.raises(SystemExit, match=support.TASK_ID):
-        cli.main(["cancel", support.TASK_ID])
-
-
-@pytest.mark.parametrize(
     ("retry_args", "reset_time", "expected_due_at"),
     [
         pytest.param(["--now"], None, None, id="now"),
