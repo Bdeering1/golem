@@ -5,7 +5,7 @@ import shlex
 import sys
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, cast, override
 
 if TYPE_CHECKING:
     import io
@@ -392,10 +392,19 @@ def list_aliases() -> int:
     return 0
 
 
+class VerbatimMetavarFormatter(argparse.HelpFormatter):
+    @override
+    def _format_args(self, action: argparse.Action, default_metavar: str) -> str:
+        if action.nargs == argparse.ONE_OR_MORE and isinstance(action.metavar, str):
+            return action.metavar
+        return super()._format_args(action, default_metavar)
+
+
 def add_run_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
     run_command = add_parser(
         "run",
         description=SCHEDULE_DESCRIPTION,
+        formatter_class=VerbatimMetavarFormatter,
     )
     run_command.add_argument(
         "--backend",
