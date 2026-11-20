@@ -136,13 +136,18 @@ def schedule_new_task(
 ) -> int:
     due_time = when or datetime.now(UTC).astimezone()
     record = new_task_record(placement, prompt, agent_args, due_time, backend, label=label)
+    prefix = task_ids.task_id_prefix(task_ids.repository_name(placement.cwd))
     with ledger.locked_tasks() as tasks:
         if after is not None and chains.is_dependent_reservable(tasks, after):
             raise SystemExit(f"golem: parent task changed: {after}")
-        inserted = task_ids.insert_with_new_ids(tasks, [record, *follow_up_records], after)
-    task_id, *follow_up_ids = inserted
+        if after is None:
+            task_id = task_ids.new_root_task_id(tasks, prefix)
+            tasks[task_id] = record
+        else:
+            task_id = next(iter(task_ids.insert_dependents(tasks, [record], after)))
+        follow_ups = task_ids.insert_dependents(tasks, follow_up_records, task_id)
     exit_code = launch_agent.wake_launch_agent_and_report(task_id, due_time)
-    print_dependents({follow_up_id: inserted[follow_up_id] for follow_up_id in follow_up_ids})
+    print_dependents(follow_ups)
     return exit_code
 
 
@@ -266,9 +271,8 @@ def reserve_dependent_task(
     with ledger.locked_tasks() as tasks:
         if not chains.is_dependent_reservable(tasks, parent_id):
             return None
-        inserted = task_ids.insert_with_new_ids(tasks, records, parent_id)
-        chains.add_dependent_records(tasks, inserted, parent_id, default_clients)
-    return inserted
+        chains.add_parent_auto_pickup(tasks, records, parent_id, default_clients)
+        return task_ids.insert_dependents(tasks, records, parent_id)
 
 
 def schedule_run_task(

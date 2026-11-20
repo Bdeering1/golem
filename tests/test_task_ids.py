@@ -51,7 +51,7 @@ def test_pruned_task_number_is_not_reused(installed_launch_agent, ledger_path):
 
 def insert_dependent(tasks: ledger.Tasks, parent_id: str) -> str:
     record = support.task_record(ledger.STATUS_WAITING)
-    return next(iter(task_ids.insert_with_new_ids(tasks, [record], parent_id)))
+    return next(iter(task_ids.insert_dependents(tasks, [record], parent_id)))
 
 
 @pytest.mark.parametrize("root_id", ["gol14", "fix-login"])
@@ -77,3 +77,12 @@ def test_dependents_get_step_numbers_and_later_siblings_start_branches(root_id):
         f"{root_id}-3",
         f"{root_id}-3-c",
     ]
+
+
+def test_first_dependent_starts_a_branch_when_its_id_is_taken():
+    tasks: ledger.Tasks = {
+        task_id: support.task_record(ledger.STATUS_FINISHED, task_id=task_id)
+        for task_id in ("gol14", "gol14-2")
+    }
+
+    assert insert_dependent(tasks, "gol14") == "gol14-2-b"

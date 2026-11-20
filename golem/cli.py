@@ -411,7 +411,7 @@ def add_run_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
         nargs="+",
         default=[],
         metavar="[LABEL] PROMPT",
-        help="run PROMPT after the previous task succeeds, labelled LABEL if given; repeatable",
+        help="run PROMPT after the previous task succeeds, labelled LABEL if given; one PROMPT per --then, repeatable",
     )
     run_command.add_argument(
         "--env",

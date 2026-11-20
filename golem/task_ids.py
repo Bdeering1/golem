@@ -59,16 +59,13 @@ def new_dependent_task_id(tasks: ledger.Tasks, parent_id: str) -> str:
     raise SystemExit(f"golem: chain {root_id} has no branch letters left")
 
 
-def insert_with_new_ids(
-    tasks: ledger.Tasks, records: list[ledger.Task], parent_id: str | None
+def insert_dependents(
+    tasks: ledger.Tasks, records: list[ledger.Task], parent_id: str
 ) -> ledger.Tasks:
     inserted: ledger.Tasks = {}
     for record in records:
-        if parent_id is None:
-            task_id = new_root_task_id(tasks, task_id_prefix(repository_name(record["cwd"])))
-        else:
-            record["after"] = parent_id
-            task_id = new_dependent_task_id(tasks, parent_id)
+        record["after"] = parent_id
+        task_id = new_dependent_task_id(tasks, parent_id)
         tasks[task_id] = record
         inserted[task_id] = record
         parent_id = task_id
