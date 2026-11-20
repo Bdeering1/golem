@@ -4,24 +4,19 @@ from golem import display, ledger
 
 
 def picker_lines(tasks: ledger.Tasks, task_ids: list[str]) -> list[str]:
-    rows = [
-        (
-            f"{number})",
-            task_id,
-            tasks[task_id].get("label", ""),
-            tasks[task_id]["status"],
-            display.display_directory(tasks[task_id]["cwd"]),
-            display.first_line(tasks[task_id]["prompt"]),
-        )
-        for number, task_id in enumerate(task_ids, start=1)
-    ]
-    widths = [max(len(row[index]) for row in rows) for index in range(len(rows[0]) - 1)]
-    return [
-        "  ".join(
-            [*(value.ljust(width) for value, width in zip(row, widths, strict=False)), row[-1]]
-        )
-        for row in rows
-    ]
+    return display.aligned_lines(
+        [
+            (
+                f"{number})",
+                task_id,
+                tasks[task_id].get("label", ""),
+                tasks[task_id]["status"],
+                display.display_directory(tasks[task_id]["cwd"]),
+                display.first_line(tasks[task_id]["prompt"]),
+            )
+            for number, task_id in enumerate(task_ids, start=1)
+        ]
+    )
 
 
 def picked_task_id(task_ids: list[str]) -> str:

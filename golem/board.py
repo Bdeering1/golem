@@ -772,15 +772,21 @@ def fitted_task_id(task_id: str, width: int, glyphs: Glyphs) -> str:
     return f"{head.rstrip('-')}{glyphs.ellipsis}{tail}"
 
 
-def fitted_task_name(name: str, width: int, glyphs: Glyphs) -> str:
-    task_id, _, label = name.partition(" ")
-    if not label or len(name) <= width:
-        return fitted_task_id(name, width, glyphs)
+def fitted_task_name(task_id: str, label: str | None, width: int, glyphs: Glyphs) -> str:
     id_text = fitted_task_id(task_id, width, glyphs)
+    if label is None:
+        return id_text
+    if len(task_id) + 1 + len(label) <= width:
+        return f"{task_id} {label}"
     label_width = width - len(id_text) - 1
     if label_width <= len(glyphs.ellipsis):
         return id_text
     return f"{id_text} {fitted(label, label_width, glyphs)}"
+
+
+def fitted_chain_name(tasks: ledger.Tasks, task_id: str, width: int, glyphs: Glyphs) -> str:
+    root_id = chain_name(tasks, task_id)
+    return fitted_task_name(root_id, tasks[root_id].get("label"), width, glyphs)
 
 
 def duration_text(seconds: float) -> str:
@@ -1128,9 +1134,7 @@ def card_segments(
     color, mark_color = card_colors(row, context, is_selected=is_selected)
     right_parts = card_badge_parts(row, context)
     right_width = parts_width(right_parts) + (1 if right_parts else 0)
-    title = fitted_task_name(
-        chain_display_name(context.snapshot.tasks, row.task_id), width - CARD_INDENT, glyphs
-    )
+    title = fitted_chain_name(context.snapshot.tasks, row.task_id, width - CARD_INDENT, glyphs)
     detail_width = width - CARD_INDENT - right_width
     facts = card_facts(row, context)
     time_text, reason, short_reason, repository = facts
@@ -1234,7 +1238,7 @@ def boxed_card_segments(
     )
     right_parts = [] if is_compact else badge_parts
     title_width = content_width - parts_width(border_parts)
-    title = fitted_task_name(name, title_width - 1, glyphs)
+    title = fitted_chain_name(context.snapshot.tasks, row.task_id, title_width - 1, glyphs)
     is_changed = row.task_id in changed_task_ids
     title_style = card_title_style(row, context, is_selected=is_selected)
     top_parts: list[Part] = [
@@ -1722,9 +1726,8 @@ def detail_title_segments(
         right_options[-1],
     )
     name_width = max(1, title_width - CARD_INDENT - 2 - parts_width(right_parts) - 1)
-    title_parts: list[Part] = [
-        (f" {fitted_task_name(name, name_width, glyphs)} ", STYLE_BOLD, None)
-    ]
+    title = fitted_chain_name(snapshot.tasks, row.task_id, name_width, glyphs)
+    title_parts: list[Part] = [(f" {title} ", STYLE_BOLD, None)]
     right_x = title_width - 1 - parts_width(right_parts)
     segments += part_segments(rule_y, CARD_INDENT - 1, title_parts)
     return [*segments, *part_segments(rule_y, right_x, right_parts)]
@@ -1966,9 +1969,7 @@ def task_heading_parts(
     facts = [text for text in (when, f"step {step}" if step else "") if text]
     facts_text = f" {glyphs.separator} ".join(facts)
     facts_text = f"  {facts_text}" if facts_text else ""
-    task_id = fitted_task_name(
-        chain_display_name(snapshot.tasks, row.task_id), line_width - len(status_text), glyphs
-    )
+    task_id = fitted_chain_name(snapshot.tasks, row.task_id, line_width - len(status_text), glyphs)
     facts_text = fitted(facts_text, max(0, line_width - len(task_id) - len(status_text)), glyphs)
     return [
         (task_id, STYLE_BOLD, None),
@@ -2115,12 +2116,14 @@ def status_line_segments(
 ) -> list[Segment] | None:
     if state.pending_action == ACTION_CLOSE_ALL:
         closable_count = len(closable_task_ids(snapshot))
-        verb, step_suffix = "Close", ""
-        name = (
+        verb, step_suffix, label = "Close", "", None
+        name_id = name = (
             f"{'all ' if closable_count > 1 else ''}{counted_text(closable_count, 'finished task')}"
         )
     elif state.pending_action is not None and row is not None:
         verb = ACTION_LABELS[state.pending_action].capitalize()
+        name_id = chain_name(snapshot.tasks, row.task_id)
+        label = snapshot.tasks[name_id].get("label")
         name = chain_display_name(snapshot.tasks, row.task_id)
         step = step_display_name(snapshot.tasks, row.task_id)
         step_suffix = f" ({step})" if step else ""
@@ -2132,7 +2135,7 @@ def status_line_segments(
     if len(verb) + len(name) + len(step_suffix) + len(answer) + 4 >= width:
         answer = CONFIRM_SHORT_ANSWER_TEXT
     name_width = width - len(verb) - len(answer) - 5 - len(step_suffix)
-    subject = f"{fitted_task_name(name, name_width, glyphs)}{step_suffix}"
+    subject = f"{fitted_task_name(name_id, label, name_width, glyphs)}{step_suffix}"
     prompt = f"{verb} {subject}? "
     return [
         Segment(y, 0, prompt, STYLE_BOLD),

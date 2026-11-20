@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Generator
 
-from golem import ledger, locks
+from golem import display, ledger, locks
 from golem.worktrees import git, task_directories
 
 CLAUDE_LOCK_PATTERN = re.compile(r"claude session (\S+) \(pid (\d+) start .+\)")
@@ -245,16 +245,8 @@ def list_worktrees() -> int:
                 "; ".join(reasons),
             )
         )
-    headers = ("PATH", "TASKS", "STATE", "REASON")
-    widths = [
-        max(len(header), *(len(row[index]) for row in rows)) for index, header in enumerate(headers)
-    ]
-    for row in (headers, *rows):
-        print(
-            "  ".join(
-                str(value).ljust(width) for value, width in zip(row, widths, strict=True)
-            ).rstrip()
-        )
+    for line in display.aligned_lines([("PATH", "TASKS", "STATE", "REASON"), *rows]):
+        print(line)
     return 0
 
 

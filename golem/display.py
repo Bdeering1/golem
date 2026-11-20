@@ -266,6 +266,14 @@ def detail_line(detail: str, *, is_color: bool) -> str:
     return f"{DETAIL_LINE_INDENT}\033[38;5;{DETAIL_LINE_COLOR}m{detail}{ANSI_RESET}"
 
 
+def aligned_lines(rows: list[tuple[str, ...]]) -> list[str]:
+    widths = [max(len(row[index]) for row in rows) for index in range(len(rows[0]))]
+    return [
+        "  ".join(value.ljust(width) for value, width in zip(row, widths, strict=True)).rstrip()
+        for row in rows
+    ]
+
+
 def table_lines(
     rows: list[ListRow], *, is_color: bool, is_detail_on_own_line: bool = False
 ) -> list[str]:
