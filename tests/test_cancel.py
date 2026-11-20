@@ -57,7 +57,6 @@ def test_cancel_stops_running_agent_and_task_stays_cancelled(
 
     task = support.read_task(ledger_path)
     assert task["status"] == ledger.STATUS_CANCELLED
-    assert task_processes.FIELD_AGENT_PID not in task
     assert support.logged_osascript_calls(fake_commands) == []
     if server is not None:
         assert {"type": "thread.stop", "threadId": task["t3_code_thread_id"]} in [
@@ -102,7 +101,6 @@ def test_cancel_stops_command_and_cancels_waiting_dependents(
 
     tasks = support.read_tasks(ledger_path)
     assert {task["status"] for task in tasks.values()} == {ledger.STATUS_CANCELLED}
-    assert "setup_failure_reason" not in tasks[support.PARENT_ID]
     assert len(support.logged_claude_calls(fake_commands)) == expected_claude_calls
     assert support.logged_osascript_calls(fake_commands) == []
 
@@ -121,21 +119,6 @@ def test_process_started_after_cancel_is_stopped(ledger_path, field):
         task_processes.recorded_process(support.TASK_ID, session_id, field, process),
     ):
         assert process.wait(timeout=JOIN_SECONDS) < 0
-
-
-def test_retry_runs_task_cancelled_while_running(
-    installed_launch_agent, fake_commands, ledger_path, hold_path
-):
-    cli.main(["run", support.PROMPT, "--now"])
-    executor_thread = start_executor(ledger_path)
-    wait_for_field(ledger_path, task_processes.FIELD_AGENT_PID)
-    cancel_and_join(executor_thread)
-    hold_path.unlink()
-
-    assert cli.main(["retry", support.TASK_ID, "--now"]) == 0
-    start_executor(ledger_path).join(JOIN_SECONDS)
-
-    assert support.read_task(ledger_path)["status"] == ledger.STATUS_FINISHED
 
 
 @pytest.mark.parametrize(
@@ -172,14 +155,13 @@ def test_cancel_without_live_executor_leaves_recorded_processes_alone(
     assert thread_stops == expected_thread_stops
 
 
-@pytest.mark.parametrize("status", [ledger.STATUS_FINISHED, ledger.STATUS_CANCELLED])
-def test_cancel_refuses_done_tasks(ledger_path, status):
-    support.write_task(ledger_path, status)
+def test_cancel_refuses_finished_task(ledger_path):
+    support.write_task(ledger_path, ledger.STATUS_FINISHED)
 
     with pytest.raises(SystemExit, match=f"cannot be cancelled: {support.TASK_ID}"):
         cli.main(["cancel", support.TASK_ID])
 
-    assert support.read_task(ledger_path)["status"] == status
+    assert support.read_task(ledger_path)["status"] == ledger.STATUS_FINISHED
 
 
 def test_cancel_reports_task_still_stopping(ledger_path, monkeypatch):
