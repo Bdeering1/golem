@@ -44,9 +44,6 @@ golem run fix-logout "Fix the logout redirect" --backend t3 -- --provider codex 
 # Run on another Claude account, after signing in with `golem account add claude`
 golem run fix-billing "Fix the billing page" --account work@example.com
 
-# Label a task. Commands that take a task ID also take its label, eg. golem pickup GH-115
-golem run add-labels "Implement issue 115" --label GH-115
-
 # The script must print {"directory": "<path>"} for the task to run in
 # The review runs if the tests pass (exit code of zero). Arguments after -- go to the agent
 golem run add-auth "Add password reset" \
