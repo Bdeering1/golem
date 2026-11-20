@@ -45,7 +45,6 @@ FIRST_RUN_ENDED_AT = "2030-01-01T10:01:00.000Z"
 SUBAGENT_ENDED_AT = "2030-01-01T10:02:00.000Z"
 LATER_RUN_ENDED_AT = "2030-01-01T10:03:00.000Z"
 READY_SESSION = {"id": "session", "status": "ready"}
-STOPPED_SESSION = {"id": "session", "status": "stopped"}
 FIRST_RUN_ENDED = {
     "id": FIRST_RUN_ID,
     "ordinal": 1,
@@ -489,10 +488,12 @@ def test_question_in_later_run_blocks_task(t3_server, follow_ups, ledger_path):
     assert task["result"] == LATER_REPLY
 
 
-def test_stopped_session_fails_task_with_subagent_running(t3_server, follow_ups, ledger_path):
-    follow_ups[:] = [
-        projection(RUNNING_SUBAGENT, runs=[FIRST_RUN_ENDED], sessions=[STOPPED_SESSION])
-    ]
+@pytest.mark.parametrize("session_status", ["stopped", "error"])
+def test_ended_session_fails_task_with_subagent_running(
+    t3_server, follow_ups, ledger_path, session_status
+):
+    ended_session = {"id": "session", "status": session_status}
+    follow_ups[:] = [projection(RUNNING_SUBAGENT, runs=[FIRST_RUN_ENDED], sessions=[ended_session])]
 
     task = run_t3_task(ledger_path)
 
@@ -538,7 +539,10 @@ def test_cancelled_task_stops_waiting_for_subagents(
 ):
     follow_ups[:] = [projection(RUNNING_SUBAGENT, runs=[FIRST_RUN_ENDED], sessions=[READY_SESSION])]
 
-    def cancel_while_sleeping(_seconds: float) -> None:
+    bounded_sleep = time.sleep
+
+    def cancel_while_sleeping(seconds: float) -> None:
+        bounded_sleep(seconds)
         with ledger.locked_tasks() as tasks:
             tasks[support.TASK_ID]["status"] = ledger.STATUS_CANCELLED
 

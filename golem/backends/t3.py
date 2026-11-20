@@ -31,7 +31,7 @@ TERMINAL_ITEM_STATUSES = {"completed", "failed", "cancelled", "interrupted"}
 TERMINAL_RUN_STATUSES = {*TERMINAL_ITEM_STATUSES, "rolled_back"}
 COMPLETED_STATUS = "completed"
 SUBAGENT_ITEM_TYPE = "subagent"
-SESSION_STOPPED_STATUS = "stopped"
+SESSION_ENDED_STATUSES = {"stopped", "error"}
 SESSION_STOPPED_REASON = "T3 Code stopped the session before its subagents finished"
 USAGE_LIMIT_FAILURE_CLASS = "usage_limit"
 
@@ -409,7 +409,7 @@ def has_unfinished_subagent_work(projection: ledger.JsonObject) -> bool:
 
 def is_session_stopped(projection: ledger.JsonObject) -> bool:
     sessions = json_objects(projection.get("providerSessions"))
-    return all(session.get("status") == SESSION_STOPPED_STATUS for session in sessions)
+    return all(session.get("status") in SESSION_ENDED_STATUSES for session in sessions)
 
 
 def is_request_pending(projection: ledger.JsonObject) -> bool:
@@ -442,7 +442,9 @@ def latest_run_outcome(
         return outcome
     watcher.run_id = cast("str | None", run.get("id"))
     if run.get("status") == COMPLETED_STATUS:
-        return common.RunOutcome(0, last_reply(projection, run), is_usage_limit=False)
+        return common.RunOutcome(
+            0, last_reply(projection, run) or outcome.result, is_usage_limit=False
+        )
     failure = watcher.last_failure()
     return failed_run_outcome(1, failure, failure.get("message"), run.get("status"))
 
