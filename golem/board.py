@@ -69,7 +69,7 @@ WIDE_REP_FIX_NCURSES_VERSION = (6, 0, 20170729)
 INFOCMP_PATH_PREFIX = b"#\tReconstructed via infocmp from file: "
 LEGACY_TERMINFO_MAGIC = 0o432
 TERMINFO_HEADER = struct.Struct("<6h")
-TERMINFO_OFFSET = struct.Struct("<h")
+TERMINFO_SHORT = struct.Struct("<h")
 REP_STRING_INDEX = 121
 ABSENT_STRING_OFFSET = -1
 TOOL_LINE_PREFIX = "[tool] "
@@ -3542,14 +3542,14 @@ def terminfo_entry_without_rep(entry: bytes) -> bytes | None:
         return None
     numbers_offset = TERMINFO_HEADER.size + names_size + bool_count
     numbers_offset += numbers_offset % 2
-    rep_offset = numbers_offset + TERMINFO_OFFSET.size * (number_count + REP_STRING_INDEX)
-    if rep_offset + TERMINFO_OFFSET.size > len(entry):
+    rep_offset = numbers_offset + TERMINFO_SHORT.size * (number_count + REP_STRING_INDEX)
+    if rep_offset + TERMINFO_SHORT.size > len(entry):
         return None
-    rep_string_offsets: tuple[int, ...] = TERMINFO_OFFSET.unpack_from(entry, rep_offset)
+    rep_string_offsets: tuple[int, ...] = TERMINFO_SHORT.unpack_from(entry, rep_offset)
     if rep_string_offsets[0] < 0:
         return None
-    absent = TERMINFO_OFFSET.pack(ABSENT_STRING_OFFSET)
-    return entry[:rep_offset] + absent + entry[rep_offset + TERMINFO_OFFSET.size :]
+    absent = TERMINFO_SHORT.pack(ABSENT_STRING_OFFSET)
+    return entry[:rep_offset] + absent + entry[rep_offset + TERMINFO_SHORT.size :]
 
 
 def patched_terminfo_entry() -> tuple[Path, bytes] | None:
