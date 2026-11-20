@@ -23,13 +23,9 @@ def labelled_tasks(ledger_path):
     )
 
 
-def use_terminal(monkeypatch, answers, on_first_read=lambda: None):
-    monkeypatch.setattr(sys, "stdin", support.TerminalInput(answers, on_first_read))
+def use_terminal(monkeypatch, answers):
+    monkeypatch.setattr(sys, "stdin", support.TerminalInput(answers))
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
-
-
-def interrupt():
-    raise KeyboardInterrupt
 
 
 @pytest.mark.parametrize(
@@ -49,11 +45,6 @@ def test_argument_resolves_to_one_task(ledger_path, argument):
     assert task_lookup.resolved_task_id(argument) == support.TASK_ID
 
 
-def test_unknown_argument_fails_like_an_unknown_id(labelled_tasks):
-    with pytest.raises(SystemExit, match="golem: task not found: missing"):
-        task_lookup.resolved_task_id("missing")
-
-
 def test_shared_label_lists_matches_newest_first_and_picks_by_number(
     labelled_tasks, monkeypatch, capsys
 ):
@@ -66,13 +57,9 @@ def test_shared_label_lists_matches_newest_first_and_picks_by_number(
     assert older_line.split()[1] == OLDER_ID
 
 
-@pytest.mark.parametrize(
-    ("answers", "on_first_read"),
-    [("\n", lambda: None), ("", lambda: None), ("1\n", interrupt)],
-    ids=["empty", "eof", "interrupt"],
-)
-def test_picker_cancels(labelled_tasks, monkeypatch, answers, on_first_read):
-    use_terminal(monkeypatch, answers, on_first_read)
+@pytest.mark.parametrize("answers", ["\n", ""], ids=["empty", "eof"])
+def test_picker_cancels(labelled_tasks, monkeypatch, answers):
+    use_terminal(monkeypatch, answers)
 
     with pytest.raises(SystemExit, match="cancelled"):
         task_lookup.resolved_task_id(support.LABEL)

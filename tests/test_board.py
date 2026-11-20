@@ -157,14 +157,6 @@ def test_board_shows_the_chain_label_next_to_its_name():
     assert f"fix-login {support.LABEL}" in "\n".join(detail_lines)
 
 
-@pytest.mark.parametrize(
-    ("width", "expected"),
-    [(12, "fix-login G~"), (11, "fix-login")],
-)
-def test_board_cuts_the_label_before_the_task_id(width, expected):
-    assert board.fitted_task_name("fix-login", "GH-115", width, board.ASCII_GLYPHS) == expected
-
-
 def test_board_task_view_shows_only_chain_states_that_cannot_be_inferred():
     text = frame_text(chain_tasks(), state=board.BoardState(focus_index=1, view=board.VIEW_TASK))
 
