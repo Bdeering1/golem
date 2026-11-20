@@ -6,6 +6,7 @@ import sys
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from urllib import parse
@@ -27,6 +28,15 @@ INSTANCE_IDS = {ledger.BACKEND_CLAUDE: "claudeAgent", ledger.BACKEND_CODEX: "cod
 DEFAULT_MODELS = {"claudeAgent": "claude-opus-5-5", "codex": "gpt-6-astra"}
 THREAD_MISSING_MESSAGE = "is no longer available"
 EFFORT_OPTION_IDS = {"claudeAgent": "effort", "codex": "reasoningEffort"}
+SETTLE_RACE_MESSAGE = "The thread received another run before settlement."
+SETTLE_BLOCKING_FIELDS = (
+    "pinnedAt",
+    "snoozedUntil",
+    "snoozedAt",
+    "archivedAt",
+    "deletedAt",
+    "settledAt",
+)
 
 
 class T3CodeError(Exception):
@@ -40,6 +50,7 @@ class ClaudeInstance:
     home_path: str
 
 
+CONNECTION_ERRORS = (OSError, http.client.HTTPException, WebSocketException)
 T3_CODE_ERRORS = (
     T3CodeError,
     OSError,
@@ -217,6 +228,50 @@ def thread_state(origin: str, token: str, thread_id: str) -> ledger.ThreadState 
     if thread.get("settledOverride") == "settled" or thread.get("settledAt") is not None:
         return ledger.THREAD_STATE_SETTLED
     return ledger.THREAD_STATE_UNSETTLED
+
+
+def latest_run(projection: ledger.JsonObject) -> ledger.JsonObject | None:
+    runs = cast("list[ledger.JsonObject]", projection.get("runs", []))
+    return max(runs, key=lambda run: cast("int", run["ordinal"]), default=None)
+
+
+def is_thread_idle_since(projection: ledger.JsonObject, finished_at: str) -> bool:
+    thread = cast("ledger.JsonObject", projection["thread"])
+    if thread.get("settledOverride") == "settled":
+        return False
+    if any(thread.get(field) is not None for field in SETTLE_BLOCKING_FIELDS):
+        return False
+    run = latest_run(projection)
+    if run is None:
+        return True
+    started_at = run.get("startedAt")
+    return isinstance(started_at, str) and datetime.fromisoformat(
+        started_at
+    ) <= datetime.fromisoformat(finished_at)
+
+
+def settle_idle_thread(
+    origin: str, token: str, thread_id: str, projection: ledger.JsonObject, finished_at: str
+) -> None:
+    if not isinstance(projection.get("thread"), dict):
+        if is_thread_missing(thread_id):
+            return
+        raise T3CodeError("the thread projection has no thread")
+    if not is_thread_idle_since(projection, finished_at):
+        return
+    command: ledger.JsonObject = {
+        "type": "thread.settle",
+        "commandId": str(uuid.uuid4()),
+        "threadId": thread_id,
+    }
+    run = latest_run(projection)
+    if run is not None:
+        command["expectedLatestRunId"] = run["id"]
+    try:
+        dispatch_command(origin, token, command)
+    except T3CodeError as error:
+        if SETTLE_RACE_MESSAGE not in str(error):
+            raise
 
 
 def wait_for_server() -> None:

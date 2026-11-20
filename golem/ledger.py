@@ -40,6 +40,9 @@ THREAD_STATE_UNSETTLED: ThreadState = "unsettled"
 THREAD_STATE_SETTLED: ThreadState = "settled"
 THREAD_STATE_ARCHIVED: ThreadState = "archived"
 THREAD_STATE_DELETED: ThreadState = "deleted"
+ThreadSettle = Literal["pending", "done"]
+THREAD_SETTLE_PENDING: ThreadSettle = "pending"
+THREAD_SETTLE_DONE: ThreadSettle = "done"
 PullRequestState = Literal["open", "merged", "closed"]
 PULL_REQUEST_STATES: tuple[PullRequestState, ...] = get_args(PullRequestState)
 PULL_REQUEST_STATE_OPEN: PullRequestState = "open"
@@ -73,6 +76,7 @@ class Task(TypedDict):
     thread_id: NotRequired[str]
     t3_code_thread_id: NotRequired[str]
     t3_code_thread_state: NotRequired[ThreadState]
+    t3_code_thread_settle: NotRequired[ThreadSettle]
     native_session_id: NotRequired[str]
     result: NotRequired[str]
     returncode: NotRequired[int]

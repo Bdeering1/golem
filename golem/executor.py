@@ -18,6 +18,7 @@ from golem import (
     review,
     scheduling,
     task_setup,
+    thread_settling,
 )
 from golem.backends import claude_hooks, common, registry
 from golem.worktrees import branch_pull_requests, git, task_directories
@@ -278,6 +279,8 @@ def execute_claimed_task(
                 gates.run_pending_gate(task_id)
         finally:
             locks.release_lock(directory_lock_file)
+        thread_settling.mark_parent_of_succeeded_task(task_id)
+        thread_settling.settle_pending_threads()
         drain_dependents(task_id, task["session_id"])
         return returncode
     finally:
@@ -307,6 +310,7 @@ def drain_succeeded_task(task_id: str, session_id: str) -> None:
         drain_dependents(task_id, session_id)
     finally:
         locks.release_run_lock(run_lock_file, session_id)
+    thread_settling.settle_pending_threads()
 
 
 def execute_or_drain_task(task_id: str, session_id: str) -> int:
