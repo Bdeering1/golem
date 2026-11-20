@@ -221,7 +221,7 @@ THREAD_STATE_TEXTS = {"thread unsettled": "thread open, no PR"}
 SHORT_REASON_TEXTS = {"thread open, no PR": "thread, no PR"}
 EMPTY_BOARD_LINES = ("No tasks yet", "Queue one with", 'golem run "<prompt>"')
 UNAVAILABLE_ACTION_TEXTS = {
-    ACTION_PICKUP: "Only blocked, failed or finished tasks can be picked up",
+    ACTION_PICKUP: "Only blocked, failed, finished or started cancelled tasks can be picked up",
     ACTION_WATCH: "This task has no log yet",
     ACTION_OPEN_PULL_REQUEST: "This task has no pull request",
     ACTION_RETRY: "Only failed, cancelled or blocked tasks can be retried",
@@ -2040,9 +2040,11 @@ def available_actions(snapshot: BoardSnapshot, row: display.ListRow | None) -> l
     if row is None:
         return [ACTION_CLOSE_ALL] if closable_task_ids(snapshot) else []
     actions: list[str] = []
-    if row.status in PICKUP_STATUSES:
+    task = snapshot.tasks[row.task_id]
+    is_started_cancelled = row.status == ledger.STATUS_CANCELLED and ledger.has_started(task)
+    if row.status in PICKUP_STATUSES or is_started_cancelled:
         actions.append(ACTION_PICKUP)
-    session_id = snapshot.tasks[row.task_id]["session_id"]
+    session_id = task["session_id"]
     if row.status == ledger.STATUS_RUNNING or progress_log.progress_path(session_id).exists():
         actions.append(ACTION_WATCH)
     if chain_pull_requests(snapshot, row.task_id):

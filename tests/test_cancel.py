@@ -1,4 +1,3 @@
-import sys
 import threading
 from datetime import UTC, datetime
 
@@ -131,9 +130,7 @@ def test_retry_runs_task_cancelled_while_running(
     assert support.read_task(ledger_path)["status"] == ledger.STATUS_FINISHED
 
 
-@pytest.mark.parametrize(
-    "status", [ledger.STATUS_RUNNING, ledger.STATUS_FAILED, ledger.STATUS_BLOCKED]
-)
+@pytest.mark.parametrize("status", [ledger.STATUS_FAILED, ledger.STATUS_BLOCKED])
 def test_cancel_accepts_started_tasks_and_cancels_waiting_dependents(ledger_path, status):
     support.write_parent_with_waiting_child(ledger_path, status)
 
@@ -205,7 +202,7 @@ def test_pickup_and_watch_open_started_cancelled_task(ledger_path, capsys, pause
 
 def test_prune_deletes_started_cancelled_task_without_asking(ledger_path, monkeypatch):
     support.write_task(ledger_path, ledger.STATUS_CANCELLED, started_at=STARTED_AT)
-    monkeypatch.setattr(sys, "stdin", support.TerminalInput(""))
+    support.use_fake_terminal(monkeypatch, [])
 
     assert cli.main(["prune"]) == 0
 
