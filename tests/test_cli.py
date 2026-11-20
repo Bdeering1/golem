@@ -4,7 +4,7 @@ from typing import override
 
 import pytest
 
-from golem import cli, config, launch_agent, ledger, scheduling
+from golem import cli, config, launch_agent, ledger, scheduling, task_ids
 from tests import support
 
 
@@ -21,23 +21,25 @@ def test_alias_expands_arguments_verbatim_like_run(
     monkeypatch.setattr(scheduling, "datetime", FixedDateTime)
     monkeypatch.setattr(launch_agent, "datetime", FixedDateTime)
     monkeypatch.setattr(scheduling, "new_session_id", lambda: "session")
-    support.write_aliases({"impl": 'run {1} "/impl {2}" --then {1}-review /review-lite'})
-    task_id = "t42"
+    support.write_aliases({"impl": 'run "/impl {2}" --label {1} --then review /review-lite'})
+    label = "t42"
     prompt = 'add "retry" {backoff}\nonce'
 
-    assert cli.main(["impl", task_id, prompt, "--now"]) == 0
+    assert cli.main(["impl", label, prompt, "--now"]) == 0
     alias_tasks = support.read_tasks(ledger_path)
 
     support.write_tasks(ledger_path, {})
+    task_ids.counters_path().unlink()
 
     assert (
         cli.main(
             [
                 "run",
-                task_id,
                 f"/impl {prompt}",
+                "--label",
+                label,
                 "--then",
-                f"{task_id}-review",
+                "review",
                 "/review-lite",
                 "--now",
             ]
@@ -51,13 +53,13 @@ def test_alias_expands_arguments_verbatim_like_run(
 def test_alias_appends_extra_arguments_before_template_agent_arguments(
     installed_launch_agent, ledger_path
 ):
-    support.write_aliases({"queue": "run {1} {2} -- --model template-{1}"})
+    support.write_aliases({"queue": "run {2} --label {1} -- --model template-{1}"})
 
     assert (
         cli.main(
             [
                 "queue",
-                support.TASK_ID,
+                support.LABEL,
                 support.PROMPT,
                 "--now",
                 "--",
@@ -71,7 +73,7 @@ def test_alias_appends_extra_arguments_before_template_agent_arguments(
     task = support.read_task(ledger_path)
     assert task["agent_args"] == [
         "--model",
-        f"template-{support.TASK_ID}",
+        f"template-{support.LABEL}",
         "--model",
         "command-line",
     ]
@@ -100,7 +102,7 @@ def test_alias_list_marks_shadowed_builtin(capsys):
 def test_builtin_command_wins_over_alias(installed_launch_agent, ledger_path):
     support.write_aliases({"run": "not a command"})
 
-    assert cli.main(["run", support.TASK_ID, support.PROMPT, "--now"]) == 0
+    assert cli.main(["run", support.PROMPT, "--now"]) == 0
 
     assert support.read_task(ledger_path)["prompt"] == support.PROMPT
 
@@ -136,9 +138,9 @@ def test_run_environment_precedence_and_follow_ups(installed_launch_agent, ledge
     assert (
         cli.main(
             [
-                *["run", support.TASK_ID, support.PROMPT, "--now"],
+                *["run", support.PROMPT, "--now"],
                 *["--env", "SHARED=first", "--env", "SHARED=flag", "--env", "EMPTY="],
-                *["--then", support.CHILD_ID, support.CHILD_PROMPT],
+                *["--then", support.CHILD_PROMPT],
             ]
         )
         == 0
@@ -159,9 +161,7 @@ def test_run_after_parent_uses_its_own_environment(installed_launch_agent, ledge
     )
     support.write_config_table("env", {"OWN": "config"})
 
-    assert (
-        cli.main(["run", support.CHILD_ID, support.CHILD_PROMPT, "--after", support.PARENT_ID]) == 0
-    )
+    assert cli.main(["run", support.CHILD_PROMPT, "--after", support.PARENT_ID]) == 0
 
     environment = support.read_task(ledger_path, support.CHILD_ID)["environment"]
     assert environment["OWN"] == "config"
@@ -186,7 +186,7 @@ def test_run_rejects_invalid_environment_without_changing_the_ledger(
         support.write_config_text(config_text)
 
     with pytest.raises(SystemExit, match=message):
-        cli.main(["run", support.TASK_ID, support.PROMPT, "--now", *arguments])
+        cli.main(["run", support.PROMPT, "--now", *arguments])
 
     assert not ledger_path.exists()
 
@@ -213,8 +213,8 @@ def test_run_backend_comes_from_flag_then_saved_default(
     assert (
         cli.main(
             [
-                *["run", support.TASK_ID, support.PROMPT, "--now", *arguments],
-                *["--then", support.CHILD_ID, support.CHILD_PROMPT],
+                *["run", support.PROMPT, "--now", *arguments],
+                *["--then", support.CHILD_PROMPT],
             ]
         )
         == 0
@@ -235,9 +235,7 @@ def test_run_after_parent_uses_saved_default_not_parent_backend(
     )
     support.write_config_text('default_backend = "codex"\n')
 
-    assert (
-        cli.main(["run", support.CHILD_ID, support.CHILD_PROMPT, "--after", support.PARENT_ID]) == 0
-    )
+    assert cli.main(["run", support.CHILD_PROMPT, "--after", support.PARENT_ID]) == 0
 
     assert support.read_task(ledger_path, support.CHILD_ID)["backend"] == ledger.BACKEND_CODEX
 
@@ -259,20 +257,57 @@ def test_invalid_default_backend_fails_run_only(
     support.write_config_text(config_text)
 
     with pytest.raises(SystemExit, match=message):
-        cli.main(
-            ["run", support.TASK_ID, support.PROMPT, "--now", "--backend", ledger.BACKEND_CLAUDE]
-        )
+        cli.main(["run", support.PROMPT, "--now", "--backend", ledger.BACKEND_CLAUDE])
 
     assert not ledger_path.exists()
     assert cli.main(["alias", "list"]) == 0
 
 
-@pytest.mark.parametrize("label", ["", "two words"])
-def test_run_rejects_empty_or_whitespace_label(installed_launch_agent, ledger_path, label):
+@pytest.mark.parametrize(
+    "label_arguments",
+    [
+        pytest.param(["--label", ""], id="empty"),
+        pytest.param(["--label", "two words"], id="whitespace"),
+        pytest.param(["--then", "two words", support.CHILD_PROMPT], id="then-whitespace"),
+    ],
+)
+def test_run_rejects_empty_or_whitespace_label(
+    installed_launch_agent, ledger_path, label_arguments
+):
     with pytest.raises(SystemExit, match="--label"):
-        cli.main(["run", support.TASK_ID, support.PROMPT, "--now", "--label", label])
+        cli.main(["run", support.PROMPT, "--now", *label_arguments])
 
     assert not ledger_path.exists()
+
+
+def test_run_then_rejects_more_than_label_and_prompt(installed_launch_agent, ledger_path):
+    with pytest.raises(SystemExit, match="--then takes PROMPT or LABEL PROMPT"):
+        cli.main(["run", support.PROMPT, "--now", "--then", support.LABEL, "a", "b"])
+
+    assert not ledger_path.exists()
+
+
+def test_run_then_labels_only_follow_ups_given_a_label(installed_launch_agent, ledger_path):
+    assert (
+        cli.main(
+            [
+                *["run", support.PROMPT, "--now"],
+                *[
+                    "--then",
+                    support.LABEL,
+                    support.CHILD_PROMPT,
+                    "--then",
+                    support.GRANDCHILD_PROMPT,
+                ],
+            ]
+        )
+        == 0
+    )
+
+    tasks = support.read_tasks(ledger_path)
+    assert tasks[support.CHILD_ID]["label"] == support.LABEL
+    assert tasks[support.GRANDCHILD_ID]["prompt"] == support.GRANDCHILD_PROMPT
+    assert "label" not in tasks[support.GRANDCHILD_ID]
 
 
 def test_run_after_parent_label_labels_only_the_new_task(installed_launch_agent, ledger_path):
@@ -283,8 +318,8 @@ def test_run_after_parent_label_labels_only_the_new_task(installed_launch_agent,
     assert (
         cli.main(
             [
-                *["run", support.CHILD_ID, support.CHILD_PROMPT, "--after", "parent-label"],
-                *["--label", support.LABEL, "--then", support.GRANDCHILD_ID, support.PROMPT],
+                *["run", support.CHILD_PROMPT, "--after", "parent-label"],
+                *["--label", support.LABEL, "--then", support.PROMPT],
             ]
         )
         == 0

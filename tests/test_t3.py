@@ -72,7 +72,7 @@ def execute(ledger_path, task_id=support.TASK_ID):
 
 
 def run_t3_task(ledger_path, *agent_args: str):
-    command = ["run", support.TASK_ID, support.PROMPT, "--backend", "t3", "--now"]
+    command = ["run", support.PROMPT, "--backend", "t3", "--now"]
     assert cli.main([*command, "--", *agent_args]) == 0
     return execute(ledger_path)
 
@@ -183,7 +183,7 @@ def test_run_refuses_unoffered_effort_without_changing_ledger(
     t3_support.write_claude_model_cache(server.home)
     support.write_task(ledger_path, ledger.STATUS_SCHEDULED)
     tasks = support.read_tasks(ledger_path)
-    command = ["run", support.CHILD_ID, support.PROMPT, "--backend", "t3", "--now"]
+    command = ["run", support.PROMPT, "--backend", "t3", "--now"]
 
     with pytest.raises(SystemExit, match=f"{model} does not offer --effort"):
         cli.main([*command, "--", "--model", model, "--effort", "max"])
@@ -223,8 +223,8 @@ def test_run_waiting_for_answer_stops_task_until_continue(
     write_send_result(t3_server, t3.EXIT_WAITING_FOR_ANSWER, reply="Which branch?")
     cli.main(
         [
-            *["run", support.PARENT_ID, support.PARENT_PROMPT, "--backend", "t3", "--now"],
-            *["--then", support.CHILD_ID, support.CHILD_PROMPT],
+            *["run", support.PARENT_PROMPT, "--backend", "t3", "--now"],
+            *["--then", support.CHILD_PROMPT],
         ]
     )
 
@@ -336,7 +336,7 @@ def test_pickup_refuses_t3_task_without_thread(server, ledger_path, fake_command
 def test_run_does_not_store_configured_environment(installed_launch_agent, ledger_path):
     support.write_config_table("env", {"NAME": "value"})
 
-    assert cli.main(["run", support.TASK_ID, support.PROMPT, "--backend", "t3", "--now"]) == 0
+    assert cli.main(["run", support.PROMPT, "--backend", "t3", "--now"]) == 0
 
     assert "NAME" not in support.read_task(ledger_path)["environment"]
 

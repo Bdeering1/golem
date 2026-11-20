@@ -140,7 +140,7 @@ def test_invalid_usage_windows_config_fails_run_and_window_open(
     support.write_config_text(config_text)
 
     with pytest.raises(SystemExit, match=f"{entry} "):
-        cli.main(["run", support.TASK_ID, support.PROMPT, "--now"])
+        cli.main(["run", support.PROMPT, "--now"])
     assert not ledger_path.exists()
     with pytest.raises(SystemExit, match=f"{entry} "):
         cli.main(["window", "open"])

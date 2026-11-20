@@ -24,7 +24,6 @@ def test_detected_worktree_is_shared_with_dependents(
     cli.main(
         [
             "run",
-            support.PARENT_ID,
             support.PARENT_PROMPT,
             "--now",
             "--",
@@ -32,7 +31,7 @@ def test_detected_worktree_is_shared_with_dependents(
             "custom",
         ]
     )
-    cli.main(["run", support.CHILD_ID, support.CHILD_PROMPT, "--after", support.PARENT_ID])
+    cli.main(["run", support.CHILD_PROMPT, "--after", support.PARENT_ID])
 
     cli.main(
         [
@@ -50,9 +49,11 @@ def test_detected_worktree_is_shared_with_dependents(
 @pytest.mark.parametrize(
     ("aliases", "command"),
     [
-        pytest.param({}, ["run", support.CHILD_ID, support.CHILD_PROMPT], id="run"),
+        pytest.param({}, ["run", support.CHILD_PROMPT], id="run"),
         pytest.param(
-            {"impl": f'run {{1}} "{support.CHILD_PROMPT}"'}, ["impl", support.CHILD_ID], id="alias"
+            {"impl": f'run "{support.CHILD_PROMPT}" --label {{1}}'},
+            ["impl", support.LABEL],
+            id="alias",
         ),
     ],
 )
@@ -71,7 +72,6 @@ def test_directory_option_creates_then_chain_in_directory(
                 *command,
                 "--now",
                 "--then",
-                support.GRANDCHILD_ID,
                 support.GRANDCHILD_PROMPT,
             ]
         )
@@ -79,9 +79,8 @@ def test_directory_option_creates_then_chain_in_directory(
     )
 
     tasks = support.read_tasks(ledger_path)
-    assert {tasks[task_id]["cwd"] for task_id in (support.CHILD_ID, support.GRANDCHILD_ID)} == {
-        str(tmp_path / "project")
-    }
+    assert list(tasks) == ["pro1", "pro1-2"]
+    assert {task["cwd"] for task in tasks.values()} == {str(tmp_path / "project")}
 
 
 def test_directory_option_refuses_missing_directory_without_changing_ledger(ledger_path):
@@ -89,7 +88,7 @@ def test_directory_option_refuses_missing_directory_without_changing_ledger(ledg
     tasks = support.read_tasks(ledger_path)
 
     with pytest.raises(SystemExit, match="directory not found: missing"):
-        cli.main(["-C", "missing", "run", support.CHILD_ID, support.CHILD_PROMPT, "--now"])
+        cli.main(["-C", "missing", "run", support.CHILD_PROMPT, "--now"])
 
     assert support.read_tasks(ledger_path) == tasks
 
@@ -101,12 +100,10 @@ def test_no_worktree_chain_runs_in_directory_without_worktree(
     cli.main(
         [
             "run",
-            support.PARENT_ID,
             support.PARENT_PROMPT,
             "--now",
             "--no-worktree",
             "--then",
-            support.CHILD_ID,
             support.CHILD_PROMPT,
         ]
     )
@@ -143,7 +140,7 @@ def test_after_in_place_parent_runs_in_parent_directory(
         no_worktree=True,
     )
 
-    cli.main(["run", support.CHILD_ID, support.CHILD_PROMPT, "--after", support.PARENT_ID])
+    cli.main(["run", support.CHILD_PROMPT, "--after", support.PARENT_ID])
 
     child = support.read_task(ledger_path, support.CHILD_ID)
     assert child["cwd"] == str(git_repository)
@@ -174,7 +171,6 @@ def test_in_place_task_refuses_worktree_argument_without_changing_ledger(
         cli.main(
             [
                 "run",
-                support.CHILD_ID,
                 support.CHILD_PROMPT,
                 *run_arguments,
                 "--",
@@ -194,7 +190,7 @@ def test_usage_limit_resume_and_pickup_use_task_worktree(
     support.write_claude_output(
         fake_commands, support.USAGE_LIMIT_RESULT, api_error_status=claude.USAGE_LIMIT_HTTP_STATUS
     )
-    cli.main(["run", support.TASK_ID, support.PROMPT, "--now"])
+    cli.main(["run", support.PROMPT, "--now"])
     task = support.read_task(ledger_path)
     cli.main(["_execute", support.TASK_ID, task["session_id"]])
     worktree = support.read_task(ledger_path)["worktree"]
@@ -247,8 +243,8 @@ def test_claim_records_golem_worktree_resource_and_dependent_reuses_it(
     installed_launch_agent, fake_commands, git_repository, ledger_path, monkeypatch
 ):
     monkeypatch.chdir(git_repository)
-    cli.main(["run", support.PARENT_ID, support.PARENT_PROMPT, "--now"])
-    cli.main(["run", support.CHILD_ID, support.CHILD_PROMPT, "--after", support.PARENT_ID])
+    cli.main(["run", support.PARENT_PROMPT, "--now"])
+    cli.main(["run", support.CHILD_PROMPT, "--after", support.PARENT_ID])
     parent = support.read_task(ledger_path, support.PARENT_ID)
     common_directory = git.git_common_directory(str(git_repository))
     assert common_directory is not None

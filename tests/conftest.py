@@ -238,7 +238,7 @@ def fake_commands(monkeypatch, tmp_path, fake_bin_path):
     home_path = tmp_path / "home"
     state_path = tmp_path / "state"
     config_path = tmp_path / "config"
-    work_path = tmp_path / "work"
+    work_path = tmp_path / support.WORK_DIRECTORY
     work_path.mkdir()
     monkeypatch.setenv("PATH", f"{fake_bin_path}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.setenv("HOME", str(home_path))
@@ -322,7 +322,7 @@ def git_repository_template(tmp_path_factory):
 
 @pytest.fixture
 def git_repository(tmp_path, git_repository_template):
-    repository_path = tmp_path / "repository"
+    repository_path = tmp_path / support.REPOSITORY_DIRECTORY
     shutil.copytree(git_repository_template, repository_path)
     return repository_path
 

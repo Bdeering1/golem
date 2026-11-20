@@ -20,7 +20,7 @@ CLOSED_AT = "2030-03-10T13:00:00+00:00"
 def test_review_commands_record_time_and_leave_status_alone(
     installed_launch_agent, ledger_path, command, recorded_field
 ):
-    cli.main(["run", support.TASK_ID, support.PROMPT, "--now"])
+    cli.main(["run", support.PROMPT, "--now"])
     task = support.read_task(ledger_path)
     cli.main(["_execute", support.TASK_ID, task["session_id"]])
 
@@ -206,7 +206,7 @@ def test_auto_pickup_waits_for_usage_limit_resume(
     support.write_claude_output(
         fake_commands, support.USAGE_LIMIT_RESULT, api_error_status=claude.USAGE_LIMIT_HTTP_STATUS
     )
-    cli.main(["run", support.TASK_ID, support.PROMPT, "--now", "--auto-pickup"])
+    cli.main(["run", support.PROMPT, "--now", "--auto-pickup"])
     task = support.read_task(ledger_path)
 
     assert cli.main(["_execute", support.TASK_ID, task["session_id"]]) == 0
@@ -242,14 +242,17 @@ def test_auto_pickup_opens_parent_when_resumed_follow_up_fails(
             support.PARENT_ID: support.task_record(
                 ledger.STATUS_FINISHED, task_id=support.PARENT_ID, auto_pickup=True, **parent_fields
             ),
-            support.TASK_ID: support.task_record(
-                ledger.STATUS_SCHEDULED, after=support.PARENT_ID, auto_pickup=True
+            support.CHILD_ID: support.task_record(
+                ledger.STATUS_SCHEDULED,
+                task_id=support.CHILD_ID,
+                after=support.PARENT_ID,
+                auto_pickup=True,
             ),
         },
     )
 
-    assert cli.main(["_execute", support.TASK_ID, f"{support.TASK_ID}-session"]) == 1
+    assert cli.main(["_execute", support.CHILD_ID, f"{support.CHILD_ID}-session"]) == 1
     tasks = support.read_tasks(ledger_path)
-    assert tasks[support.TASK_ID]["status"] == ledger.STATUS_FAILED
+    assert tasks[support.CHILD_ID]["status"] == ledger.STATUS_FAILED
     assert tasks[support.PARENT_ID]["status"] == ledger.STATUS_FINISHED
     assert fake_commands["open-args"].read_text(encoding="utf-8") == expected_open_args

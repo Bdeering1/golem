@@ -55,7 +55,7 @@ def write_agent_run_and_expected_progress(
 
 
 def run_now(ledger_path, backend):
-    cli.main(["run", support.TASK_ID, support.PROMPT, "--backend", backend, "--now"])
+    cli.main(["run", support.PROMPT, "--backend", backend, "--now"])
     return support.read_task(ledger_path)
 
 

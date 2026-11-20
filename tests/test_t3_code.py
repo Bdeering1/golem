@@ -231,7 +231,6 @@ def write_task_with_thread(ledger_path, status=ledger.STATUS_FINISHED):
     [
         pytest.param(["delete", support.TASK_ID], id="delete"),
         pytest.param(["prune", "--yes"], id="prune"),
-        pytest.param(["run", support.TASK_ID, support.PROMPT, "--now"], id="replacement"),
     ],
 )
 def test_deleting_task_deletes_its_thread(server, installed_launch_agent, ledger_path, command):
@@ -256,9 +255,6 @@ def test_delete_refuses_while_t3_code_is_not_running(server, ledger_path):
 
 
 STARTING_COMMANDS = [
-    pytest.param(
-        ["run", support.TASK_ID, support.PROMPT, "--now"], ledger.STATUS_FINISHED, id="replacement"
-    ),
     pytest.param(["retry", support.TASK_ID, "--now"], ledger.STATUS_FAILED, id="retry"),
 ]
 

@@ -23,7 +23,7 @@ golem calls each queued session a task. Tasks run unattended, so golem turns off
 
 ```bash
 # Queue a task. --now skips the wait for your next usage reset
-golem run fix-login "Fix the login redirect" --now
+golem run "Fix the login redirect" --label fix-login --now
 
 # Follow tasks on a live TUI board. Press q to quit
 golem board
@@ -36,21 +36,21 @@ golem pickup fix-login
 
 ```bash
 # Run in Codex at 9pm
-golem run fix-signup "Fix the signup redirect" --backend codex --at 9pm
+golem run "Fix the signup redirect" --backend codex --at 9pm
 
 # Run as a T3 Code thread with Codex. --provider defaults to claude
-golem run fix-logout "Fix the logout redirect" --backend t3 -- --provider codex --model gpt-6-astra --effort high
+golem run "Fix the logout redirect" --backend t3 -- --provider codex --model gpt-6-astra --effort high
 
 # Run on another Claude account, after signing in with `golem account add claude`
-golem run fix-billing "Fix the billing page" --account work@example.com
+golem run "Fix the billing page" --account work@example.com
 
 # The script must print {"directory": "<path>"} for the task to run in
 # The review runs if the tests pass (exit code of zero). Arguments after -- go to the agent
-golem run add-auth "Add password reset" \
+golem run "Add password reset" \
   --no-worktree \
   --setup ./create-worktree.sh \
   --gate "make test" \
-  --then review-auth "Review the password reset changes and fix what you find" \
+  --then review "Review the password reset changes and fix what you find" \
   -- --permission-mode auto
 ```
 
@@ -79,7 +79,7 @@ default_backend = "codex"
 
 [aliases]
 # eg. golem review 86
-review = 'run review-{1} "Review PR {1} and fix what you find" --now'
+review = 'run "Review PR {1} and fix what you find" --label review-{1} --now'
 
 [env]
 # Set for every task. --env overrides it for one run

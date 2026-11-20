@@ -32,7 +32,7 @@ def test_passing_gate_continues_chain_and_receives_task_as_json(
         support.gate_command(tmp_path),
         "--label",
         support.LABEL,
-        then_arguments=("--then", support.GRANDCHILD_ID, support.GRANDCHILD_PROMPT),
+        then_arguments=("--then", support.GRANDCHILD_PROMPT),
     )
     support.write_transcript(parent["session_id"], 0)
     assert cli.main(["_execute", support.PARENT_ID, parent["session_id"]]) == 0
@@ -215,7 +215,7 @@ def test_task_without_waiting_follow_up_never_runs_its_gate(
     installed_launch_agent, ledger_path, tmp_path
 ):
     gate = support.gate_command(tmp_path, exit_code=1)
-    cli.main(["run", support.PARENT_ID, support.PARENT_PROMPT, "--now", "--gate", gate])
+    cli.main(["run", support.PARENT_PROMPT, "--now", "--gate", gate])
     parent = support.read_task(ledger_path, support.PARENT_ID)
 
     assert cli.main(["_execute", support.PARENT_ID, parent["session_id"]]) == 0

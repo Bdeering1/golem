@@ -10,7 +10,7 @@ def test_launch_agent_executor_uses_only_saved_environment(
     monkeypatch.setenv("LANG", support.SAVED_LANG)
     monkeypatch.setenv("LC_TIME", support.CHILD_LANG)
     monkeypatch.setenv("UNRELATED", "not-saved")
-    cli.main(["run", support.TASK_ID, support.PROMPT, "--now"])
+    cli.main(["run", support.PROMPT, "--now"])
     monkeypatch.setenv("LANG", support.CURRENT_LANG)
     monkeypatch.setenv("LC_TIME", support.CURRENT_LANG)
     monkeypatch.delenv("UNRELATED")

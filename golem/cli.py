@@ -167,6 +167,27 @@ def resolved_task_id_from_arguments(arguments: ledger.Arguments) -> str:
     return task_lookup.resolved_task_id(task_id_from_arguments(arguments))
 
 
+def require_valid_label(label: str) -> None:
+    if label.split() != [label]:
+        raise SystemExit(
+            "golem: --label and --then labels must be non-empty and contain no whitespace"
+        )
+
+
+def follow_ups_from_arguments(then: list[list[str]]) -> list[tuple[str | None, str]]:
+    follow_ups: list[tuple[str | None, str]] = []
+    for values in then:
+        match values:
+            case [prompt]:
+                follow_ups.append((None, prompt))
+            case [label, prompt]:
+                require_valid_label(label)
+                follow_ups.append((label, prompt))
+            case _:
+                raise SystemExit("golem: --then takes PROMPT or LABEL PROMPT")
+    return follow_ups
+
+
 def require_claude_account_backend(backend_id: str, agent_args: list[str]) -> None:
     agent_backend_id = registry.agent_backend_id(backend_id, agent_args)
     if agent_backend_id != ledger.BACKEND_CLAUDE:
@@ -193,10 +214,10 @@ def run_task_from_arguments(arguments: ledger.Arguments) -> int:
     is_t3 = arguments.backend == ledger.BACKEND_T3
     if is_t3 and arguments.env:
         raise SystemExit(f"golem: --env does not support {backend.NAME} tasks")
-    if arguments.label is not None and arguments.label.split() != [arguments.label]:
-        raise SystemExit("golem: --label must be non-empty and contain no whitespace")
+    if arguments.label is not None:
+        require_valid_label(arguments.label)
+    follow_ups = follow_ups_from_arguments(arguments.then)
     launch_agent.require_launch_agent()
-    task_id = task_id_from_arguments(arguments)
     prompt_text = (
         Path(arguments.file).read_text(encoding="utf-8") if arguments.file else arguments.prompt
     )
@@ -227,25 +248,17 @@ def run_task_from_arguments(arguments: ledger.Arguments) -> int:
     if placement.setup is not None and not placement.is_no_worktree:
         raise SystemExit("golem: --setup requires --no-worktree")
     follow_up_records = scheduling.new_follow_up_records(
-        task_id,
-        arguments.then,
-        task_args,
-        arguments.backend,
-        placement,
+        follow_ups, task_args, arguments.backend, placement
     )
     backend.validate_run_arguments(list(task_args))
-    exit_code = scheduling.schedule_run_task(
+    return scheduling.schedule_run_task(
         arguments,
-        task_id,
         prompt_text,
         task_args,
         follow_up_records,
         placement,
         default_clients=default_clients,
     )
-    for task_id, record in follow_up_records.items():
-        print(f"golem: {task_id} will run after {record.get('after')}")
-    return exit_code
 
 
 def add_worktree_commands(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
@@ -384,7 +397,6 @@ def add_run_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
         "run",
         description=SCHEDULE_DESCRIPTION,
     )
-    run_command.add_argument("id")
     run_command.add_argument(
         "--backend",
         choices=tuple(registry.BACKENDS),
@@ -396,10 +408,10 @@ def add_run_command(add_parser: Callable[..., argparse.ArgumentParser]) -> None:
     run_command.add_argument(
         "--then",
         action="append",
-        nargs=2,
+        nargs="+",
         default=[],
-        metavar=("ID", "PROMPT"),
-        help="run PROMPT as task ID after the previous task succeeds; repeatable",
+        metavar="[LABEL] PROMPT",
+        help="run PROMPT after the previous task succeeds, labelled LABEL if given; repeatable",
     )
     run_command.add_argument(
         "--env",

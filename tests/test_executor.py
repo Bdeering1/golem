@@ -27,10 +27,10 @@ def test_dependent_runs_in_parent_worktree_with_its_own_environment(
     monkeypatch.chdir(git_repository)
     monkeypatch.setenv("LANG", support.SAVED_LANG)
     monkeypatch.setenv("LC_TIME", support.SAVED_LANG)
-    cli.main(["run", support.PARENT_ID, support.PARENT_PROMPT, "--now"])
+    cli.main(["run", support.PARENT_PROMPT, "--now"])
     monkeypatch.setenv("LANG", support.CHILD_LANG)
     monkeypatch.delenv("LC_TIME")
-    cli.main(["run", support.CHILD_ID, support.CHILD_PROMPT, "--after", support.PARENT_ID])
+    cli.main(["run", support.CHILD_PROMPT, "--after", support.PARENT_ID])
     monkeypatch.setenv("LANG", support.CURRENT_LANG)
     monkeypatch.setenv("LC_TIME", support.CURRENT_LANG)
     if is_retried:
@@ -73,7 +73,7 @@ def test_finished_task_records_its_branch(
     monkeypatch.chdir(git_repository)
     support.git_output(git_repository, "checkout", "-qb", "feature")
     support.add_github_remote(git_repository)
-    cli.main(["run", support.TASK_ID, support.PROMPT, "--now", "--no-worktree"])
+    cli.main(["run", support.PROMPT, "--now", "--no-worktree"])
 
     cli.main(["_execute", support.TASK_ID, support.read_task(ledger_path)["session_id"]])
 
@@ -110,7 +110,7 @@ def test_run_now_records_claude_result(
 ):
     monkeypatch.setenv("GOLEM_CLAUDE_EXIT", str(exit_code))
     fake_commands["claude-stdout"].write_text(output, encoding="utf-8")
-    cli.main(["run", support.TASK_ID, support.PROMPT, "--now", "--", *support.AGENT_ARGS])
+    cli.main(["run", support.PROMPT, "--now", "--", *support.AGENT_ARGS])
     task = support.read_task(ledger_path)
 
     assert cli.main(["_execute", support.TASK_ID, task["session_id"]]) == exit_code
@@ -160,8 +160,8 @@ def test_background_work_waits_or_fails_before_starting_dependents(
     monkeypatch.setenv("GOLEM_CLAUDE_BACKGROUND_STOP", BACKGROUND_STOP_LINE)
     if settings_ceiling is not None:
         monkeypatch.setenv("GOLEM_CLAUDE_SETTINGS_CEILING", settings_ceiling)
-    cli.main(["run", support.PARENT_ID, support.PARENT_PROMPT, "--now"])
-    cli.main(["run", support.CHILD_ID, support.CHILD_PROMPT, "--after", support.PARENT_ID])
+    cli.main(["run", support.PARENT_PROMPT, "--now"])
+    cli.main(["run", support.CHILD_PROMPT, "--after", support.PARENT_ID])
     parent_session_id = support.read_task(ledger_path, support.PARENT_ID)["session_id"]
     support.write_claude_output(fake_commands, support.CLAUDE_RESULT)
 
@@ -189,7 +189,7 @@ def test_usage_limited_task_resumes_at_reset_in_same_session(
         api_error_status=claude.USAGE_LIMIT_HTTP_STATUS,
         is_verbose=is_verbose,
     )
-    cli.main(["run", support.TASK_ID, support.PROMPT, "--now", "--", *agent_args])
+    cli.main(["run", support.PROMPT, "--now", "--", *agent_args])
     session_id = support.read_task(ledger_path)["session_id"]
     monkeypatch.setenv("GOLEM_CLAUDE_EXIT", "1")
 
@@ -267,7 +267,7 @@ def test_usage_limit_pauses_task_when_background_agent_turns_follow(
 ):
     monkeypatch.setattr(claude, "next_reset_time", lambda _environment: support.RESET_TIME)
     support.write_claude_output(fake_commands, support.CLAUDE_RESULT)
-    cli.main(["run", support.TASK_ID, support.PROMPT, "--now", "--", *support.AGENT_ARGS])
+    cli.main(["run", support.PROMPT, "--now", "--", *support.AGENT_ARGS])
     session_id = support.read_task(ledger_path)["session_id"]
     background_turn = {
         "type": "assistant",
@@ -293,7 +293,7 @@ def test_usage_limited_task_fails_once_resumes_run_out(
     support.write_claude_output(
         fake_commands, support.USAGE_LIMIT_RESULT, api_error_status=claude.USAGE_LIMIT_HTTP_STATUS
     )
-    cli.main(["run", support.TASK_ID, support.PROMPT, "--now"])
+    cli.main(["run", support.PROMPT, "--now"])
     task = support.read_task(ledger_path)
     cli.main(["_execute", support.TASK_ID, task["session_id"]])
     for _ in range(executor.MAX_USAGE_LIMIT_RESUMES):
@@ -331,7 +331,7 @@ def test_scheduled_task_runs_when_executed(
     installed_launch_agent, fake_commands, ledger_path, monkeypatch
 ):
     monkeypatch.setattr(scheduling, "scheduled_time", lambda _: support.RESET_TIME)
-    cli.main(["run", support.TASK_ID, support.PROMPT, "--at", support.AT_TEXT])
+    cli.main(["run", support.PROMPT, "--at", support.AT_TEXT])
     task = support.read_task(ledger_path)
     assert datetime.fromisoformat(task["due_at"]) == support.RESET_TIME
     support.set_task_due_now(ledger_path)
@@ -359,7 +359,7 @@ def test_executor_death_keeps_task_running_until_claude_exits(
     hold_path.touch()
     monkeypatch.setenv("GOLEM_CLAUDE_HOLD", str(hold_path))
     monkeypatch.setenv("GOLEM_CLAUDE_STARTED", str(started_path))
-    cli.main(["run", support.TASK_ID, support.PROMPT, "--now"])
+    cli.main(["run", support.PROMPT, "--now"])
     task = support.read_task(ledger_path)
     executor_process = spawn.start_task_executor(support.TASK_ID, task)
 
