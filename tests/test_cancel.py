@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from golem import cli, ledger, locks, progress_log, scheduling, spawn, task_processes
+from golem import cli, ledger, locks, progress_log, spawn, t3_code, task_processes
 from tests import support
 
 HELD_COMMAND = "sleep 30"
@@ -145,12 +145,25 @@ def test_cancel_stopped_task_cancels_dependents_and_leaves_processes_alone(
     stop_calls = []
     monkeypatch.setattr(task_processes, "stop_agent", stop_calls.append)
     monkeypatch.setattr(task_processes, "stop_command_process_group", stop_calls.append)
-    monkeypatch.setattr(scheduling.t3_code, "stop_thread", stop_calls.append)
+    monkeypatch.setattr(t3_code, "stop_thread", stop_calls.append)
 
     assert cli.main(["cancel", support.PARENT_ID]) == 0
 
     statuses = {task["status"] for task in support.read_tasks(ledger_path).values()}
     assert statuses == {ledger.STATUS_CANCELLED}
+    assert stop_calls == []
+
+
+@pytest.mark.parametrize("status", [ledger.STATUS_RUNNING, ledger.STATUS_FINISHED])
+def test_cancel_leaves_stale_recorded_processes_alone(ledger_path, monkeypatch, status):
+    support.write_task(ledger_path, status, agent_pid=1, command_process_group=1)
+    stop_calls = []
+    monkeypatch.setattr(task_processes, "stop_agent", stop_calls.append)
+    monkeypatch.setattr(task_processes, "stop_command_process_group", stop_calls.append)
+
+    assert cli.main(["cancel", support.TASK_ID]) == 0
+
+    assert support.read_task(ledger_path)["status"] == ledger.STATUS_CANCELLED
     assert stop_calls == []
 
 
@@ -166,7 +179,7 @@ def test_cancel_refuses_done_tasks(ledger_path, status):
 
 def test_cancel_reports_task_still_stopping(ledger_path, monkeypatch):
     support.write_task(ledger_path, ledger.STATUS_RUNNING)
-    monkeypatch.setattr(scheduling, "RUN_LOCK_WAIT_SECONDS", 0.1)
+    monkeypatch.setattr(task_processes, "RUN_LOCK_WAIT_SECONDS", 0.1)
     run_lock_file = locks.acquire_run_lock(support.read_task(ledger_path)["session_id"])
     assert run_lock_file is not None
 

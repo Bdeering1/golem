@@ -1,5 +1,4 @@
 import os
-import time
 import uuid
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -9,7 +8,6 @@ from golem import (
     chains,
     launch_agent,
     ledger,
-    locks,
     progress_log,
     spawn,
     t3_code,
@@ -19,8 +17,6 @@ from golem import (
 )
 from golem.backends import claude_hooks, common, registry
 from golem.worktrees import task_directories
-
-RUN_LOCK_WAIT_SECONDS = 10
 
 
 def new_session_id() -> str:
@@ -95,33 +91,6 @@ def print_dependents(records: ledger.Tasks) -> None:
         print(f"golem: {task_id} will run after {record.get('after')}")
 
 
-def wait_for_run_lock(task_id: str, session_id: str) -> None:
-    deadline = time.monotonic() + RUN_LOCK_WAIT_SECONDS
-    while not locks.is_run_lock_free(session_id):
-        if time.monotonic() >= deadline:
-            raise SystemExit(f"golem: task cancelled, but it is still stopping: {task_id}")
-        time.sleep(task_processes.STOP_POLL_SECONDS)
-
-
-def stop_task_processes(task_id: str, task: ledger.Task, previous_status: str) -> None:
-    if previous_status not in {ledger.STATUS_RUNNING, ledger.STATUS_FINISHED}:
-        return
-    command_process_group = task.get("command_process_group")
-    if command_process_group is not None:
-        task_processes.stop_command_process_group(command_process_group)
-    thread_id = task.get("t3_code_thread_id")
-    if (
-        task["backend"] == ledger.BACKEND_T3
-        and previous_status == ledger.STATUS_RUNNING
-        and thread_id is not None
-    ):
-        t3_code.stop_thread(thread_id)
-    agent_pid = task.get("agent_pid")
-    if agent_pid is not None:
-        task_processes.stop_agent(agent_pid)
-    wait_for_run_lock(task_id, task["session_id"])
-
-
 def cancel_task(task_id: str) -> int:
     with ledger.locked_tasks() as tasks:
         if task_id not in tasks:
@@ -142,7 +111,7 @@ def cancel_task(task_id: str) -> int:
         cancelled_task = task.copy()
     for directory in directories:
         claude_hooks.sync_hooks(directory)
-    stop_task_processes(task_id, cancelled_task, previous_status)
+    task_processes.stop_task_processes(task_id, cancelled_task, previous_status)
     return 0
 
 
