@@ -104,6 +104,8 @@ def wait_for_run_lock(task_id: str, session_id: str) -> None:
 
 
 def stop_task_processes(task_id: str, task: ledger.Task, previous_status: str) -> None:
+    if previous_status not in {ledger.STATUS_RUNNING, ledger.STATUS_FINISHED}:
+        return
     command_process_group = task.get("command_process_group")
     if command_process_group is not None:
         task_processes.stop_command_process_group(command_process_group)

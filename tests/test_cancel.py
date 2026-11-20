@@ -143,6 +143,26 @@ def test_cancel_accepts_started_tasks_and_cancels_waiting_dependents(ledger_path
     assert statuses == {ledger.STATUS_CANCELLED}
 
 
+@pytest.mark.parametrize("status", [ledger.STATUS_FAILED, ledger.STATUS_BLOCKED])
+def test_cancel_leaves_processes_and_thread_of_stopped_task_alone(ledger_path, monkeypatch, status):
+    support.write_task(
+        ledger_path,
+        status,
+        backend=ledger.BACKEND_T3,
+        agent_pid=1,
+        command_process_group=1,
+        t3_code_thread_id="thread",
+    )
+    stop_calls = []
+    monkeypatch.setattr(task_processes, "stop_agent", stop_calls.append)
+    monkeypatch.setattr(task_processes, "stop_command_process_group", stop_calls.append)
+    monkeypatch.setattr(scheduling.t3_code, "stop_thread", stop_calls.append)
+
+    assert cli.main(["cancel", support.TASK_ID]) == 0
+
+    assert stop_calls == []
+
+
 @pytest.mark.parametrize("status", [ledger.STATUS_FINISHED, ledger.STATUS_CANCELLED])
 def test_cancel_refuses_done_tasks(ledger_path, status):
     support.write_task(ledger_path, status)
