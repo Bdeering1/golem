@@ -22,13 +22,13 @@ golem agent install
 golem calls each queued session a task. Tasks run unattended, so golem turns off permission prompts unless you pass your own permission flag.
 
 ```bash
-# Queue a task. --now skips the wait for your next usage reset
+# Start a task
 golem run "Fix the login redirect" --label fix-login --now
 
-# Follow tasks on a live TUI board. Press q to quit
+# Track tasks on a live TUI board
 golem board
 
-# Open its session to review the result
+# Open a task's session
 golem pickup fix-login
 ```
 
@@ -38,14 +38,17 @@ golem pickup fix-login
 # Run in Codex at 9pm
 golem run "Fix the signup redirect" --backend codex --at 9pm
 
-# Run as a T3 Code thread with Codex. --provider defaults to claude
-golem run "Fix the logout redirect" --backend t3 -- --provider codex --model gpt-6-astra --effort high
+# Run a Codex task as a T3 Code thread (--provider defaults to claude)
+golem run "Fix the logout redirect"
+  --backend t3
+  -- --provider codex --model gpt-6-astra --effort high
 
-# Run on another Claude account, after signing in with `golem account add claude`
+# Run a task on another account (added using `golem account add claude`)
 golem run "Fix the billing page" --account work@example.com
 
 # The script must print {"directory": "<path>"} for the task to run in
-# The review runs if the tests pass (exit code of zero). Arguments after -- go to the agent
+# The review runs if the gate's exit code is zero
+# Arguments after -- are passed through to `claude -p`
 golem run "Add password reset" \
   --no-worktree \
   --setup ./create-worktree.sh \
@@ -74,27 +77,24 @@ golem run "Add password reset" \
 golem reads `~/.config/golem/config.toml`, or the same path under `$XDG_CONFIG_HOME`.
 
 ```toml
-# golem run uses this backend unless you pass --backend. Defaults to claude
-default_backend = "codex"
+default_backend = "codex" # Claude is the default if unspecified
 
+# Shell aliases with template args
 [aliases]
-# eg. golem review 86
 review = 'run "Review PR {1} and fix what you find" --label review-{1} --now'
 
+# Env variables to set for every task
 [env]
-# Set for every task. --env overrides it for one run
 NODE_ENV = "development"
 
 [usage_windows]
-# Open a usage window on the default account at these times each day
-claude = ["6am", "11am"]
-# Name another account by its email or number from `golem account list`
-"work@example.com" = ["8am", "1pm"]
+claude = ["6am", "11am"] # Open a usage window at these times each day (default account)
+"work@example.com" = ["8am", "1pm"] # Define usage windows for another account
 ```
 
 Worktrees stay on disk after you delete their task. To clean them up:
 
 ```bash
-# Remove them after 14 days, unless they have local changes
+# Remove after 14 days, unless there are local changes
 golem worktree auto-remove --after 14
 ```
