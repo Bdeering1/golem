@@ -772,21 +772,18 @@ def fitted_task_id(task_id: str, width: int, glyphs: Glyphs) -> str:
     return f"{head.rstrip('-')}{glyphs.ellipsis}{tail}"
 
 
-def fitted_task_name(task_id: str, label: str | None, width: int, glyphs: Glyphs) -> str:
-    id_text = fitted_task_id(task_id, width, glyphs)
+def fitted_chain_name(tasks: ledger.Tasks, task_id: str, width: int, glyphs: Glyphs) -> str:
+    root_id = chains.root_task_id(tasks, task_id)
+    label = tasks[root_id].get("label")
+    id_text = fitted_task_id(root_id, width, glyphs)
     if label is None:
         return id_text
-    if len(task_id) + 1 + len(label) <= width:
-        return f"{task_id} {label}"
+    if len(root_id) + 1 + len(label) <= width:
+        return f"{root_id} {label}"
     label_width = width - len(id_text) - 1
     if label_width <= len(glyphs.ellipsis):
         return id_text
     return f"{id_text} {fitted(label, label_width, glyphs)}"
-
-
-def fitted_chain_name(tasks: ledger.Tasks, task_id: str, width: int, glyphs: Glyphs) -> str:
-    root_id = chain_name(tasks, task_id)
-    return fitted_task_name(root_id, tasks[root_id].get("label"), width, glyphs)
 
 
 def duration_text(seconds: float) -> str:
@@ -1969,10 +1966,10 @@ def task_heading_parts(
     facts = [text for text in (when, f"step {step}" if step else "") if text]
     facts_text = f" {glyphs.separator} ".join(facts)
     facts_text = f"  {facts_text}" if facts_text else ""
-    task_id = fitted_chain_name(snapshot.tasks, row.task_id, line_width - len(status_text), glyphs)
-    facts_text = fitted(facts_text, max(0, line_width - len(task_id) - len(status_text)), glyphs)
+    title = fitted_chain_name(snapshot.tasks, row.task_id, line_width - len(status_text), glyphs)
+    facts_text = fitted(facts_text, max(0, line_width - len(title) - len(status_text)), glyphs)
     return [
-        (task_id, STYLE_BOLD, None),
+        (title, STYLE_BOLD, None),
         (status_text, STYLE_PLAIN, color),
         (facts_text, STYLE_DIM, None),
     ]
@@ -2004,21 +2001,13 @@ def detail_reason_text(row: display.ListRow, snapshot: BoardSnapshot) -> str:
     return row_reason(row, snapshot)
 
 
-def chain_name(tasks: ledger.Tasks, task_id: str) -> str:
-    parent_id = tasks[task_id].get("after")
-    while parent_id is not None and parent_id in tasks:
-        task_id = parent_id
-        parent_id = tasks[task_id].get("after")
-    return task_id
-
-
 def step_name(tasks: ledger.Tasks, task_id: str) -> str:
-    root_id = chain_name(tasks, task_id)
+    root_id = chains.root_task_id(tasks, task_id)
     return "" if task_id == root_id else task_id.removeprefix(f"{root_id}-")
 
 
 def chain_display_name(tasks: ledger.Tasks, task_id: str) -> str:
-    root_id = chain_name(tasks, task_id)
+    root_id = chains.root_task_id(tasks, task_id)
     return ledger.task_name(root_id, tasks[root_id])
 
 
@@ -2116,14 +2105,13 @@ def status_line_segments(
 ) -> list[Segment] | None:
     if state.pending_action == ACTION_CLOSE_ALL:
         closable_count = len(closable_task_ids(snapshot))
-        verb, step_suffix, label = "Close", "", None
-        name_id = name = (
+        verb, step_suffix, task_id = "Close", "", None
+        name = (
             f"{'all ' if closable_count > 1 else ''}{counted_text(closable_count, 'finished task')}"
         )
     elif state.pending_action is not None and row is not None:
         verb = ACTION_LABELS[state.pending_action].capitalize()
-        name_id = chain_name(snapshot.tasks, row.task_id)
-        label = snapshot.tasks[name_id].get("label")
+        task_id = row.task_id
         name = chain_display_name(snapshot.tasks, row.task_id)
         step = step_display_name(snapshot.tasks, row.task_id)
         step_suffix = f" ({step})" if step else ""
@@ -2135,7 +2123,12 @@ def status_line_segments(
     if len(verb) + len(name) + len(step_suffix) + len(answer) + 4 >= width:
         answer = CONFIRM_SHORT_ANSWER_TEXT
     name_width = width - len(verb) - len(answer) - 5 - len(step_suffix)
-    subject = f"{fitted_task_name(name_id, label, name_width, glyphs)}{step_suffix}"
+    fitted_name = (
+        fitted(name, name_width, glyphs)
+        if task_id is None
+        else fitted_chain_name(snapshot.tasks, task_id, name_width, glyphs)
+    )
+    subject = f"{fitted_name}{step_suffix}"
     prompt = f"{verb} {subject}? "
     return [
         Segment(y, 0, prompt, STYLE_BOLD),
