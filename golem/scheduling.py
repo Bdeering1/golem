@@ -136,7 +136,9 @@ def schedule_new_task(
 ) -> int:
     due_time = when or datetime.now(UTC).astimezone()
     record = new_task_record(placement, prompt, agent_args, due_time, backend, label=label)
-    prefix = task_ids.task_id_prefix(task_ids.repository_name(placement.cwd))
+    prefix = (
+        task_ids.task_id_prefix(task_ids.repository_name(placement.cwd)) if after is None else ""
+    )
     with ledger.locked_tasks() as tasks:
         if after is not None and chains.is_dependent_reservable(tasks, after):
             raise SystemExit(f"golem: parent task changed: {after}")
@@ -145,9 +147,9 @@ def schedule_new_task(
             tasks[task_id] = record
         else:
             task_id = next(iter(task_ids.insert_dependents(tasks, [record], after)))
-        follow_ups = task_ids.insert_dependents(tasks, follow_up_records, task_id)
+        inserted_follow_ups = task_ids.insert_dependents(tasks, follow_up_records, task_id)
     exit_code = launch_agent.wake_launch_agent_and_report(task_id, due_time)
-    print_dependents(follow_ups)
+    print_dependents(inserted_follow_ups)
     return exit_code
 
 
