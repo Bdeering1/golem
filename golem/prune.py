@@ -72,7 +72,7 @@ def picked_asked_indices(
     if not board.is_terminal():
         return set(), True
     picked_indices = picker.picked_indices(
-        "Prune these Done chains",
+        "Pick which tasks to prune",
         [chain_row(tasks, candidates[index]) for index in asked_indices],
         "prune",
         is_multi_select=True,
