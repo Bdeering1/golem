@@ -221,7 +221,7 @@ THREAD_STATE_TEXTS = {"thread unsettled": "thread open, no PR"}
 SHORT_REASON_TEXTS = {"thread open, no PR": "thread, no PR"}
 EMPTY_BOARD_LINES = ("No tasks yet", "Queue one with", 'golem run "<prompt>"')
 UNAVAILABLE_ACTION_TEXTS = {
-    ACTION_PICKUP: "Only blocked, failed, finished or started cancelled tasks can be picked up",
+    ACTION_PICKUP: "This task can't be picked up",
     ACTION_WATCH: "This task has no log yet",
     ACTION_OPEN_PULL_REQUEST: "This task has no pull request",
     ACTION_RETRY: "Only failed, cancelled or blocked tasks can be retried",
