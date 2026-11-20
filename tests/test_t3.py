@@ -69,6 +69,7 @@ ENDED_SUBAGENT = {
     "updatedAt": SUBAGENT_ENDED_AT,
 }
 LATER_FAILURE_MESSAGE = "later run failed"
+MAX_FOLLOW_UP_SLEEPS = 20
 CLAUDE_TRANSCRIPT = f".claude/projects/project/{NATIVE_SESSION_ID}.jsonl"
 CODEX_TRANSCRIPT = (
     f".codex/sessions/2030/01/01/rollout-2030-01-01T10-00-00-{NATIVE_SESSION_ID}.jsonl"
@@ -121,7 +122,16 @@ def t3_server(server, installed_launch_agent):
 
 @pytest.fixture
 def follow_ups(t3_server, monkeypatch):
-    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+    sleep_count = 0
+
+    def bounded_sleep(seconds: float) -> None:
+        if seconds != t3.PROJECTION_POLL_SECONDS:
+            return
+        nonlocal sleep_count
+        sleep_count += 1
+        assert sleep_count < MAX_FOLLOW_UP_SLEEPS, "golem kept waiting on a quiet thread"
+
+    monkeypatch.setattr(time, "sleep", bounded_sleep)
     return t3_server.follow_up_projections
 
 
@@ -458,6 +468,24 @@ def test_background_subagent_keeps_task_running_until_the_later_run_ends(
     task = run_t3_task(ledger_path)
 
     assert task["status"] == ledger.STATUS_FINISHED
+    assert task["result"] == LATER_REPLY
+
+
+def test_question_in_later_run_blocks_task(t3_server, follow_ups, ledger_path):
+    follow_ups[:] = [
+        projection(
+            ENDED_SUBAGENT,
+            later_run_message(LATER_REPLY),
+            runs=[FIRST_RUN_ENDED, {**LATER_RUN, "status": "waiting"}],
+            sessions=[READY_SESSION],
+        )
+        | {"runtimeRequests": [{"id": "request", "status": "pending"}]}
+    ]
+
+    task = run_t3_task(ledger_path)
+
+    assert task["status"] == ledger.STATUS_BLOCKED
+    assert task["gate_stop_reason"] == t3.WAITING_FOR_ANSWER_REASON
     assert task["result"] == LATER_REPLY
 
 

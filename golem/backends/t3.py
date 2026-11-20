@@ -347,7 +347,7 @@ def waiting_outcome(reply_text: str | None) -> common.RunOutcome:
     )
 
 
-def failure_outcome(
+def failed_run_outcome(
     returncode: int, failure: ledger.JsonObject, *messages: object
 ) -> common.RunOutcome:
     result = next((text for text in messages if isinstance(text, str) and text), None)
@@ -370,7 +370,7 @@ def send_outcome(
     if returncode == EXIT_WAITING_FOR_ANSWER:
         return waiting_outcome(reply_text)
     failure = watcher.last_failure()
-    return failure_outcome(
+    return failed_run_outcome(
         returncode,
         failure,
         output.get("error"),
@@ -437,13 +437,14 @@ def latest_run_outcome(
     watcher: ThreadWatcher,
 ) -> common.RunOutcome:
     run = t3_code.latest_run(projection)
-    if run is None or run.get("id") == output.get("runId"):
+    sent_run_id = output.get("runId")
+    if run is None or not isinstance(sent_run_id, str) or run.get("id") == sent_run_id:
         return outcome
     watcher.run_id = cast("str | None", run.get("id"))
     if run.get("status") == COMPLETED_STATUS:
         return common.RunOutcome(0, last_reply(projection, run), is_usage_limit=False)
     failure = watcher.last_failure()
-    return failure_outcome(1, failure, failure.get("message"), run.get("status"))
+    return failed_run_outcome(1, failure, failure.get("message"), run.get("status"))
 
 
 def wait_for_quiet_thread(
