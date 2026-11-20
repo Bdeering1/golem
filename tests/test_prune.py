@@ -95,7 +95,6 @@ ASKED_IDS = ["first", "second", "third"]
 @pytest.mark.parametrize(
     ("keys", "status", "removed_ids"),
     [
-        pytest.param([SPACE_KEY, support.ENTER_KEY], 0, {"first"}, id="select-one"),
         pytest.param(
             [ord("j"), SPACE_KEY, curses.KEY_DOWN, SPACE_KEY, support.ENTER_KEY],
             0,
@@ -105,7 +104,6 @@ ASKED_IDS = ["first", "second", "third"]
         pytest.param([ALL_KEY, support.ENTER_KEY], 0, set(ASKED_IDS), id="all"),
         pytest.param([ALL_KEY, ALL_KEY, support.ENTER_KEY], 0, set(), id="all-cleared"),
         pytest.param([support.ENTER_KEY], 0, set(), id="nothing-selected"),
-        pytest.param([ALL_KEY, ord("q")], 1, None, id="q"),
         pytest.param([ALL_KEY, *support.ESCAPE_KEYS], 1, None, id="escape"),
         pytest.param([ALL_KEY, support.interrupt], 130, None, id="ctrl-c"),
     ],

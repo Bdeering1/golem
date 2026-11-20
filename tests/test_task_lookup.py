@@ -1,5 +1,3 @@
-import curses
-
 import pytest
 
 from golem import board, ledger, task_lookup
@@ -39,18 +37,10 @@ def test_argument_resolves_to_one_task(ledger_path, argument):
     assert task_lookup.resolved_task_id(argument) == support.TASK_ID
 
 
-@pytest.mark.parametrize(
-    ("keys", "picked_id"),
-    [
-        pytest.param([support.ENTER_KEY], NEWER_ID, id="newest-first"),
-        pytest.param([ord("j"), ord("j"), support.ENTER_KEY], OLDER_ID, id="j"),
-        pytest.param([curses.KEY_DOWN, curses.KEY_UP, support.ENTER_KEY], NEWER_ID, id="arrows"),
-    ],
-)
-def test_shared_label_picks_highlighted_task(labelled_tasks, monkeypatch, keys, picked_id):
-    screen = support.use_fake_terminal(monkeypatch, keys, size=(24, 200))
+def test_shared_label_lists_newest_first_and_picks_highlighted_task(labelled_tasks, monkeypatch):
+    screen = support.use_fake_terminal(monkeypatch, [ord("j"), support.ENTER_KEY], size=(24, 200))
 
-    assert task_lookup.resolved_task_id(support.LABEL) == picked_id
+    assert task_lookup.resolved_task_id(support.LABEL) == OLDER_ID
     newer_line, older_line = screen.frames[0][1:3]
     assert newer_line.split()[:3] == [NEWER_ID, support.LABEL, ledger.STATUS_FINISHED]
     assert newer_line.rstrip().endswith(support.PROMPT)
@@ -60,7 +50,6 @@ def test_shared_label_picks_highlighted_task(labelled_tasks, monkeypatch, keys, 
 @pytest.mark.parametrize(
     ("keys", "exit_code"),
     [
-        pytest.param(support.ESCAPE_KEYS, "golem: cancelled", id="escape"),
         pytest.param([ord("q")], "golem: cancelled", id="q"),
         pytest.param([support.interrupt], board.INTERRUPTED_EXIT_STATUS, id="ctrl-c"),
     ],

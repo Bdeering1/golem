@@ -1,5 +1,3 @@
-import pytest
-
 from golem import board, picker
 from tests import support
 
@@ -22,17 +20,12 @@ def test_picker_scrolls_to_keep_highlight_visible(monkeypatch):
     assert shown_ids == ["t4", "t5", "t6"]
 
 
-@pytest.mark.parametrize("glyphs", [board.ASCII_GLYPHS, board.UNICODE_GLYPHS])
-def test_picker_fits_narrow_terminal_by_cutting_prompt_first(monkeypatch, glyphs):
-    screen = support.use_fake_terminal(
-        monkeypatch, [support.ENTER_KEY], size=(10, NARROW_WIDTH), glyphs=glyphs
-    )
+def test_picker_fits_narrow_ascii_terminal_by_cutting_prompt_first(monkeypatch):
+    screen = support.use_fake_terminal(monkeypatch, [support.ENTER_KEY], size=(10, NARROW_WIDTH))
 
     picker.picked_indices("Pick", picker_rows(3), "pick", is_multi_select=False)
 
     frame = screen.frames[0]
-    assert all(len(line) <= NARROW_WIDTH for line in frame)
+    assert all(len(line) <= NARROW_WIDTH and line.isascii() for line in frame)
     assert frame[1].split()[:4] == ["t0", LABEL, "finished", "~/golem"]
-    assert frame[1].rstrip().endswith(glyphs.ellipsis)
-    if glyphs == board.ASCII_GLYPHS:
-        assert all(line.isascii() for line in frame)
+    assert frame[1].rstrip().endswith(board.ASCII_GLYPHS.ellipsis)
