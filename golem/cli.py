@@ -14,7 +14,6 @@ if TYPE_CHECKING:
 from golem import (
     accounts,
     board,
-    clients,
     config,
     delete,
     display,
@@ -28,9 +27,10 @@ from golem import (
     scheduling,
     task_lookup,
     usage_windows,
-    worktree_cleanup,
 )
 from golem.backends import claude_hooks, common, registry
+from golem.clients import client_registry
+from golem.worktrees import worktree_cleanup
 
 SCHEDULE_DESCRIPTION = "Run at the next usage reset, or immediately if no usage window is active."
 ALIAS_PLACEHOLDER_PATTERN = re.compile(r"\{(\d+)\}")
@@ -87,7 +87,7 @@ def load_default_backend() -> str:
 
 
 def load_default_clients() -> dict[str, str]:
-    return clients.default_clients(
+    return client_registry.default_clients(
         load_string_table("default_clients", "default client"),
         config.invalid_config_message_prefix(),
     )
@@ -459,7 +459,7 @@ def add_pickup_command(add_parser: Callable[..., argparse.ArgumentParser]) -> No
     pickup_command.add_argument(
         "-c",
         "--client",
-        choices=tuple(clients.CLIENTS),
+        choices=tuple(client_registry.CLIENTS),
         help=(
             "open the task in this client; claude-desktop and codex-app use their apps' default "
             "permission modes and t3-code uses full access"
@@ -665,7 +665,7 @@ def apply_leading_directory_options(golem_args: list[str]) -> list[str]:
 
 
 def validate_pickup_arguments(parser: argparse.ArgumentParser, arguments: ledger.Arguments) -> None:
-    client = clients.CLIENTS[arguments.client] if arguments.client else None
+    client = client_registry.CLIENTS[arguments.client] if arguments.client else None
     if arguments.agent_args and client is not None and not client.is_terminal:
         parser.error(f"pickup --client {client.name} does not accept agent arguments")
     if arguments.all and arguments.agent_args:

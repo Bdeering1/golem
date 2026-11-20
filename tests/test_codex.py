@@ -7,8 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from golem import cli, executor, git, launch_agent, ledger, spawn, task_directories
+from golem import cli, executor, launch_agent, ledger, spawn
 from golem.backends import claude, codex, common
+from golem.worktrees import git, task_directories
 from tests import support
 
 

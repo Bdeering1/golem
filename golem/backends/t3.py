@@ -13,8 +13,9 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-from golem import accounts, ledger, progress_log, t3_code, task_directories
+from golem import accounts, ledger, progress_log, t3_code
 from golem.backends import claude, codex, common
+from golem.worktrees import task_directories
 
 NAME: str = "T3 Code"
 PROVIDER_ARGUMENT = "--provider"

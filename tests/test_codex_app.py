@@ -3,7 +3,8 @@ from pathlib import Path
 
 import pytest
 
-from golem import cli, clients, codex_app, ledger
+from golem import cli, ledger
+from golem.clients import client_registry, codex_app
 from tests import support
 
 APP_VERSION = "1.2.3"
@@ -70,7 +71,7 @@ def test_pickup_opens_codex_thread_in_app(
     set_app_lock_holder(monkeypatch, fake_commands, app, link_count)
     write_codex_task(ledger_path)
 
-    assert cli.main(["pickup", support.TASK_ID, "--client", clients.CODEX_APP_CLIENT]) == 0
+    assert cli.main(["pickup", support.TASK_ID, "--client", client_registry.CODEX_APP_CLIENT]) == 0
 
     assert fake_commands["open-args"].read_text(encoding="utf-8").splitlines() == [
         f"-b {codex_app.APP_BUNDLE_ID}",
@@ -132,7 +133,7 @@ def test_failed_pickup_leaves_codex_task_needing_review(
     write_codex_task(ledger_path)
 
     with pytest.raises(SystemExit, match=message):
-        cli.main(["pickup", support.TASK_ID, "--client", clients.CODEX_APP_CLIENT])
+        cli.main(["pickup", support.TASK_ID, "--client", client_registry.CODEX_APP_CLIENT])
 
     assert support.read_task(ledger_path)["status"] == ledger.STATUS_FINISHED
     assert sent_links(fake_commands) == []

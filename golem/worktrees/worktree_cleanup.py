@@ -9,7 +9,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Generator
 
-from golem import git, ledger, locks, task_directories
+from golem import ledger, locks
+from golem.worktrees import git, task_directories
 
 CLAUDE_LOCK_PATTERN = re.compile(r"claude session (\S+) \(pid (\d+) start .+\)")
 

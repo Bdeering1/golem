@@ -13,7 +13,8 @@ from urllib import parse
 from websockets.exceptions import WebSocketException
 from websockets.sync import client as websocket_client
 
-from golem import git, ledger
+from golem import ledger
+from golem.worktrees import git
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -68,12 +69,6 @@ def task_thread_id(task: ledger.Task, conversation_id: str) -> str:
     if task["backend"] == ledger.BACKEND_T3:
         return conversation_id
     return f"golem:{task['backend']}:{conversation_id}"
-
-
-def thread_link(task: ledger.Task, conversation_id: str) -> str:
-    environment_id = (t3_home() / "userdata" / "environment-id").read_text(encoding="utf-8")
-    encoded_thread_id = parse.quote(task_thread_id(task, conversation_id), safe="")
-    return f"t3code://threads/{environment_id.strip()}/{encoded_thread_id}"
 
 
 def recorded_thread_ids(tasks: Iterable[ledger.Task]) -> list[str]:
@@ -363,60 +358,8 @@ def thread_create_command(
     }
 
 
-def ensure_thread(
-    task_id: str,
-    task: ledger.Task,
-    conversation_id: str,
-    thread_id: str,
-    instance: ClaudeInstance | None,
-) -> None:
-    ensure_app_running()
-    is_present = is_thread_present(thread_id)
-    if is_present and instance is None:
-        return
-    if not is_present and task["backend"] == ledger.BACKEND_T3:
-        raise T3CodeError("thread does not exist in T3 Code")
-    origin = server_origin()
-    token = issue_token()
-    if instance is not None:
-        upsert_claude_instance(origin, token, instance)
-    if is_present:
-        return
-    driver = INSTANCE_IDS[task["backend"]]
-    command = thread_create_command(
-        origin,
-        token,
-        task,
-        thread_id,
-        thread_instance_id(driver, instance),
-        default_model(driver),
-        task_id=task_id,
-    )
-    command["importedNativeThread"] = {
-        "ref": {"driver": driver, "nativeId": conversation_id, "strength": "strong"}
-    }
-    dispatch_command(origin, token, command)
-    if not is_thread_present(thread_id):
-        raise T3CodeError("thread is missing after thread.create")
-
-
 def version() -> str:
     return run_t3("--version").stdout.strip()
-
-
-def prepare_thread(
-    task_id: str, task: ledger.Task, conversation_id: str, instance: ClaudeInstance | None
-) -> None:
-    cli_path = t3_cli_path()
-    if not cli_path.exists():
-        raise SystemExit(f"golem: T3 Code is not installed: {cli_path} not found")
-    thread_id = task_thread_id(task, conversation_id)
-    try:
-        ensure_thread(task_id, task, conversation_id, thread_id, instance)
-    except T3_CODE_ERRORS as error:
-        raise SystemExit(
-            f"golem: T3 Code {version()} could not open thread {thread_id}: {error}"
-        ) from error
 
 
 def print_delete_failure(thread_id: str, error: Exception) -> None:

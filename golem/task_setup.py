@@ -6,8 +6,9 @@ from typing import TYPE_CHECKING, cast
 if TYPE_CHECKING:
     import io
 
-from golem import chains, gates, git, ledger, locks, notifications, spawn
+from golem import chains, gates, ledger, locks, notifications, spawn
 from golem.backends import registry
+from golem.worktrees import git
 
 SETUP_OUTPUT_ERROR = (
     "setup output must be a JSON object with optional string directory and prompt_suffix"

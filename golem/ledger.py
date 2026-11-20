@@ -264,6 +264,10 @@ def task_directory(task: Task) -> str:
     return task["cwd"]
 
 
+def has_auto_pickup(task: Task) -> bool:
+    return "auto_pickup_client" in task or task.get("auto_pickup", False)
+
+
 def directory_to_lock(task: Task, worktree: str | None) -> str:
     return worktree if worktree is not None else task["cwd"]
 

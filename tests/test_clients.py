@@ -1,6 +1,7 @@
 import pytest
 
-from golem import cli, clients, ledger, review
+from golem import cli, ledger, review
+from golem.clients import client_registry
 from tests import support
 
 STUB_TERMINAL_CLIENT = "stub-terminal"
@@ -8,7 +9,7 @@ STUB_APP_CLIENT = "stub-app"
 
 
 def stub_client(name, *, is_terminal, program):
-    return clients.Client(
+    return client_registry.Client(
         name=name,
         backend_ids=frozenset({ledger.BACKEND_CLAUDE}),
         is_terminal=is_terminal,
@@ -23,12 +24,12 @@ def stub_client(name, *, is_terminal, program):
 @pytest.fixture
 def stub_clients(monkeypatch):
     monkeypatch.setitem(
-        clients.CLIENTS,
+        client_registry.CLIENTS,
         STUB_TERMINAL_CLIENT,
         stub_client(STUB_TERMINAL_CLIENT, is_terminal=True, program="claude"),
     )
     monkeypatch.setitem(
-        clients.CLIENTS,
+        client_registry.CLIENTS,
         STUB_APP_CLIENT,
         stub_client(STUB_APP_CLIENT, is_terminal=False, program="open"),
     )
@@ -147,7 +148,7 @@ def test_follow_up_after_auto_pickup_parent_uses_its_backends_default(
 
     tasks = support.read_tasks(ledger_path)
     assert tasks[support.CHILD_ID]["auto_pickup_client"] == STUB_APP_CLIENT
-    assert tasks[support.GRANDCHILD_ID]["auto_pickup_client"] == clients.CODEX_APP_CLIENT
+    assert tasks[support.GRANDCHILD_ID]["auto_pickup_client"] == client_registry.CODEX_APP_CLIENT
 
 
 def test_then_follow_up_of_auto_pickup_run_uses_saved_default(
@@ -197,7 +198,7 @@ def test_pickup_all_client_skips_default_clients(fake_commands, ledger_path):
 def test_pickup_all_opens_backend_defaults_and_fails_backend_without_one(
     fake_commands, ledger_path, stub_clients, capsys, monkeypatch
 ):
-    monkeypatch.delitem(clients.BUILT_IN_DEFAULT_CLIENTS, ledger.BACKEND_CODEX)
+    monkeypatch.delitem(client_registry.BUILT_IN_DEFAULT_CLIENTS, ledger.BACKEND_CODEX)
     support.write_config_table("default_clients", {ledger.BACKEND_CLAUDE: STUB_APP_CLIENT})
     status = ledger.STATUS_FINISHED
     codex_task = support.task_record(status, backend=ledger.BACKEND_CODEX)

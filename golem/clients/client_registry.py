@@ -4,8 +4,9 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-from golem import accounts, codex_app, ledger, t3_code
+from golem import accounts, ledger
 from golem.backends import codex, registry
+from golem.clients import codex_app, t3_code_threads
 
 CLAUDE_DESKTOP_CLIENT = "claude-desktop"
 CODEX_APP_CLIENT = "codex-app"
@@ -30,7 +31,7 @@ def skip_preparation(_task_id: str, _task: ledger.Task, _conversation_id: str) -
 
 
 def prepare_t3_code_thread(task_id: str, task: ledger.Task, conversation_id: str) -> None:
-    t3_code.prepare_thread(
+    t3_code_threads.prepare_thread(
         task_id, task, conversation_id, accounts.t3_claude_instance(task.get("account"))
     )
 
@@ -100,7 +101,7 @@ CLIENTS: dict[str, Client] = {
             is_terminal=False,
             command=lambda task, conversation_id, _agent_args: [
                 "open",
-                t3_code.thread_link(task, conversation_id),
+                t3_code_threads.thread_link(task, conversation_id),
             ],
             prepare=prepare_t3_code_thread,
             has_t3_code_thread=True,
@@ -144,6 +145,6 @@ def default_clients(configured: dict[str, str], invalid_config_prefix: str) -> d
 
 
 def task_auto_pickup_client(task: ledger.Task) -> str | None:
-    if "auto_pickup_client" in task:
-        return task["auto_pickup_client"]
-    return CLAUDE_DESKTOP_CLIENT if task.get("auto_pickup") else None
+    if not ledger.has_auto_pickup(task):
+        return None
+    return task.get("auto_pickup_client", CLAUDE_DESKTOP_CLIENT)

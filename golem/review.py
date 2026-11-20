@@ -3,8 +3,10 @@ import subprocess
 import sys
 from datetime import UTC, datetime
 
-from golem import accounts, chains, clients, ledger, locks, t3_code, task_directories
+from golem import accounts, chains, ledger, locks, t3_code
 from golem.backends import registry
+from golem.clients import client_registry
+from golem.worktrees import task_directories
 
 
 def open_app_and_record_opening(
@@ -31,7 +33,7 @@ def pickup(
     preflight_task = ledger.load_tasks().get(task_id)
     if preflight_task is None:
         raise SystemExit(f"golem: task not found: {task_id}")
-    client = clients.task_client(task_id, preflight_task, client_name)
+    client = client_registry.task_client(task_id, preflight_task, client_name)
     client.validate_arguments(list(agent_args))
     environment = (
         client.environment(
@@ -68,7 +70,7 @@ def pickup(
         cwd = ledger.task_directory(task)
     if not client.is_terminal:
         locks.release_lock(directory_lock_file)
-        if client.name == clients.CLAUDE_DESKTOP_CLIENT and "account" in task:
+        if client.name == client_registry.CLAUDE_DESKTOP_CLIENT and "account" in task:
             print(
                 f"golem: {task_id} continues on the Claude desktop app's sign-in", file=sys.stderr
             )
@@ -128,7 +130,7 @@ def auto_pickup_task(task_id: str) -> None:
     if task.get("status") == ledger.STATUS_FAILED:
         auto_pickup_task(task.get("after", ""))
         return
-    client_name = clients.task_auto_pickup_client(task)
+    client_name = client_registry.task_auto_pickup_client(task)
     if client_name is None or not chains.is_ready_to_open(tasks, task_id):
         return
     try:

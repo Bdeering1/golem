@@ -1,4 +1,4 @@
-from golem import clients, ledger
+from golem import ledger
 
 
 def can_start_dependents(task: ledger.Task) -> bool:
@@ -70,7 +70,7 @@ def is_dependent_reservable(tasks: ledger.Tasks, parent_id: str) -> bool:
 def add_dependent_records(
     tasks: ledger.Tasks, records: ledger.Tasks, parent_id: str, default_clients: dict[str, str]
 ) -> None:
-    if clients.task_auto_pickup_client(tasks[parent_id]) is not None:
+    if ledger.has_auto_pickup(tasks[parent_id]):
         for record in records.values():
             client_name = default_clients.get(record["backend"])
             if client_name is not None:

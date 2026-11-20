@@ -8,8 +8,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast, override
 
-from golem import cli, config, git, ledger, spawn, task_directories
+from golem import cli, config, ledger, spawn
 from golem.backends import claude
+from golem.worktrees import git, task_directories
 
 DEFAULT_EMAIL = "me@example.com"
 WORK_EMAIL = "work@example.com"
