@@ -488,12 +488,31 @@ def test_question_in_later_run_blocks_task(t3_server, follow_ups, ledger_path):
     assert task["result"] == LATER_REPLY
 
 
-@pytest.mark.parametrize("session_status", ["stopped", "error"])
+def act_after_each_poll(monkeypatch, action):
+    fixture_sleep = time.sleep
+
+    def sleep_then_act(seconds: float) -> None:
+        fixture_sleep(seconds)
+        action()
+
+    monkeypatch.setattr(time, "sleep", sleep_then_act)
+
+
+@pytest.mark.parametrize(
+    ("session_status", "is_t3_quitting"),
+    [
+        pytest.param("stopped", False, id="session-stopped"),
+        pytest.param("error", False, id="session-error"),
+        pytest.param("ready", True, id="t3-quit"),
+    ],
+)
 def test_ended_session_fails_task_with_subagent_running(
-    t3_server, follow_ups, ledger_path, session_status
+    t3_server, follow_ups, ledger_path, monkeypatch, session_status, is_t3_quitting
 ):
-    ended_session = {"id": "session", "status": session_status}
-    follow_ups[:] = [projection(RUNNING_SUBAGENT, runs=[FIRST_RUN_ENDED], sessions=[ended_session])]
+    session = {"id": "session", "status": session_status}
+    follow_ups[:] = [projection(RUNNING_SUBAGENT, runs=[FIRST_RUN_ENDED], sessions=[session])]
+    if is_t3_quitting:
+        act_after_each_poll(monkeypatch, lambda: t3_server.runtime_path.unlink(missing_ok=True))
 
     task = run_t3_task(ledger_path)
 
@@ -502,79 +521,19 @@ def test_ended_session_fails_task_with_subagent_running(
 
 
 @pytest.mark.parametrize(
-    ("failure", "is_usage_limit"),
+    ("failure", "expected_status"),
     [
-        pytest.param({"message": LATER_FAILURE_MESSAGE}, False, id="failure"),
-        pytest.param(USAGE_LIMIT_ITEM["failure"], True, id="usage-limit"),
+        pytest.param({"message": LATER_FAILURE_MESSAGE}, ledger.STATUS_FAILED, id="failure"),
+        pytest.param(USAGE_LIMIT_ITEM["failure"], ledger.STATUS_SCHEDULED, id="usage-limit"),
+        pytest.param(None, ledger.STATUS_FAILED, id="no-error-item"),
     ],
 )
 def test_failure_in_later_run_fails_or_reschedules_task(
-    t3_server, follow_ups, ledger_path, failure, is_usage_limit
+    t3_server, follow_ups, ledger_path, failure, expected_status
 ):
+    # The first run's usage limit must not stand in for the later run's failure.
     later_error = {"id": "later-error", "runId": LATER_RUN_ID, "status": "failed", "type": "error"}
-    later_run_failed = {**LATER_RUN, "status": "failed", "completedAt": LATER_RUN_ENDED_AT}
-    follow_ups[:] = [
-        projection(RUNNING_SUBAGENT, runs=[FIRST_RUN_ENDED], sessions=[READY_SESSION]),
-        projection(
-            ENDED_SUBAGENT,
-            {**later_error, "failure": failure},
-            runs=[FIRST_RUN_ENDED, later_run_failed],
-            sessions=[READY_SESSION],
-        ),
-    ]
-
-    task = run_t3_task(ledger_path)
-
-    if is_usage_limit:
-        assert task["status"] == ledger.STATUS_SCHEDULED
-        assert datetime.fromisoformat(task["due_at"]) == support.RESET_TIME
-        assert t3_support.sent_commands(t3_server)[-1]["limitRecovery"]["runId"] == LATER_RUN_ID
-        return
-    assert task["status"] == ledger.STATUS_FAILED
-    assert task["result"] == LATER_FAILURE_MESSAGE
-
-
-def test_cancelled_task_stops_waiting_for_subagents(
-    t3_server, follow_ups, ledger_path, monkeypatch
-):
-    follow_ups[:] = [projection(RUNNING_SUBAGENT, runs=[FIRST_RUN_ENDED], sessions=[READY_SESSION])]
-
-    fixture_sleep = time.sleep
-
-    def cancel_while_sleeping(seconds: float) -> None:
-        fixture_sleep(seconds)
-        with ledger.locked_tasks() as tasks:
-            tasks[support.TASK_ID]["status"] = ledger.STATUS_CANCELLED
-
-    monkeypatch.setattr(time, "sleep", cancel_while_sleeping)
-
-    task = run_t3_task(ledger_path)
-
-    assert task["status"] == ledger.STATUS_CANCELLED
-
-
-def test_t3_code_quitting_fails_task_with_subagent_running(
-    t3_server, follow_ups, ledger_path, monkeypatch
-):
-    follow_ups[:] = [projection(RUNNING_SUBAGENT, runs=[FIRST_RUN_ENDED], sessions=[READY_SESSION])]
-
-    fixture_sleep = time.sleep
-
-    def quit_while_sleeping(seconds: float) -> None:
-        fixture_sleep(seconds)
-        t3_server.runtime_path.unlink(missing_ok=True)
-
-    monkeypatch.setattr(time, "sleep", quit_while_sleeping)
-
-    task = run_t3_task(ledger_path)
-
-    assert task["status"] == ledger.STATUS_FAILED
-    assert task["result"] == t3.SESSION_STOPPED_REASON
-
-
-def test_earlier_usage_limit_does_not_reschedule_later_run_failure(
-    t3_server, follow_ups, ledger_path
-):
+    later_errors = [] if failure is None else [{**later_error, "failure": failure}]
     later_run_failed = {**LATER_RUN, "status": "failed", "completedAt": LATER_RUN_ENDED_AT}
     follow_ups[:] = [
         projection(
@@ -583,6 +542,7 @@ def test_earlier_usage_limit_does_not_reschedule_later_run_failure(
         projection(
             ENDED_SUBAGENT,
             USAGE_LIMIT_ITEM,
+            *later_errors,
             runs=[FIRST_RUN_ENDED, later_run_failed],
             sessions=[READY_SESSION],
         ),
@@ -590,7 +550,26 @@ def test_earlier_usage_limit_does_not_reschedule_later_run_failure(
 
     task = run_t3_task(ledger_path)
 
-    assert task["status"] == ledger.STATUS_FAILED
+    assert task["status"] == expected_status
+    if expected_status == ledger.STATUS_SCHEDULED:
+        assert datetime.fromisoformat(task["due_at"]) == support.RESET_TIME
+        assert t3_support.sent_commands(t3_server)[-1]["limitRecovery"]["runId"] == LATER_RUN_ID
+
+
+def test_cancelled_task_stops_waiting_for_subagents(
+    t3_server, follow_ups, ledger_path, monkeypatch
+):
+    follow_ups[:] = [projection(RUNNING_SUBAGENT, runs=[FIRST_RUN_ENDED], sessions=[READY_SESSION])]
+
+    def cancel_task() -> None:
+        with ledger.locked_tasks() as tasks:
+            tasks[support.TASK_ID]["status"] = ledger.STATUS_CANCELLED
+
+    act_after_each_poll(monkeypatch, cancel_task)
+
+    task = run_t3_task(ledger_path)
+
+    assert task["status"] == ledger.STATUS_CANCELLED
 
 
 def test_failed_first_read_keeps_waiting_for_subagents(t3_server, follow_ups, ledger_path):
