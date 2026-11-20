@@ -337,17 +337,15 @@ BOXED_CARD = CardStyle(height=4, pitch=5, is_boxed=True)
 STACKED_BOXED_CARD = CardStyle(height=4, pitch=4, is_boxed=True)
 SLIM_BOXED_CARD = CardStyle(height=3, pitch=3, is_boxed=True)
 TALL_CARD = CardStyle(height=3, pitch=4, is_boxed=False)
-SPACED_CARD = CardStyle(height=2, pitch=3, is_boxed=False)
 DENSE_CARD = CardStyle(height=2, pitch=2, is_boxed=False)
 WIDE_COLUMN_CARD_STYLES = (
     BOXED_CARD,
     STACKED_BOXED_CARD,
     SLIM_BOXED_CARD,
-    SPACED_CARD,
     DENSE_CARD,
 )
-MEDIUM_COLUMN_CARD_STYLES = (BOXED_CARD, STACKED_BOXED_CARD, SPACED_CARD, DENSE_CARD)
-NARROW_COLUMN_CARD_STYLES = (TALL_CARD, SPACED_CARD, DENSE_CARD)
+MEDIUM_COLUMN_CARD_STYLES = (BOXED_CARD, STACKED_BOXED_CARD, DENSE_CARD)
+NARROW_COLUMN_CARD_STYLES = (TALL_CARD, DENSE_CARD)
 
 BOARD_COLUMNS = (
     BoardColumn(display.COLUMN_QUEUED, display.STATUS_COLORS[ledger.STATUS_SCHEDULED]),
