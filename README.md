@@ -74,7 +74,7 @@ golem run "Add password reset" \
 
 ## Config
 
-golem reads `~/.config/golem/config.toml`, or the same path under `$XDG_CONFIG_HOME`.
+Located at  `~/.config/golem/config.toml` or `$XDG_CONFIG_HOME`.
 
 ```toml
 default_backend = "codex" # Claude is the default if unspecified
