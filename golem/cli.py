@@ -1,4 +1,5 @@
 import argparse
+import importlib.metadata
 import os
 import re
 import shlex
@@ -651,6 +652,9 @@ def build_parser() -> tuple[argparse.ArgumentParser, dict[str, argparse.Argument
     parser = argparse.ArgumentParser(prog="golem")
     parser.add_argument(
         "-C", dest="directory", metavar="DIR", help="run as if golem was started in DIR"
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"%(prog)s {importlib.metadata.version('golem')}"
     )
     commands = parser.add_subparsers(dest="command", required=True)
     for add_command in COMMAND_REGISTRARS:
