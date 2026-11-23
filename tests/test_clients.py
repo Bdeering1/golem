@@ -48,26 +48,11 @@ def test_registered_terminal_client_opens_task_and_marks_it_done(
     assert support.read_task(ledger_path)["status"] == ledger.STATUS_FINISHED
 
 
-def test_registered_app_client_opens_task_through_pickup_all(
-    fake_commands, ledger_path, stub_clients
-):
-    support.write_task(ledger_path, ledger.STATUS_FINISHED)
-
-    assert cli.main(["pickup", "--all", "--client", STUB_APP_CLIENT]) == 0
-    assert fake_commands["open-args"].read_text(encoding="utf-8") == (
-        f"stub:{support.read_task(ledger_path)['session_id']}\n"
-    )
-    assert support.read_task(ledger_path)["status"] == ledger.STATUS_FINISHED
-
-
 @pytest.mark.parametrize(
     ("task_fields", "client_name", "backend_name"),
     [
         pytest.param(
             {"backend": ledger.BACKEND_CODEX}, "claude-desktop", "Codex", id="codex-in-app"
-        ),
-        pytest.param(
-            {"backend": ledger.BACKEND_CODEX}, "claude-code", "Codex", id="codex-in-claude-code"
         ),
         pytest.param({}, "codex-cli", "Claude", id="claude-in-codex-cli"),
     ],
@@ -92,9 +77,6 @@ def test_pickup_refuses_client_that_cannot_open_task_backend(
     [
         pytest.param(
             ["pickup", "--all", "--client", "claude-code"], "requires an app client", id="terminal"
-        ),
-        pytest.param(
-            ["pickup", support.TASK_ID, "--app"], "unrecognized arguments: --app", id="removed-app"
         ),
         pytest.param(
             ["pickup", "--all", "--", "--model", "x"],

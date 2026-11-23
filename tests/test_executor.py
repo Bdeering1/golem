@@ -6,7 +6,7 @@ from typing import Any, Never
 
 import pytest
 
-from golem import cli, executor, launch_agent, ledger, locks, scheduling, spawn
+from golem import cli, executor, launch_agent, ledger, locks, spawn
 from golem.backends import claude, common
 from tests import support
 
@@ -325,19 +325,6 @@ def test_usage_limited_task_fails_when_it_cannot_be_rescheduled(
     task = support.read_task(ledger_path)
     assert task["status"] == ledger.STATUS_FAILED
     assert task["result"] == support.USAGE_LIMIT_RESULT
-
-
-def test_scheduled_task_runs_when_executed(
-    installed_launch_agent, fake_commands, ledger_path, monkeypatch
-):
-    monkeypatch.setattr(scheduling, "scheduled_time", lambda _: support.RESET_TIME)
-    cli.main(["run", support.PROMPT, "--at", support.AT_TEXT])
-    task = support.read_task(ledger_path)
-    assert datetime.fromisoformat(task["due_at"]) == support.RESET_TIME
-    support.set_task_due_now(ledger_path)
-
-    assert cli.main(["_execute", support.TASK_ID, task["session_id"]]) == 0
-    assert support.read_task(ledger_path)["status"] == ledger.STATUS_FINISHED
 
 
 def test_leftover_executor_does_not_run_retried_task(

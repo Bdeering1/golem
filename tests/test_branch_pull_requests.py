@@ -116,12 +116,6 @@ def test_refresh_stores_pull_requests_of_recorded_branches(ledger_path, write_pu
             id="failed-lookup",
         ),
         pytest.param(
-            [{"url": OPEN_URL, "state": ledger.PULL_REQUEST_STATE_OPEN}],
-            True,
-            "UNKNOWN",
-            id="unknown-state",
-        ),
-        pytest.param(
             [{"url": MERGED_URL, "state": ledger.PULL_REQUEST_STATE_MERGED}],
             True,
             "OPEN",

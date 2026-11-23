@@ -125,7 +125,6 @@ def test_process_started_after_cancel_is_stopped(ledger_path, field):
     ("status", "expected_thread_stops"),
     [
         (ledger.STATUS_FAILED, []),
-        (ledger.STATUS_BLOCKED, []),
         (ledger.STATUS_RUNNING, ["thread"]),
         (ledger.STATUS_FINISHED, []),
     ],

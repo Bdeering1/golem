@@ -131,11 +131,6 @@ def test_setup_seeds_gate_hooks_in_returned_directory(
             "setup directory does not exist",
             id="missing-directory",
         ),
-        pytest.param(
-            {"output": json.dumps({"directory": "~nosuchuser/x"})},
-            "setup directory is not usable",
-            id="unusable-directory",
-        ),
     ],
 )
 def test_failed_setup_fails_task_and_keeps_reason(

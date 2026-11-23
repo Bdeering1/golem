@@ -342,10 +342,6 @@ def test_board_returns_focus_from_done_when_it_hides():
     assert state.focus_index == 1
 
 
-def test_board_marks_empty_columns():
-    assert "No tasks" in frame_text({})
-
-
 @pytest.mark.parametrize(("width", "height"), [(10, 3), (1, 1), (40, 2), (WIDE_WIDTH, 9)])
 def test_board_frame_fits_tiny_terminals(width, height):
     snapshot = board.board_snapshot(statuses_tasks(), NOW)

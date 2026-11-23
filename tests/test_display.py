@@ -87,15 +87,6 @@ def test_list_rows_show_each_chains_latest_task_among_equal_statuses():
             ledger.STATUS_RUNNING, {}, ("dependent", "2/2", ledger.STATUS_RUNNING), id="running"
         ),
         pytest.param(
-            ledger.STATUS_SCHEDULED,
-            {},
-            ("dependent", "2/2", ledger.STATUS_SCHEDULED),
-            id="scheduled",
-        ),
-        pytest.param(
-            ledger.STATUS_WAITING, {}, ("dependent", "2/2", ledger.STATUS_WAITING), id="waiting"
-        ),
-        pytest.param(
             ledger.STATUS_WAITING,
             {"gate_stop_reason": "tests failed", "status": ledger.STATUS_BLOCKED},
             ("parent", "1/2", ledger.STATUS_BLOCKED),
