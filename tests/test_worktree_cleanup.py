@@ -29,7 +29,6 @@ def test_worktree_list_retains_non_golem_worktrees(
                     "owner": owner,
                     "repository": git.git_common_directory(str(git_repository)),
                     "session_id": "other",
-                    "created_at": datetime.now(UTC).isoformat(),
                 }
             }
         )

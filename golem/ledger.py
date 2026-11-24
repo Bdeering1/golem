@@ -112,7 +112,6 @@ class Task(TypedDict):
 class WorktreeResource(TypedDict):
     owner: str
     session_id: str
-    created_at: str
     repository: NotRequired[str]
     released_at: NotRequired[str]
     removed_at: NotRequired[str]

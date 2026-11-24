@@ -93,13 +93,6 @@ def test_registered_backend_runs_through_task_lifecycle(
     assert f"golem: session: stub-{child['session_id']}" in capsys.readouterr().out
 
 
-def test_registered_backend_refuses_auto_pickup_without_default_client(stub_backend):
-    with pytest.raises(
-        SystemExit, match="--auto-pickup requires a default app client for Stub tasks"
-    ):
-        cli.main(["run", support.PROMPT, "--backend", STUB_BACKEND_ID, "--auto-pickup"])
-
-
 def test_session_field_is_not_recorded_on_a_newer_session(ledger_path):
     support.write_task(ledger_path, ledger.STATUS_RUNNING)
 

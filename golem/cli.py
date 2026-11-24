@@ -159,9 +159,7 @@ def set_command_handler(
 
 
 def task_id_from_arguments(arguments: ledger.Arguments) -> str:
-    if arguments.id is None:
-        raise SystemExit("golem: task ID is required")
-    return arguments.id
+    return cast("str", arguments.id)
 
 
 def resolved_task_id_from_arguments(arguments: ledger.Arguments) -> str:
@@ -207,11 +205,7 @@ def run_task_from_arguments(arguments: ledger.Arguments) -> int:
         require_claude_account_backend(arguments.backend, list(arguments.agent_args))
     account = accounts.task_account_number(arguments.account)
     default_clients = load_default_clients()
-    auto_pickup_client = default_clients.get(arguments.backend) if arguments.auto_pickup else None
-    if arguments.auto_pickup and auto_pickup_client is None:
-        raise SystemExit(
-            f"golem: --auto-pickup requires a default app client for {backend.NAME} tasks"
-        )
+    auto_pickup_client = default_clients[arguments.backend] if arguments.auto_pickup else None
     is_t3 = arguments.backend == ledger.BACKEND_T3
     if is_t3 and arguments.env:
         raise SystemExit(f"golem: --env does not support {backend.NAME} tasks")
@@ -220,10 +214,10 @@ def run_task_from_arguments(arguments: ledger.Arguments) -> int:
     follow_ups = follow_ups_from_arguments(arguments.then)
     launch_agent.require_launch_agent()
     prompt_text = (
-        Path(arguments.file).read_text(encoding="utf-8") if arguments.file else arguments.prompt
+        Path(arguments.file).read_text(encoding="utf-8")
+        if arguments.file
+        else cast("str", arguments.prompt)
     )
-    if prompt_text is None:
-        raise SystemExit("golem: a prompt is required")
     if isinstance(arguments.after, str):
         arguments.after = task_lookup.resolved_task_id(arguments.after)
     task_args = tuple(arguments.agent_args)

@@ -73,12 +73,14 @@ def running_tasks():
 def statuses_tasks():
     return {
         status: support.task_record(status, task_id=status)
-        for status in sorted(ledger.ALL_STATUSES)
-        if status != ledger.STATUS_WAITING
+        for status in sorted(ledger.ALL_STATUSES - {ledger.STATUS_WAITING, ledger.STATUS_FINISHED})
     } | {
         ledger.STATUS_WAITING: support.task_record(
             ledger.STATUS_WAITING, task_id=ledger.STATUS_WAITING, after="missing"
-        )
+        ),
+        ledger.STATUS_FINISHED: support.task_record(
+            ledger.STATUS_FINISHED, task_id=ledger.STATUS_FINISHED, finished_at=NOW.isoformat()
+        ),
     }
 
 
@@ -94,7 +96,7 @@ def test_board_columns_group_statuses_and_a_toggles_done(pressed_keys, done_colu
     rows = display.list_rows(tasks, TODAY)
     state = board.BoardState()
     for pressed_key in pressed_keys:
-        board.apply_key(state, ord(pressed_key))
+        board.apply_key(state, ord(pressed_key), board.board_snapshot(tasks, NOW), HEIGHT)
 
     columns = board.rows_by_column(rows, is_showing_all=state.is_showing_all)
 
@@ -167,7 +169,11 @@ def test_board_preview_shows_the_result_in_whole_sentences_without_markdown():
     result = (
         "## Summary\nFixed the **login** redirect. Then " + "it kept going " * 40 + "to the end."
     )
-    tasks = {"task": support.task_record(ledger.STATUS_FINISHED, result=result)}
+    tasks = {
+        "task": support.task_record(
+            ledger.STATUS_FINISHED, result=result, finished_at=NOW.isoformat()
+        )
+    }
 
     _, detail_lines = board_and_detail_lines(tasks, state=board.BoardState(focus_index=2))
 
@@ -290,7 +296,7 @@ def test_board_task_view_folds_activity_and_t_unfolds_it_in_steps(ledger_path):
     texts = []
     for _ in range(3):
         texts.append(frame_text(tasks, state=state))
-        board.apply_key(state, ord("t"))
+        board.apply_key(state, ord("t"), board.board_snapshot(tasks, NOW), HEIGHT)
     folded_text, messages_text, full_text = texts
 
     assert "Reading auth" not in folded_text
@@ -304,18 +310,19 @@ def test_board_task_view_keeps_tool_calls_shown_after_following_stops(ledger_pat
     state = board.BoardState(focus_index=1, view=board.VIEW_TASK, is_following=True)
     frame_text(tasks, state=state)
 
-    board.apply_key(state, ord("k"))
+    board.apply_key(state, ord("k"), board.board_snapshot(tasks, NOW), HEIGHT)
 
     assert "tokens.py" in frame_text(tasks, state=state)
 
 
 def test_board_selection_moves_within_a_column_and_scrolls_to_stay_visible():
+    snapshot = board.board_snapshot(running_tasks(), NOW)
     state = board.BoardState(focus_index=1)
 
-    for _ in range(100):
-        board.apply_key(state, ord("j"))
+    for _ in range(len(snapshot.rows)):
+        board.apply_key(state, ord("j"), snapshot, HEIGHT)
     bottom_selection = selected_text(running_tasks(), state)
-    board.apply_key(state, ord("k"))
+    board.apply_key(state, ord("k"), snapshot, HEIGHT)
     scrolled_up_selection = selected_text(running_tasks(), state)
 
     assert "task-09" in bottom_selection
@@ -326,7 +333,7 @@ def test_board_selection_stays_on_its_task_when_a_task_is_added_above_it():
     tasks = running_tasks()
     added_task = tasks.pop("task-00")
     state = board.BoardState(focus_index=1)
-    board.apply_key(state, ord("j"))
+    board.apply_key(state, ord("j"), board.board_snapshot(tasks, NOW), HEIGHT)
     frame_text(tasks, state=state)
 
     assert "task-02" in selected_text(tasks | {"task-00": added_task}, state)
@@ -335,8 +342,10 @@ def test_board_selection_stays_on_its_task_when_a_task_is_added_above_it():
 def test_board_returns_focus_from_done_when_it_hides():
     state = board.BoardState(focus_index=1)
 
-    board.apply_key(state, ord("a"))
-    board.apply_key(state, ord("a"))
+    snapshot = board.board_snapshot({}, NOW)
+
+    board.apply_key(state, ord("a"), snapshot, HEIGHT)
+    board.apply_key(state, ord("a"), snapshot, HEIGHT)
     frame_text({}, state=state)
 
     assert state.focus_index == 1
@@ -623,9 +632,9 @@ def test_board_filter_narrows_cards_and_escape_clears_it():
     state = board.BoardState(focus_index=1)
 
     for key in "/TASK-03\r":
-        board.apply_key(state, ord(key), snapshot)
+        board.apply_key(state, ord(key), snapshot, HEIGHT)
     filtered_ids = [row.task_id for row in board.filtered_snapshot(snapshot, state).rows]
-    board.apply_key(state, board.ESCAPE_KEY, snapshot)
+    board.apply_key(state, board.ESCAPE_KEY, snapshot, HEIGHT)
 
     assert filtered_ids == ["task-03"]
     assert board.filtered_snapshot(snapshot, state).rows == snapshot.rows
@@ -638,7 +647,7 @@ def test_board_filter_matches_the_label_of_any_task_in_a_chain():
     state = board.BoardState(focus_index=1)
 
     for key in f"/{support.LABEL}\r":
-        board.apply_key(state, ord(key), snapshot)
+        board.apply_key(state, ord(key), snapshot, HEIGHT)
 
     assert [row.task_id for row in board.filtered_snapshot(snapshot, state).rows] == ["fix-login-2"]
 
@@ -674,7 +683,7 @@ def test_board_redraws_after_its_columns_scroll_back_into_view(narrow_keys, wide
     state = board.BoardState(focus_index=2)
     frame_lines(statuses_tasks(), NARROW_WIDTH, HEIGHT, state)
     for key in narrow_keys:
-        board.apply_key(state, ord(key))
+        board.apply_key(state, ord(key), board.board_snapshot(statuses_tasks(), NOW), HEIGHT)
         frame_lines(
             statuses_tasks(), NARROW_WIDTH if key == narrow_keys[0] else wide_width, HEIGHT, state
         )

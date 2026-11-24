@@ -73,9 +73,7 @@ def add_parent_auto_pickup(
     if "auto_pickup_client" not in tasks[parent_id]:
         return
     for record in records:
-        client_name = default_clients.get(record["backend"])
-        if client_name is not None:
-            record["auto_pickup_client"] = client_name
+        record["auto_pickup_client"] = default_clients[record["backend"]]
 
 
 def is_gate_pending(tasks: ledger.Tasks, task_id: str) -> bool:
@@ -126,14 +124,6 @@ def dependents_first_task_ids(tasks: ledger.Tasks, task_ids: list[str]) -> list[
         ordered_task_ids += dependents_first_task_ids(tasks, dependent_task_ids(tasks, task_id))
         ordered_task_ids.append(task_id)
     return ordered_task_ids
-
-
-def root_task_id(tasks: ledger.Tasks, task_id: str) -> str:
-    parent_id = tasks[task_id].get("after")
-    while parent_id is not None and parent_id in tasks:
-        task_id = parent_id
-        parent_id = tasks[task_id].get("after")
-    return task_id
 
 
 def task_depth(tasks: ledger.Tasks, task_id: str) -> int:

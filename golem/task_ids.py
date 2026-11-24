@@ -43,7 +43,7 @@ def branch_letter(root_id: str, task_id: str) -> str:
 
 
 def new_dependent_task_id(tasks: ledger.Tasks, parent_id: str) -> str:
-    root_id = chains.root_task_id(tasks, parent_id)
+    root_id = ledger.root_task_id(tasks, parent_id)
     step_id = f"{root_id}-{chains.task_depth(tasks, parent_id) + 1}"
     letter = branch_letter(root_id, parent_id)
     task_id = f"{step_id}-{letter}" if letter else step_id

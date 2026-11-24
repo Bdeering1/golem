@@ -160,22 +160,13 @@ def test_pickup_all_client_skips_default_clients(fake_commands, ledger_path):
     )
 
 
-def test_pickup_all_opens_backend_defaults_and_fails_backend_without_one(
-    fake_commands, ledger_path, stub_clients, capsys, monkeypatch
-):
-    monkeypatch.delitem(client_registry.BUILT_IN_DEFAULT_CLIENTS, ledger.BACKEND_CODEX)
+def test_pickup_all_opens_configured_default_client(fake_commands, ledger_path, stub_clients):
     support.write_config_table("default_clients", {ledger.BACKEND_CLAUDE: STUB_APP_CLIENT})
-    status = ledger.STATUS_FINISHED
-    codex_task = support.task_record(status, backend=ledger.BACKEND_CODEX)
-    claude_task = support.task_record(status, task_id=support.CHILD_ID)
-    support.write_tasks(ledger_path, {support.TASK_ID: codex_task, support.CHILD_ID: claude_task})
+    support.write_task(ledger_path, ledger.STATUS_FINISHED)
 
-    assert cli.main(["pickup", "--all"]) == 1
-
-    assert f"no default app client for Codex tasks: {support.TASK_ID}" in capsys.readouterr().err
-    assert support.read_task(ledger_path)["status"] == ledger.STATUS_FINISHED
+    assert cli.main(["pickup", "--all"]) == 0
     assert fake_commands["open-args"].read_text(encoding="utf-8") == (
-        f"stub:{claude_task['session_id']}\n"
+        f"stub:{support.read_task(ledger_path)['session_id']}\n"
     )
 
 

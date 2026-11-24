@@ -10,6 +10,7 @@ from golem import cli, executor, launch_agent, ledger, locks, spawn
 from golem.backends import claude, common
 from tests import support
 
+RESULT_EVENT = '{"type": "result", "result": "done"}'
 BACKGROUND_STOP_LINE = (
     'Background tasks still running 10m after the last turn (workflow "Implement plan"); '
     "stopping them. Set CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 to wait indefinitely."
@@ -85,11 +86,11 @@ def test_finished_task_records_its_branch(
 @pytest.mark.parametrize(
     ("exit_code", "output", "expected_result", "expected_status"),
     [
-        pytest.param(0, '{"result": "done"}', "done", ledger.STATUS_FINISHED, id="success"),
-        pytest.param(1, '{"result": "done"}', "done", ledger.STATUS_FAILED, id="failure"),
+        pytest.param(0, RESULT_EVENT, "done", ledger.STATUS_FINISHED, id="success"),
+        pytest.param(1, RESULT_EVENT, "done", ledger.STATUS_FAILED, id="failure"),
         pytest.param(
             0,
-            '[{"type": "system"}, {"type": "result", "result": "done"}]',
+            f'{{"type": "system"}}\n{RESULT_EVENT}',
             "done",
             ledger.STATUS_FINISHED,
             id="verbose",

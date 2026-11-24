@@ -107,6 +107,8 @@ def task_record(status: str, *, task_id=TASK_ID, **fields: object) -> ledger.Tas
         "session_id": f"{task_id}-session",
         "status": status,
     }
+    if status == ledger.STATUS_FINISHED:
+        record["finished_at"] = record["due_at"]
     record.update(cast(ledger.Task, fields))
     return record
 
@@ -179,7 +181,6 @@ def golem_worktree_resource(repository_path, worktree_path, *, released_at=None)
         "owner": task_directories.WORKTREE_OWNER_GOLEM,
         "repository": git.git_common_directory(str(repository_path)),
         "session_id": f"{TASK_ID}-session",
-        "created_at": datetime.now(UTC).isoformat(),
     }
     if released_at is not None:
         resource["released_at"] = released_at

@@ -4,7 +4,7 @@ import sys
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -46,9 +46,7 @@ def git_worktree_retention_reasons(
 ) -> list[str]:
     if not Path(worktree).is_dir():
         return ["missing"]
-    repository = resource.get("repository")
-    if not isinstance(repository, str):
-        return ["repository unknown"]
+    repository = cast("str", resource.get("repository"))
     if entries is None:
         return ["repository unavailable"]
     matching_entry = git.git_worktree_entry(entries, worktree)
@@ -105,8 +103,6 @@ def worktree_retention_reasons(
     resource: ledger.WorktreeResource | None,
     worktree: str,
     entries: list[list[str]] | None,
-    *,
-    is_released: bool = False,
 ) -> list[str]:
     if resource is None:
         return ["ownership unknown"]
@@ -114,8 +110,6 @@ def worktree_retention_reasons(
         return ["not created by Golem"]
     if resource.get("removed_at") is not None:
         return ["already removed"]
-    if resource.get("owner") != task_directories.WORKTREE_OWNER_GOLEM:
-        return ["ownership unknown"]
     reasons: list[str] = []
     directories = {
         git.resolved_path(ledger.directory_to_lock(tasks[task_id], tasks[task_id].get("worktree")))
@@ -131,7 +125,7 @@ def worktree_retention_reasons(
         task_worktree_retention_reasons(
             tasks,
             worktree,
-            is_released=resource.get("released_at") is not None or is_released,
+            is_released=resource.get("released_at") is not None,
         )
     )
     if entries is not None and any(
@@ -153,9 +147,7 @@ def record_worktree_removal_error(
 def remove_inspected_worktree_resource(
     resource: ledger.WorktreeResource, entry: list[str], worktree: str
 ) -> tuple[bool, list[str]]:
-    repository = resource.get("repository")
-    if repository is None:
-        return False, []
+    repository = cast("str", resource.get("repository"))
     commands = ["remove"]
     if git.git_worktree_lock_reason(entry) is not None:
         commands.insert(0, "unlock")
@@ -178,7 +170,7 @@ def remove_inspected_worktree_resource(
 
 @contextmanager
 def locked_worktree_inspection(
-    tasks: ledger.Tasks, worktrees: ledger.Worktrees, worktree: str, *, is_released: bool = False
+    tasks: ledger.Tasks, worktrees: ledger.Worktrees, worktree: str
 ) -> Generator[tuple[ledger.WorktreeResource | None, list[str] | None, list[str]]]:
     resource = task_directories.worktree_resource(worktrees, worktree)
     if resource is None:
@@ -191,9 +183,7 @@ def locked_worktree_inspection(
     try:
         repository = resource.get("repository")
         entries = git.git_worktree_entries(repository) if isinstance(repository, str) else None
-        reasons = worktree_retention_reasons(
-            tasks, resource, worktree, entries, is_released=is_released
-        )
+        reasons = worktree_retention_reasons(tasks, resource, worktree, entries)
         entry = git.git_worktree_entry(entries, worktree) if entries else None
         yield resource, entry, reasons
     finally:
@@ -201,19 +191,14 @@ def locked_worktree_inspection(
 
 
 def remove_worktree_resource(
-    tasks: ledger.Tasks, worktrees: ledger.Worktrees, worktree: str, *, is_released: bool = False
+    tasks: ledger.Tasks, worktrees: ledger.Worktrees, worktree: str
 ) -> tuple[bool, list[str]]:
-    with locked_worktree_inspection(tasks, worktrees, worktree, is_released=is_released) as (
-        resource,
-        entry,
-        reasons,
-    ):
-        if reasons or resource is None or entry is None:
+    with locked_worktree_inspection(tasks, worktrees, worktree) as (resource, entry, reasons):
+        if reasons:
             return False, reasons
-        repository = resource.get("repository")
-        if repository is None:
-            return False, reasons
-        return remove_inspected_worktree_resource(resource, entry, worktree)
+        return remove_inspected_worktree_resource(
+            cast("ledger.WorktreeResource", resource), cast("list[str]", entry), worktree
+        )
 
 
 def list_worktrees() -> int:
@@ -267,9 +252,7 @@ def set_worktree_auto_remove(retention_days: int | None) -> int:
 def set_worktree_auto_remove_from_arguments(arguments: ledger.Arguments) -> int:
     if arguments.off:
         return set_worktree_auto_remove(None)
-    retention_days = arguments.after
-    if not isinstance(retention_days, int):
-        raise SystemExit("golem: --after is required")
+    retention_days = cast("int", arguments.after)
     if retention_days < 0:
         raise SystemExit("golem: --after must be non-negative")
     return set_worktree_auto_remove(retention_days)

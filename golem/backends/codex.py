@@ -114,10 +114,7 @@ def codex_command(task: ledger.Task) -> tuple[list[str], str]:
     ]
     prompt = task["prompt"]
     if common.is_usage_limit_resume(task):
-        thread_id = task.get("thread_id")
-        if thread_id is None:
-            raise KeyError("thread_id")
-        command += ["resume", thread_id, "-"]
+        command += ["resume", cast("str", task.get("thread_id")), "-"]
         return command, common.USAGE_LIMIT_RESUME_PROMPT
     command.append("-")
     return command, prompt
@@ -466,7 +463,7 @@ def codex_active_reset_time(primary: ledger.JsonObject) -> datetime | None:
     return codex_reset_time_from_limit(primary)
 
 
-def next_codex_reset_time(environment: dict[str, str]) -> datetime | None:
+def next_reset_time(environment: dict[str, str]) -> datetime | None:
     try:
         rate_limits = codex_rate_limits(environment)
         primary = required_codex_primary_limit(rate_limits)
@@ -491,10 +488,6 @@ def next_codex_reset_time(environment: dict[str, str]) -> datetime | None:
         if str(error) == CODEX_SUBSCRIPTION_ERROR:
             raise
         raise SystemExit(common.USAGE_ERROR) from error
-
-
-def next_reset_time(environment: dict[str, str]) -> datetime | None:
-    return next_codex_reset_time(environment)
 
 
 def open_usage_window(environment: dict[str, str]) -> str | None:

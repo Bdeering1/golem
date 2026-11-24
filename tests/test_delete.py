@@ -1,7 +1,6 @@
 import multiprocessing
 import os
 import subprocess
-from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -324,7 +323,6 @@ def test_delete_does_not_remove_unknown_or_external_worktree(git_repository, led
                     "owner": owner,
                     "repository": git.git_common_directory(str(git_repository)),
                     "session_id": "other",
-                    "created_at": datetime.now(UTC).isoformat(),
                 }
             }
         )

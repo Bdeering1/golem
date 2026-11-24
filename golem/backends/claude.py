@@ -298,9 +298,7 @@ def reset_time_from_limit(limit: ClaudeRateLimit) -> datetime:
     return common.validated_reset_time(datetime.fromisoformat(resets_at))
 
 
-def parsed_claude_output(output: str) -> object:
-    with suppress(json.JSONDecodeError):
-        return cast("object", json.loads(output))
+def parsed_claude_output(output: str) -> list[object]:
     events: list[object] = []
     for line in output.splitlines():
         with suppress(json.JSONDecodeError):
@@ -327,34 +325,22 @@ def usage_limit_message(event: dict[str, object]) -> str | None:
 
 
 def claude_result_and_usage_limit(output: str) -> tuple[str, bool]:
-    parsed_response = parsed_claude_output(output)
-    if isinstance(parsed_response, list):
-        events = [
-            cast("dict[str, object]", event)
-            for event in cast("list[object]", parsed_response)
-            if isinstance(event, dict)
-        ]
-        for event in events:
-            message = usage_limit_message(event)
-            if message is not None:
-                return message, True
-        parsed_response = next(
-            (event for event in reversed(events) if event.get("type") == "result"), None
-        )
-    if not isinstance(parsed_response, dict):
-        return output, False
-    response = cast("dict[str, object]", parsed_response)
-    result = response.get("result")
-    if not isinstance(result, str):
-        return output, False
-    return result, usage_limit_message(response) is not None
+    events = [
+        cast("dict[str, object]", event)
+        for event in parsed_claude_output(output)
+        if isinstance(event, dict)
+    ]
+    for event in events:
+        message = usage_limit_message(event)
+        if message is not None:
+            return message, True
+    response = next((event for event in reversed(events) if event.get("type") == "result"), None)
+    result = None if response is None else response.get("result")
+    return (result if isinstance(result, str) else output), False
 
 
 def claude_working_directory(output: str) -> str | None:
-    parsed_response = parsed_claude_output(output)
-    if not isinstance(parsed_response, list):
-        return None
-    for message in cast("list[object]", parsed_response):
+    for message in parsed_claude_output(output):
         if not isinstance(message, dict):
             continue
         message_fields = cast("dict[str, object]", message)
