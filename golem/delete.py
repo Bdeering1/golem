@@ -1,5 +1,6 @@
 from contextlib import ExitStack
 from datetime import UTC, datetime
+from typing import cast
 
 from golem import chains, ledger, progress_log, t3_code
 from golem.backends import claude_hooks, registry
@@ -107,10 +108,8 @@ def remove_selected_worktrees(
             return None
         removed_worktrees: set[str] = set()
         for worktree, resource, entry, _ in inspections:
-            if resource is None or entry is None:
-                continue
             is_removed, reasons = worktree_cleanup.remove_inspected_worktree_resource(
-                resource, entry, worktree
+                cast("ledger.WorktreeResource", resource), cast("list[str]", entry), worktree
             )
             if not is_removed:
                 for removed_worktree in removed_worktrees:

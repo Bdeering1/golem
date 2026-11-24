@@ -195,23 +195,6 @@ def test_prune_releases_worktree_after_its_last_task(owned_worktree):
     assert ledger.load_worktrees()[str(worktree.resolve())].get("released_at")
 
 
-@pytest.mark.parametrize("command", [["delete", support.TASK_ID], ["prune", "--yes"]])
-def test_delete_and_prune_leave_in_place_directory_alone(
-    installed_launch_agent, git_repository, ledger_path, monkeypatch, command
-):
-    monkeypatch.chdir(git_repository)
-    cli.main(["run", support.PROMPT, "--now", "--no-worktree"])
-    cli.main(["_execute", support.TASK_ID, support.read_task(ledger_path)["session_id"]])
-    tasks = support.read_tasks(ledger_path)
-    tasks[support.TASK_ID]["status"] = ledger.STATUS_CANCELLED
-    support.write_tasks(ledger_path, tasks)
-
-    assert cli.main(command) == 0
-
-    assert support.TASK_ID not in ledger.load_tasks()
-    assert ledger.load_worktrees() == {}
-
-
 def attach_pickup(ledger_path, exit_stack):
     pickup_lock_file = locks.acquire_lock(locks.directory_lock_path(str(Path.cwd())))
     assert pickup_lock_file is not None

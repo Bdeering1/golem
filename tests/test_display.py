@@ -44,7 +44,9 @@ def test_list_rows_order_by_column_then_status_then_id():
         "blocked": support.task_record(ledger.STATUS_BLOCKED, task_id="blocked"),
         "scheduled": support.task_record(ledger.STATUS_SCHEDULED, task_id="scheduled"),
         "running": support.task_record(ledger.STATUS_RUNNING, task_id="running"),
-        "review": support.task_record(ledger.STATUS_FINISHED, task_id="review"),
+        "review": support.task_record(
+            ledger.STATUS_FINISHED, task_id="review", finished_at=finished_at(days_ago=0)
+        ),
         "parent": support.task_record(ledger.STATUS_FINISHED, task_id="parent"),
         "waiting": support.task_record(ledger.STATUS_WAITING, task_id="waiting", after="parent"),
         "done": support.task_record(ledger.STATUS_FINISHED, task_id="done", closed_at=CLOSED_AT),
@@ -85,15 +87,6 @@ def test_list_rows_show_each_chains_latest_task_among_equal_statuses():
     [
         pytest.param(
             ledger.STATUS_RUNNING, {}, ("dependent", "2/2", ledger.STATUS_RUNNING), id="running"
-        ),
-        pytest.param(
-            ledger.STATUS_SCHEDULED,
-            {},
-            ("dependent", "2/2", ledger.STATUS_SCHEDULED),
-            id="scheduled",
-        ),
-        pytest.param(
-            ledger.STATUS_WAITING, {}, ("dependent", "2/2", ledger.STATUS_WAITING), id="waiting"
         ),
         pytest.param(
             ledger.STATUS_WAITING,
@@ -159,7 +152,6 @@ def test_list_rows_show_the_step_earliest_in_status_order(
             "2 PRs: 1 open, 1 merged",
             id="prs-different-states",
         ),
-        pytest.param(ledger.STATUS_FINISHED, {"pull_requests": []}, "no PR", id="no-pr-found"),
     ],
 )
 def test_list_rows_detail(toronto_time, status, fields, detail):

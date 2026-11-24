@@ -92,7 +92,6 @@ class Task(TypedDict):
     finished_at: NotRequired[str]
     opened_at: NotRequired[str]
     closed_at: NotRequired[str]
-    auto_pickup: NotRequired[bool]
     auto_pickup_client: NotRequired[str]
     no_worktree: NotRequired[bool]
     gate: NotRequired[str]
@@ -113,7 +112,6 @@ class Task(TypedDict):
 class WorktreeResource(TypedDict):
     owner: str
     session_id: str
-    created_at: str
     repository: NotRequired[str]
     released_at: NotRequired[str]
     removed_at: NotRequired[str]
@@ -198,12 +196,7 @@ def ledger_temporary_prefix(task_ledger_path: Path) -> str:
 
 
 def load_tasks() -> Tasks:
-    tasks = cast("dict[str, JsonObject]", load_json(ledger_path()))
-    for task in tasks.values():
-        # Older ledgers store gate_stop_reason under its former name, gate_reason.
-        if "gate_reason" in task:
-            task["gate_stop_reason"] = task.pop("gate_reason")
-    return cast("Tasks", tasks)
+    return cast("Tasks", load_json(ledger_path()))
 
 
 def load_worktrees() -> Worktrees:
@@ -287,10 +280,6 @@ def is_cancellable(task: Task) -> bool:
     if task.get("status") == STATUS_FINISHED:
         return "command_process_group" in task
     return task.get("status") in CANCELLABLE_STATUSES
-
-
-def has_auto_pickup(task: Task) -> bool:
-    return "auto_pickup_client" in task or task.get("auto_pickup", False)
 
 
 def directory_to_lock(task: Task, worktree: str | None) -> str:

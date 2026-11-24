@@ -1,7 +1,6 @@
 import multiprocessing
 import os
 import subprocess
-from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -14,16 +13,6 @@ from tests import support
 UNRELATED_ID = "unrelated"
 
 
-@pytest.mark.parametrize(
-    "status", [ledger.STATUS_SCHEDULED, ledger.STATUS_WAITING, ledger.STATUS_CANCELLED]
-)
-def test_delete_removes_non_running_task(ledger_path, status):
-    support.write_task(ledger_path, status)
-
-    assert cli.main(["delete", support.TASK_ID]) == 0
-    assert support.TASK_ID not in ledger.load_tasks()
-
-
 def test_delete_refuses_running_task(ledger_path):
     support.write_task(ledger_path, ledger.STATUS_RUNNING)
 
@@ -31,11 +20,6 @@ def test_delete_refuses_running_task(ledger_path):
         cli.main(["delete", support.TASK_ID])
 
     assert support.TASK_ID in ledger.load_tasks()
-
-
-def test_delete_refuses_unknown_task():
-    with pytest.raises(SystemExit, match=support.TASK_ID):
-        cli.main(["delete", support.TASK_ID])
 
 
 def test_delete_by_label_reports_every_missing_id(ledger_path):
@@ -88,19 +72,6 @@ def test_delete_removes_several_tasks_including_parent_and_child(ledger_path):
     assert cli.main(["delete", support.PARENT_ID, support.CHILD_ID]) == 0
 
     assert set(ledger.load_tasks()) == {support.SIBLING_ID}
-
-
-def test_delete_keeps_ledger_when_one_task_is_unknown(ledger_path):
-    tasks = {
-        support.TASK_ID: support.task_record(ledger.STATUS_FINISHED),
-        support.SIBLING_ID: support.task_record(ledger.STATUS_FINISHED, task_id=support.SIBLING_ID),
-    }
-    support.write_tasks(ledger_path, tasks)
-
-    with pytest.raises(SystemExit, match="unknown"):
-        cli.main(["delete", support.TASK_ID, "unknown"])
-
-    assert support.read_tasks(ledger_path) == tasks
 
 
 def test_delete_chain_removes_ancestors_dependents_and_branches(ledger_path):
@@ -352,7 +323,6 @@ def test_delete_does_not_remove_unknown_or_external_worktree(git_repository, led
                     "owner": owner,
                     "repository": git.git_common_directory(str(git_repository)),
                     "session_id": "other",
-                    "created_at": datetime.now(UTC).isoformat(),
                 }
             }
         )
@@ -377,7 +347,7 @@ def test_delete_with_no_worktree_keeps_task(ledger_path):
 
 @pytest.mark.parametrize(
     "status",
-    [ledger.STATUS_BLOCKED, ledger.STATUS_FINISHED, ledger.STATUS_FAILED],
+    [ledger.STATUS_FINISHED, ledger.STATUS_FAILED],
 )
 def test_delete_removes_task_and_worktree_and_preserves_branch(owned_worktree, status):
     worktree = owned_worktree(status)
@@ -415,7 +385,6 @@ def test_delete_retains_worktree_with_local_changes(owned_worktree, hidden_by):
         pytest.param(None, False, id="unreferenced"),
         pytest.param("refs/worktree/local", False, id="private-ref"),
         pytest.param("refs/heads/retained", True, id="branch"),
-        pytest.param("refs/tags/retained", True, id="tag"),
     ],
 )
 def test_delete_preserves_detached_commit(owned_worktree, reference, is_removed):

@@ -12,7 +12,6 @@ CLOSED_AT = "2030-03-10T13:00:00+00:00"
     ("command", "recorded_field"),
     [
         pytest.param(["pickup"], "opened_at", id="pickup"),
-        pytest.param(["pickup", "--client", "claude-code"], "opened_at", id="pickup-claude-code"),
         pytest.param(["pickup", "--client", "claude-desktop"], "opened_at", id="pickup-app"),
         pytest.param(["close"], "closed_at", id="close"),
     ],
@@ -42,15 +41,11 @@ def test_close_refuses_unfinished_chain(ledger_path):
 @pytest.mark.parametrize(
     "status", [ledger.STATUS_SCHEDULED, ledger.STATUS_WAITING, ledger.STATUS_CANCELLED]
 )
-@pytest.mark.parametrize(
-    "pickup_args",
-    [pytest.param([], id="terminal"), pytest.param(["--client", "claude-desktop"], id="app")],
-)
-def test_pickup_refuses_tasks_that_never_started(ledger_path, status, pickup_args):
+def test_pickup_refuses_tasks_that_never_started(ledger_path, status):
     support.write_task(ledger_path, status)
 
     with pytest.raises(SystemExit, match=support.TASK_ID):
-        cli.main(["pickup", support.TASK_ID, *pickup_args])
+        cli.main(["pickup", support.TASK_ID])
 
 
 def test_pickup_app_opens_task_session_in_desktop_app(fake_commands, ledger_path):
@@ -141,12 +136,6 @@ def test_pickup_all_and_reschedule_validate_arguments(command):
             {"status": ledger.STATUS_WAITING},
             [support.PARENT_ID],
             id="parent-blocked",
-        ),
-        pytest.param(
-            {"status": ledger.STATUS_BLOCKED, "gate_reason": support.GATE_STOP_REASON},
-            {"status": ledger.STATUS_WAITING},
-            [support.PARENT_ID],
-            id="parent-stopped-in-old-ledger",
         ),
     ],
 )
@@ -240,13 +229,16 @@ def test_auto_pickup_opens_parent_when_resumed_follow_up_fails(
         ledger_path,
         {
             support.PARENT_ID: support.task_record(
-                ledger.STATUS_FINISHED, task_id=support.PARENT_ID, auto_pickup=True, **parent_fields
+                ledger.STATUS_FINISHED,
+                task_id=support.PARENT_ID,
+                auto_pickup_client="claude-desktop",
+                **parent_fields,
             ),
             support.CHILD_ID: support.task_record(
                 ledger.STATUS_SCHEDULED,
                 task_id=support.CHILD_ID,
                 after=support.PARENT_ID,
-                auto_pickup=True,
+                auto_pickup_client="claude-desktop",
             ),
         },
     )

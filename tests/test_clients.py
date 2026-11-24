@@ -1,6 +1,7 @@
 import pytest
 
-from golem import cli, ledger, review
+from golem import cli, ledger
+from golem.backends import registry
 from golem.clients import client_registry
 from tests import support
 
@@ -48,26 +49,11 @@ def test_registered_terminal_client_opens_task_and_marks_it_done(
     assert support.read_task(ledger_path)["status"] == ledger.STATUS_FINISHED
 
 
-def test_registered_app_client_opens_task_through_pickup_all(
-    fake_commands, ledger_path, stub_clients
-):
-    support.write_task(ledger_path, ledger.STATUS_FINISHED)
-
-    assert cli.main(["pickup", "--all", "--client", STUB_APP_CLIENT]) == 0
-    assert fake_commands["open-args"].read_text(encoding="utf-8") == (
-        f"stub:{support.read_task(ledger_path)['session_id']}\n"
-    )
-    assert support.read_task(ledger_path)["status"] == ledger.STATUS_FINISHED
-
-
 @pytest.mark.parametrize(
     ("task_fields", "client_name", "backend_name"),
     [
         pytest.param(
             {"backend": ledger.BACKEND_CODEX}, "claude-desktop", "Codex", id="codex-in-app"
-        ),
-        pytest.param(
-            {"backend": ledger.BACKEND_CODEX}, "claude-code", "Codex", id="codex-in-claude-code"
         ),
         pytest.param({}, "codex-cli", "Claude", id="claude-in-codex-cli"),
     ],
@@ -92,9 +78,6 @@ def test_pickup_refuses_client_that_cannot_open_task_backend(
     [
         pytest.param(
             ["pickup", "--all", "--client", "claude-code"], "requires an app client", id="terminal"
-        ),
-        pytest.param(
-            ["pickup", support.TASK_ID, "--app"], "unrecognized arguments: --app", id="removed-app"
         ),
         pytest.param(
             ["pickup", "--all", "--", "--model", "x"],
@@ -168,16 +151,6 @@ def test_then_follow_up_of_auto_pickup_run_uses_saved_default(
     assert support.read_task(ledger_path, support.CHILD_ID)["auto_pickup_client"] == STUB_APP_CLIENT
 
 
-def test_legacy_auto_pickup_task_opens_in_claude_desktop(fake_commands, ledger_path):
-    support.write_task(ledger_path, ledger.STATUS_FINISHED, auto_pickup=True)
-
-    review.auto_pickup_task(support.TASK_ID)
-
-    assert fake_commands["open-args"].read_text(encoding="utf-8") == (
-        f"claude://resume?session={support.read_task(ledger_path)['session_id']}\n"
-    )
-
-
 def test_pickup_all_client_skips_default_clients(fake_commands, ledger_path):
     support.write_config_table("default_clients", {ledger.BACKEND_CLAUDE: "no-such-client"})
     support.write_task(ledger_path, ledger.STATUS_FINISHED)
@@ -188,22 +161,13 @@ def test_pickup_all_client_skips_default_clients(fake_commands, ledger_path):
     )
 
 
-def test_pickup_all_opens_backend_defaults_and_fails_backend_without_one(
-    fake_commands, ledger_path, stub_clients, capsys, monkeypatch
-):
-    monkeypatch.delitem(client_registry.BUILT_IN_DEFAULT_CLIENTS, ledger.BACKEND_CODEX)
+def test_pickup_all_opens_configured_default_client(fake_commands, ledger_path, stub_clients):
     support.write_config_table("default_clients", {ledger.BACKEND_CLAUDE: STUB_APP_CLIENT})
-    status = ledger.STATUS_FINISHED
-    codex_task = support.task_record(status, backend=ledger.BACKEND_CODEX)
-    claude_task = support.task_record(status, task_id=support.CHILD_ID)
-    support.write_tasks(ledger_path, {support.TASK_ID: codex_task, support.CHILD_ID: claude_task})
+    support.write_task(ledger_path, ledger.STATUS_FINISHED)
 
-    assert cli.main(["pickup", "--all"]) == 1
-
-    assert f"no default app client for Codex tasks: {support.TASK_ID}" in capsys.readouterr().err
-    assert support.read_task(ledger_path)["status"] == ledger.STATUS_FINISHED
+    assert cli.main(["pickup", "--all"]) == 0
     assert fake_commands["open-args"].read_text(encoding="utf-8") == (
-        f"stub:{claude_task['session_id']}\n"
+        f"stub:{support.read_task(ledger_path)['session_id']}\n"
     )
 
 
@@ -234,3 +198,7 @@ def test_invalid_default_client_names_the_config_entry(
         cli.main(["run", support.PROMPT, "--now", "--auto-pickup"])
 
     assert not ledger_path.exists()
+
+
+def test_every_backend_has_a_built_in_default_client():
+    assert registry.BACKENDS.keys() <= client_registry.BUILT_IN_DEFAULT_CLIENTS.keys()

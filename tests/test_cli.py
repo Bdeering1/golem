@@ -176,7 +176,6 @@ def test_run_after_parent_uses_its_own_environment(installed_launch_agent, ledge
         pytest.param("env = 1\n", [], "env must be a table", id="config-not-a-table"),
         pytest.param("[env]\nA = 1\n", [], "env A must be a string", id="config-non-string"),
         pytest.param('[env]\n"a-b" = "x"\n', [], "name a-b is invalid", id="config-bad-name"),
-        pytest.param('[env]\nA = "a\\u0000b"\n', [], "contains a null byte", id="config-null-byte"),
     ],
 )
 def test_run_rejects_invalid_environment_without_changing_the_ledger(

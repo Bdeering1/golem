@@ -1,5 +1,4 @@
 import sys
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
@@ -56,7 +55,6 @@ def record_worktree_resource(
     resource: ledger.WorktreeResource = {
         "owner": owner,
         "session_id": session_id,
-        "created_at": datetime.now(UTC).isoformat(),
     }
     if repository is not None:
         resource["repository"] = repository
@@ -181,9 +179,7 @@ def worktree_task_ids(tasks: ledger.Tasks, worktree: str) -> list[str]:
 
 
 def create_worktree(task_id: str, task: ledger.Task) -> str | None:
-    worktree = task.get("worktree")
-    if worktree is None:
-        return "golem: task has no worktree"
+    worktree = cast("str", task.get("worktree"))
     cwd = task["cwd"]
     git.fetch_stale_default_branch(cwd)
     base = git.ORIGIN_HEAD

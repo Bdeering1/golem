@@ -205,8 +205,6 @@ def finished_chain_column(tasks: ledger.Tasks, chain_ids: set[str], today: date)
         column = COLUMN_DONE if thread_state in DONE_THREAD_STATES else COLUMN_REVIEW
         return column, f"thread {thread_state}"
     finished_at = max(tasks[chain_id].get("finished_at", "") for chain_id in chain_ids)
-    if not finished_at:
-        return COLUMN_REVIEW, "no PR"
     age_days = (today - datetime.fromisoformat(finished_at).astimezone().date()).days
     column = COLUMN_DONE if age_days >= ledger.CHAIN_DONE_AGE_DAYS else COLUMN_REVIEW
     return column, f"no PR; finished {age_days}d ago"
@@ -244,7 +242,7 @@ def list_rows(tasks: ledger.Tasks, today: date) -> list[ListRow]:
         shown_task = tasks[shown_id]
         column, chain_reason = chain_column(tasks, chain_ids, today)
         step_count = max(chains.task_depth(tasks, chain_id) for chain_id in chain_ids)
-        root_id = chains.root_task_id(tasks, shown_id)
+        root_id = ledger.root_task_id(tasks, shown_id)
         rows.append(
             ListRow(
                 shown_id,

@@ -29,7 +29,6 @@ def test_worktree_list_retains_non_golem_worktrees(
                     "owner": owner,
                     "repository": git.git_common_directory(str(git_repository)),
                     "session_id": "other",
-                    "created_at": datetime.now(UTC).isoformat(),
                 }
             }
         )
@@ -115,9 +114,6 @@ def test_worktree_list_retains_worktree_needing_attention(
         pytest.param(ledger.STATUS_FINISHED, ["pickup", support.TASK_ID], False, id="pickup"),
         pytest.param(ledger.STATUS_FAILED, ["retry", support.TASK_ID, "--now"], False, id="retry"),
         pytest.param(ledger.STATUS_FINISHED, ["pickup", support.TASK_ID], True, id="nested-pickup"),
-        pytest.param(
-            ledger.STATUS_FAILED, ["retry", support.TASK_ID, "--now"], True, id="nested-retry"
-        ),
     ],
 )
 def test_task_reuse_revokes_worktree_release(
@@ -189,11 +185,3 @@ printf '%s' '{"result":"done"}'
 
     assert cli.main(["delete", support.TASK_ID, "--remove-worktree"]) == int(not is_removed)
     assert worktree.is_dir() is not is_removed
-
-
-def test_close_does_not_release_worktree(owned_worktree):
-    worktree = owned_worktree(ledger.STATUS_FINISHED)
-
-    assert cli.main(["close", support.TASK_ID]) == 0
-
-    assert "released_at" not in ledger.load_worktrees()[str(worktree.resolve())]

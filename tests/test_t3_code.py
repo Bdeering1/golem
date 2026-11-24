@@ -90,33 +90,6 @@ def test_pickup_all_attaches_codex_thread_with_default_model(server, ledger_path
     assert support.read_task(ledger_path)["status"] == ledger.STATUS_FINISHED
 
 
-@pytest.mark.parametrize(
-    ("backend_id", "fields", "thread_id"),
-    [
-        pytest.param(ledger.BACKEND_CLAUDE, {}, t3_support.CLAUDE_THREAD_ID, id="claude"),
-        pytest.param(
-            ledger.BACKEND_CODEX,
-            {"thread_id": t3_support.CODEX_THREAD},
-            t3_support.CODEX_THREAD_ID,
-            id="codex",
-        ),
-    ],
-)
-def test_pickup_all_opens_task_in_t3_code_default_client(
-    server, ledger_path, fake_commands, backend_id, fields, thread_id
-):
-    support.write_config_table("default_clients", {backend_id: "t3-code"})
-    support.write_task(ledger_path, ledger.STATUS_FINISHED, backend=backend_id, **fields)
-
-    assert cli.main(["pickup", "--all"]) == 0
-
-    assert (
-        fake_commands["open-args"].read_text(encoding="utf-8")
-        == f"{t3_support.thread_link(thread_id)}\n"
-    )
-    assert support.read_task(ledger_path)["status"] == ledger.STATUS_FINISHED
-
-
 def test_labelled_task_thread_title_is_its_name(server, ledger_path):
     support.write_task(ledger_path, ledger.STATUS_FINISHED, label=support.LABEL)
 

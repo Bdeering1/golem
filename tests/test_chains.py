@@ -164,7 +164,7 @@ def test_after_succeeded_auto_pickup_parent_does_not_pass_to_child(
         ledger_path,
         ledger.STATUS_FINISHED,
         task_id=support.PARENT_ID,
-        auto_pickup=True,
+        auto_pickup_client="claude-desktop",
     )
 
     assert cli.main(["run", support.CHILD_PROMPT, "--after", support.PARENT_ID]) == 0

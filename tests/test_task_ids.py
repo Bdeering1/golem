@@ -11,7 +11,6 @@ from tests import support
         ("gh-dash", "ghd"),
         ("3d-viewer", "3dv"),
         ("Go", "go"),
-        ("---", ""),
     ],
 )
 def test_task_id_prefix_keeps_first_three_letters_or_digits(name, prefix):

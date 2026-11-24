@@ -142,9 +142,3 @@ def default_clients(configured: dict[str, str], invalid_config_prefix: str) -> d
                 f"{entry_message_prefix} names {client_name}, which cannot open {backend_name} tasks"
             )
     return {**BUILT_IN_DEFAULT_CLIENTS, **configured}
-
-
-def task_auto_pickup_client(task: ledger.Task) -> str | None:
-    if not ledger.has_auto_pickup(task):
-        return None
-    return task.get("auto_pickup_client", CLAUDE_DESKTOP_CLIENT)

@@ -200,8 +200,6 @@ def retry_task(task_id: str, *, is_now: bool, at_text: str | None) -> int:
             record["worktree"] = task["worktree"]
         if "worktree_pending" in task:
             record["worktree_pending"] = task["worktree_pending"]
-        if "auto_pickup" in task:
-            record["auto_pickup"] = task["auto_pickup"]
         if "auto_pickup_client" in task:
             record["auto_pickup_client"] = task["auto_pickup_client"]
         if "no_worktree" in task:

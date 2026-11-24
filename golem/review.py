@@ -92,14 +92,6 @@ def pickup(
         locks.release_lock(directory_lock_file)
 
 
-def default_client_name(task_id: str, task: ledger.Task, default_clients: dict[str, str]) -> str:
-    client_name = default_clients.get(task["backend"])
-    if client_name is None:
-        backend = registry.task_backend(task)
-        raise SystemExit(f"golem: no default app client for {backend.NAME} tasks: {task_id}")
-    return client_name
-
-
 def pickup_all(client_name: str | None, default_clients: dict[str, str]) -> int:
     tasks = ledger.load_tasks()
     task_ids = [task_id for task_id in tasks if chains.is_ready_to_open(tasks, task_id)]
@@ -110,9 +102,7 @@ def pickup_all(client_name: str | None, default_clients: dict[str, str]) -> int:
     has_failure = False
     for task_id in task_ids:
         try:
-            task_client_name = client_name or default_client_name(
-                task_id, tasks[task_id], default_clients
-            )
+            task_client_name = client_name or default_clients[tasks[task_id]["backend"]]
             has_failure |= (
                 pickup(task_id, client_name=task_client_name, is_ready_to_open_required=True) != 0
             )
@@ -130,7 +120,7 @@ def auto_pickup_task(task_id: str) -> None:
     if task.get("status") == ledger.STATUS_FAILED:
         auto_pickup_task(task.get("after", ""))
         return
-    client_name = client_registry.task_auto_pickup_client(task)
+    client_name = task.get("auto_pickup_client")
     if client_name is None or not chains.is_ready_to_open(tasks, task_id):
         return
     try:
