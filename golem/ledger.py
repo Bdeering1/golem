@@ -198,12 +198,7 @@ def ledger_temporary_prefix(task_ledger_path: Path) -> str:
 
 
 def load_tasks() -> Tasks:
-    tasks = cast("dict[str, JsonObject]", load_json(ledger_path()))
-    for task in tasks.values():
-        # Older ledgers store gate_stop_reason under its former name, gate_reason.
-        if "gate_reason" in task:
-            task["gate_stop_reason"] = task.pop("gate_reason")
-    return cast("Tasks", tasks)
+    return cast("Tasks", load_json(ledger_path()))
 
 
 def load_worktrees() -> Worktrees:
