@@ -1,6 +1,6 @@
 import pytest
 
-from golem import cli, ledger, review
+from golem import cli, ledger
 from golem.clients import client_registry
 from tests import support
 
@@ -148,16 +148,6 @@ def test_then_follow_up_of_auto_pickup_run_uses_saved_default(
     )
 
     assert support.read_task(ledger_path, support.CHILD_ID)["auto_pickup_client"] == STUB_APP_CLIENT
-
-
-def test_legacy_auto_pickup_task_opens_in_claude_desktop(fake_commands, ledger_path):
-    support.write_task(ledger_path, ledger.STATUS_FINISHED, auto_pickup=True)
-
-    review.auto_pickup_task(support.TASK_ID)
-
-    assert fake_commands["open-args"].read_text(encoding="utf-8") == (
-        f"claude://resume?session={support.read_task(ledger_path)['session_id']}\n"
-    )
 
 
 def test_pickup_all_client_skips_default_clients(fake_commands, ledger_path):

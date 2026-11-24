@@ -78,7 +78,6 @@ def test_run_option_rejects_backend_without_changing_ledger(
 @pytest.mark.parametrize(
     "fields",
     [
-        {"auto_pickup": True},
         {"auto_pickup_client": "claude-desktop"},
         {"no_worktree": True},
         {"gate": "true"},

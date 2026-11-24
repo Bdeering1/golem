@@ -92,7 +92,6 @@ class Task(TypedDict):
     finished_at: NotRequired[str]
     opened_at: NotRequired[str]
     closed_at: NotRequired[str]
-    auto_pickup: NotRequired[bool]
     auto_pickup_client: NotRequired[str]
     no_worktree: NotRequired[bool]
     gate: NotRequired[str]
@@ -282,10 +281,6 @@ def is_cancellable(task: Task) -> bool:
     if task.get("status") == STATUS_FINISHED:
         return "command_process_group" in task
     return task.get("status") in CANCELLABLE_STATUSES
-
-
-def has_auto_pickup(task: Task) -> bool:
-    return "auto_pickup_client" in task or task.get("auto_pickup", False)
 
 
 def directory_to_lock(task: Task, worktree: str | None) -> str:

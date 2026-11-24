@@ -229,13 +229,16 @@ def test_auto_pickup_opens_parent_when_resumed_follow_up_fails(
         ledger_path,
         {
             support.PARENT_ID: support.task_record(
-                ledger.STATUS_FINISHED, task_id=support.PARENT_ID, auto_pickup=True, **parent_fields
+                ledger.STATUS_FINISHED,
+                task_id=support.PARENT_ID,
+                auto_pickup_client="claude-desktop",
+                **parent_fields,
             ),
             support.CHILD_ID: support.task_record(
                 ledger.STATUS_SCHEDULED,
                 task_id=support.CHILD_ID,
                 after=support.PARENT_ID,
-                auto_pickup=True,
+                auto_pickup_client="claude-desktop",
             ),
         },
     )
