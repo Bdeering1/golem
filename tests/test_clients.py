@@ -1,6 +1,7 @@
 import pytest
 
 from golem import cli, ledger
+from golem.backends import registry
 from golem.clients import client_registry
 from tests import support
 
@@ -197,3 +198,7 @@ def test_invalid_default_client_names_the_config_entry(
         cli.main(["run", support.PROMPT, "--now", "--auto-pickup"])
 
     assert not ledger_path.exists()
+
+
+def test_every_backend_has_a_built_in_default_client():
+    assert registry.BACKENDS.keys() <= client_registry.BUILT_IN_DEFAULT_CLIENTS.keys()
