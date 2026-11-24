@@ -42,7 +42,10 @@ impl Status {
     }
 
     pub fn list_index(self) -> usize {
-        LIST_STATUS_ORDER.iter().position(|status| *status == self).unwrap_or(0)
+        LIST_STATUS_ORDER
+            .iter()
+            .position(|status| *status == self)
+            .unwrap_or(0)
     }
 }
 
@@ -106,7 +109,11 @@ impl Task {
     pub fn is_cancellable(&self) -> bool {
         match self.status() {
             Status::Finished => self.command_process_group.is_some(),
-            Status::Scheduled | Status::Waiting | Status::Running | Status::Failed | Status::Blocked => true,
+            Status::Scheduled
+            | Status::Waiting
+            | Status::Running
+            | Status::Failed
+            | Status::Blocked => true,
             Status::Cancelled => false,
         }
     }
@@ -131,7 +138,9 @@ pub fn state_directory() -> PathBuf {
 }
 
 pub fn progress_path(session_id: &str) -> PathBuf {
-    state_directory().join(PROGRESS_DIRECTORY_NAME).join(format!("{session_id}.log"))
+    state_directory()
+        .join(PROGRESS_DIRECTORY_NAME)
+        .join(format!("{session_id}.log"))
 }
 
 pub fn load_tasks() -> Result<Tasks, String> {

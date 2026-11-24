@@ -28,6 +28,10 @@ pub const TOOL_MARK: &str = "\u{25b8} ";
 
 static EXIT_PREFIX_PATTERN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[^:]{1,40} exited (?:with status )?\d+:\s*").unwrap());
+static MARKDOWN_HEADING_PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)^\s*#+\s*").unwrap());
+static MARKDOWN_EMPHASIS_PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\*\*|__|`").unwrap());
 static PATH_PREFIX_PATTERN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[~/]\S*/").unwrap());
 static COMMAND_OPTION_PATTERN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^--?[A-Za-z][\w-]*(?:=\S*)?$").unwrap());
@@ -37,7 +41,10 @@ static COMMAND_RUNNER_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
 static SHORT_REASON_PATTERNS: LazyLock<[(Regex, &'static str); 3]> = LazyLock::new(|| {
     [
         (Regex::new(r"^(?:fatal|error): ").unwrap(), ""),
-        (Regex::new(r"a branch named '[^']+' already exists").unwrap(), "branch exists"),
+        (
+            Regex::new(r"a branch named '[^']+' already exists").unwrap(),
+            "branch exists",
+        ),
         (Regex::new(r"\b(\w+) found (\d+)").unwrap(), "$2 $1"),
     ]
 });
@@ -50,7 +57,12 @@ pub enum Column {
     Done,
 }
 
-pub const BOARD_COLUMNS: [Column; 4] = [Column::Queued, Column::Running, Column::Review, Column::Done];
+pub const BOARD_COLUMNS: [Column; 4] = [
+    Column::Queued,
+    Column::Running,
+    Column::Review,
+    Column::Done,
+];
 
 impl Column {
     pub fn title(self) -> &'static str {
@@ -72,7 +84,10 @@ impl Column {
     }
 
     fn index(self) -> usize {
-        BOARD_COLUMNS.iter().position(|column| *column == self).unwrap_or(0)
+        BOARD_COLUMNS
+            .iter()
+            .position(|column| *column == self)
+            .unwrap_or(0)
     }
 }
 
@@ -173,7 +188,10 @@ impl Action {
     }
 
     pub fn is_confirmed(self) -> bool {
-        matches!(self, Action::Close | Action::CloseAll | Action::Cancel | Action::Retry)
+        matches!(
+            self,
+            Action::Close | Action::CloseAll | Action::Cancel | Action::Retry
+        )
     }
 
     pub fn unavailable_text(self) -> &'static str {
@@ -181,7 +199,9 @@ impl Action {
             Action::Pickup => "This task can't be picked up",
             Action::Watch => "This task has no log yet",
             Action::OpenPullRequest => "This task has no pull request",
-            Action::Retry | Action::RerunGate => "Only failed, cancelled or blocked tasks can be retried",
+            Action::Retry | Action::RerunGate => {
+                "Only failed, cancelled or blocked tasks can be retried"
+            }
             Action::Close => "Only finished tasks in Review can be closed",
             Action::CloseAll => "Review has no finished tasks to close",
             Action::Cancel => "This task can't be cancelled",
@@ -204,7 +224,11 @@ pub fn task_depth(tasks: &Tasks, task_id: &str) -> usize {
 
 pub fn root_task_id<'a>(tasks: &'a Tasks, task_id: &'a str) -> &'a str {
     let mut current = task_id;
-    while let Some(parent) = tasks[current].after.as_deref().filter(|parent| tasks.contains_key(*parent)) {
+    while let Some(parent) = tasks[current]
+        .after
+        .as_deref()
+        .filter(|parent| tasks.contains_key(*parent))
+    {
         current = parent;
     }
     current
@@ -223,7 +247,11 @@ pub fn chain_task_ids(tasks: &Tasks, task_id: &str) -> BTreeSet<String> {
     let mut pending_ids = vec![task_id.to_string()];
     while let Some(current_id) = pending_ids.pop() {
         let mut adjacent_ids: Vec<&str> = dependent_task_ids(tasks, &current_id);
-        if let Some(parent) = tasks[&current_id].after.as_deref().filter(|parent| tasks.contains_key(*parent)) {
+        if let Some(parent) = tasks[&current_id]
+            .after
+            .as_deref()
+            .filter(|parent| tasks.contains_key(*parent))
+        {
             adjacent_ids.push(parent);
         }
         for adjacent_id in adjacent_ids {
@@ -258,7 +286,9 @@ fn has_field_in_subtree(tasks: &Tasks, task_id: &str, has_field: fn(&Task) -> bo
 
 fn is_counted_opened(tasks: &Tasks, task_id: &str) -> bool {
     has_field_in_subtree(tasks, task_id, |task| task.opened_at.is_some())
-        || has_field_in_subtree(tasks, root_task_id(tasks, task_id), |task| task.closed_at.is_some())
+        || has_field_in_subtree(tasks, root_task_id(tasks, task_id), |task| {
+            task.closed_at.is_some()
+        })
 }
 
 fn is_ready_to_open(tasks: &Tasks, task_id: &str) -> bool {
@@ -269,7 +299,12 @@ fn is_ready_to_open(tasks: &Tasks, task_id: &str) -> bool {
         Status::Blocked => true,
         Status::Finished => dependent_task_ids(tasks, task_id)
             .into_iter()
-            .all(|dependent_id| matches!(tasks[dependent_id].status(), Status::Failed | Status::Cancelled)),
+            .all(|dependent_id| {
+                matches!(
+                    tasks[dependent_id].status(),
+                    Status::Failed | Status::Cancelled
+                )
+            }),
         _ => false,
     }
 }
@@ -303,7 +338,9 @@ pub fn task_name(task_id: &str, task: &Task) -> String {
 }
 
 fn parse_time(timestamp: &str) -> Option<DateTime<Local>> {
-    DateTime::parse_from_rfc3339(timestamp).ok().map(|time| time.with_timezone(&Local))
+    DateTime::parse_from_rfc3339(timestamp)
+        .ok()
+        .map(|time| time.with_timezone(&Local))
 }
 
 fn local_date(timestamp: &str) -> Option<NaiveDate> {
@@ -355,7 +392,11 @@ pub fn duration_text(seconds: f64) -> String {
     if days >= DAYS_PER_YEAR {
         return format!("{}y", days / DAYS_PER_YEAR);
     }
-    if hours > 0 { format!("{days}d {hours}h") } else { format!("{days}d") }
+    if hours > 0 {
+        format!("{days}d {hours}h")
+    } else {
+        format!("{days}d")
+    }
 }
 
 pub fn moment_text(timestamp: Option<&str>, now: DateTime<Local>) -> String {
@@ -373,12 +414,20 @@ pub fn moment_text(timestamp: Option<&str>, now: DateTime<Local>) -> String {
 
 fn short_age_text(timestamp: Option<&str>, now: DateTime<Local>) -> String {
     timestamp.map_or_else(String::new, |timestamp| {
-        duration_text(seconds_since(timestamp, now)).split(' ').next().unwrap_or("").to_string()
+        duration_text(seconds_since(timestamp, now))
+            .split(' ')
+            .next()
+            .unwrap_or("")
+            .to_string()
     })
 }
 
 fn list_reason(task: &Task) -> String {
-    if let Some(reason) = task.gate_stop_reason.as_deref().or(task.setup_failure_reason.as_deref()) {
+    if let Some(reason) = task
+        .gate_stop_reason
+        .as_deref()
+        .or(task.setup_failure_reason.as_deref())
+    {
         return first_line(reason).to_string();
     }
     match (&task.setup_busy_retry_count, &task.setup_directory) {
@@ -431,8 +480,14 @@ pub fn chain_pull_requests(tasks: &Tasks, chain_ids: &[String]) -> Vec<PullReque
     let mut sorted_ids: Vec<&String> = chain_ids.iter().collect();
     sorted_ids.sort();
     let mut pull_requests: Vec<PullRequest> = Vec::new();
-    for pull_request in sorted_ids.into_iter().flat_map(|id| tasks[id].pull_requests.iter()) {
-        match pull_requests.iter_mut().find(|known| known.url == pull_request.url) {
+    for pull_request in sorted_ids
+        .into_iter()
+        .flat_map(|id| tasks[id].pull_requests.iter())
+    {
+        match pull_requests
+            .iter_mut()
+            .find(|known| known.url == pull_request.url)
+        {
             Some(known) => *known = pull_request.clone(),
             None => pull_requests.push(pull_request.clone()),
         }
@@ -440,29 +495,60 @@ pub fn chain_pull_requests(tasks: &Tasks, chain_ids: &[String]) -> Vec<PullReque
     pull_requests
 }
 
-fn finished_chain_column(tasks: &Tasks, chain_ids: &[String], now: DateTime<Local>) -> (Column, String) {
+fn finished_chain_column(
+    tasks: &Tasks,
+    chain_ids: &[String],
+    now: DateTime<Local>,
+) -> (Column, String) {
     if chain_ids.iter().any(|id| tasks[id].closed_at.is_some()) {
         return (Column::Done, "closed".to_string());
     }
     let pull_requests = chain_pull_requests(tasks, chain_ids);
     if !pull_requests.is_empty() {
-        let is_finished = pull_requests.iter().all(|pr| pr.state != PULL_REQUEST_STATE_OPEN);
-        let column = if is_finished { Column::Done } else { Column::Review };
+        let is_finished = pull_requests
+            .iter()
+            .all(|pr| pr.state != PULL_REQUEST_STATE_OPEN);
+        let column = if is_finished {
+            Column::Done
+        } else {
+            Column::Review
+        };
         return (column, pull_request_summary(&pull_requests));
     }
     let last_step_id = chain_ids
         .iter()
         .filter(|id| tasks[*id].status() != Status::Cancelled)
         .max_by_key(|id| (task_depth(tasks, id), (*id).clone()));
-    if let Some(step) = last_step_id.map(|id| &tasks[id]).filter(|step| step.t3_code_thread_id.is_some()) {
-        let thread_state = step.t3_code_thread_state.as_deref().unwrap_or(THREAD_STATE_UNSETTLED);
-        let column = if DONE_THREAD_STATES.contains(&thread_state) { Column::Done } else { Column::Review };
+    if let Some(step) = last_step_id
+        .map(|id| &tasks[id])
+        .filter(|step| step.t3_code_thread_id.is_some())
+    {
+        let thread_state = step
+            .t3_code_thread_state
+            .as_deref()
+            .unwrap_or(THREAD_STATE_UNSETTLED);
+        let column = if DONE_THREAD_STATES.contains(&thread_state) {
+            Column::Done
+        } else {
+            Column::Review
+        };
         return (column, format!("thread {thread_state}"));
     }
-    let finished_at = chain_ids.iter().filter_map(|id| tasks[id].finished_at.as_deref()).max().unwrap_or("");
+    let finished_at = chain_ids
+        .iter()
+        .filter_map(|id| tasks[id].finished_at.as_deref())
+        .max()
+        .unwrap_or("");
     let age_days = local_date(finished_at).map_or(0, |date| (now.date_naive() - date).num_days());
-    let column = if age_days >= CHAIN_DONE_AGE_DAYS { Column::Done } else { Column::Review };
-    (column, format!("{NO_PR_TEXT}{FINISHED_AGE_SEPARATOR}{age_days}d ago"))
+    let column = if age_days >= CHAIN_DONE_AGE_DAYS {
+        Column::Done
+    } else {
+        Column::Review
+    };
+    (
+        column,
+        format!("{NO_PR_TEXT}{FINISHED_AGE_SEPARATOR}{age_days}d ago"),
+    )
 }
 
 fn shown_task_id(tasks: &Tasks, chain_ids: &[String]) -> String {
@@ -477,18 +563,28 @@ fn shown_task_id(tasks: &Tasks, chain_ids: &[String]) -> String {
 }
 
 fn timestamp_seconds(timestamp: Option<&str>) -> f64 {
-    timestamp.and_then(parse_time).map_or(0.0, |time| time.timestamp_millis() as f64 / 1000.0)
+    timestamp
+        .and_then(parse_time)
+        .map_or(0.0, |time| time.timestamp_millis() as f64 / 1000.0)
 }
 
 fn board_sort_key(row: &Row, tasks: &Tasks) -> (usize, usize, f64, String) {
     let task = &tasks[&row.task_id];
-    let status_index = BOARD_STATUS_ORDER.iter().position(|status| *status == row.status).unwrap_or(0);
+    let status_index = BOARD_STATUS_ORDER
+        .iter()
+        .position(|status| *status == row.status)
+        .unwrap_or(0);
     let moment = match row.column {
         Column::Queued => timestamp_seconds(task.due_at.as_deref()),
         Column::Running => timestamp_seconds(task.started_at.as_deref()),
         _ => -timestamp_seconds(task.finished_at.as_deref().or(task.started_at.as_deref())),
     };
-    (row.column.index(), status_index, moment, row.task_id.clone())
+    (
+        row.column.index(),
+        status_index,
+        moment,
+        row.task_id.clone(),
+    )
 }
 
 pub fn board_rows(tasks: &Tasks, now: DateTime<Local>) -> Vec<Row> {
@@ -505,7 +601,11 @@ pub fn board_rows(tasks: &Tasks, now: DateTime<Local>) -> Vec<Row> {
                 Status::Scheduled | Status::Waiting => (Column::Queued, String::new()),
                 Status::Cancelled => (Column::Done, String::new()),
             };
-            let step_count = chain_ids.iter().map(|id| task_depth(tasks, id)).max().unwrap_or(1);
+            let step_count = chain_ids
+                .iter()
+                .map(|id| task_depth(tasks, id))
+                .max()
+                .unwrap_or(1);
             let root_id = root_task_id(tasks, &shown_id).to_string();
             Row {
                 label: tasks[&root_id].label.clone().unwrap_or_default(),
@@ -525,7 +625,9 @@ pub fn board_rows(tasks: &Tasks, now: DateTime<Local>) -> Vec<Row> {
         })
         .collect();
     rows.sort_by(|left, right| {
-        board_sort_key(left, tasks).partial_cmp(&board_sort_key(right, tasks)).unwrap_or(std::cmp::Ordering::Equal)
+        board_sort_key(left, tasks)
+            .partial_cmp(&board_sort_key(right, tasks))
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
     rows
 }
@@ -542,7 +644,10 @@ pub fn recent_activity(session_id: &str) -> Vec<String> {
     if file.seek(SeekFrom::Start(start)).is_err() || file.read_to_end(&mut bytes).is_err() {
         return Vec::new();
     }
-    activity_lines(&String::from_utf8_lossy(&bytes), bytes.len() as u64 >= ACTIVITY_TAIL_BYTES)
+    activity_lines(
+        &String::from_utf8_lossy(&bytes),
+        bytes.len() as u64 >= ACTIVITY_TAIL_BYTES,
+    )
 }
 
 fn activity_lines(tail: &str, is_cut: bool) -> Vec<String> {
@@ -561,9 +666,18 @@ pub fn board_snapshot(tasks: Tasks, now: DateTime<Local>) -> Snapshot {
     let activity = rows
         .iter()
         .filter(|row| row.status == Status::Running)
-        .map(|row| (row.task_id.clone(), recent_activity(&tasks[&row.task_id].session_id)))
+        .map(|row| {
+            (
+                row.task_id.clone(),
+                recent_activity(&tasks[&row.task_id].session_id),
+            )
+        })
         .collect();
-    Snapshot { tasks, rows, activity }
+    Snapshot {
+        tasks,
+        rows,
+        activity,
+    }
 }
 
 pub fn is_matching(row: &Row, tasks: &Tasks, query: &str) -> bool {
@@ -572,17 +686,25 @@ pub fn is_matching(row: &Row, tasks: &Tasks, query: &str) -> bool {
         .iter()
         .map(|id| {
             let task = &tasks[id];
-            format!("{id} {} {}", task.label.as_deref().unwrap_or(""), task.prompt)
+            format!(
+                "{id} {} {}",
+                task.label.as_deref().unwrap_or(""),
+                task.prompt
+            )
         })
         .collect();
-    format!("{} {}", row.directory, searched.join(" ")).to_lowercase().contains(&query.to_lowercase())
+    format!("{} {}", row.directory, searched.join(" "))
+        .to_lowercase()
+        .contains(&query.to_lowercase())
 }
 
 // ---- row facts ------------------------------------------------------------------------------
 
 pub fn is_stuck(row: &Row, task: &Task, now: DateTime<Local>) -> bool {
     match (row.status, &task.due_at) {
-        (Status::Scheduled, Some(due_at)) => !list_reason(task).is_empty() && seconds_since(due_at, now) > 0.0,
+        (Status::Scheduled, Some(due_at)) => {
+            !list_reason(task).is_empty() && seconds_since(due_at, now) > 0.0
+        }
         _ => false,
     }
 }
@@ -608,14 +730,25 @@ fn when_text(task: &Task, now: DateTime<Local>) -> String {
     match task.status() {
         Status::Scheduled if task.due_at.is_some() => {
             let seconds = -seconds_since(task.due_at.as_deref().unwrap_or(""), now);
-            let verb = if task.is_usage_limit_pause() { "resumes" } else { "in" };
-            if seconds > 0.0 { format!("{verb} {}", duration_text(seconds)) } else { "due now".to_string() }
+            let verb = if task.is_usage_limit_pause() {
+                "resumes"
+            } else {
+                "in"
+            };
+            if seconds > 0.0 {
+                format!("{verb} {}", duration_text(seconds))
+            } else {
+                "due now".to_string()
+            }
         }
         Status::Running if task.started_at.is_some() => {
             duration_text(seconds_since(task.started_at.as_deref().unwrap_or(""), now))
         }
         Status::Blocked | Status::Failed | Status::Finished if stopped_at.is_some() => {
-            format!("{} ago", duration_text(seconds_since(stopped_at.unwrap_or(""), now)))
+            format!(
+                "{} ago",
+                duration_text(seconds_since(stopped_at.unwrap_or(""), now))
+            )
         }
         _ => String::new(),
     }
@@ -627,7 +760,11 @@ pub fn card_when_text(row: &Row, task: &Task, now: DateTime<Local>) -> String {
         return format!("stuck {}", short_age_text(task.due_at.as_deref(), now));
     }
     match row.status {
-        Status::Waiting => task.after.as_ref().map(|after| format!("after {after}")).unwrap_or_default(),
+        Status::Waiting => task
+            .after
+            .as_ref()
+            .map(|after| format!("after {after}"))
+            .unwrap_or_default(),
         Status::Cancelled => {
             let stopped_at = task.finished_at.as_deref().or(task.started_at.as_deref());
             stopped_at.map_or_else(
@@ -643,12 +780,19 @@ pub fn start_text(row: &Row, task: &Task, now: DateTime<Local>) -> String {
     let (Status::Scheduled, Some(due_at)) = (row.status, task.due_at.as_deref()) else {
         return String::new();
     };
-    let verb = if seconds_since(due_at, now) > 0.0 { "was due" } else { "starts" };
+    let verb = if seconds_since(due_at, now) > 0.0 {
+        "was due"
+    } else {
+        "starts"
+    };
     format!("{verb} {}", display_time(due_at, now))
 }
 
 pub fn activity_text(line: &str) -> String {
-    if let Some(prefix) = SHELL_LINE_PREFIXES.iter().find(|prefix| line.starts_with(**prefix)) {
+    if let Some(prefix) = SHELL_LINE_PREFIXES
+        .iter()
+        .find(|prefix| line.starts_with(**prefix))
+    {
         return format!("{SHELL_PROMPT}{}", &line[prefix.len()..]);
     }
     match line.strip_prefix(TOOL_LINE_PREFIX) {
@@ -659,29 +803,50 @@ pub fn activity_text(line: &str) -> String {
 
 /// Keeps the part of a word after its last directory separator, as golem's card text does.
 fn without_directories(word: &str) -> &str {
-    let cut = word.char_indices().rev().find(|(index, char)| *char == '/' && index + 1 < word.len());
+    let cut = word
+        .char_indices()
+        .rev()
+        .find(|(index, char)| *char == '/' && index + 1 < word.len());
     cut.map_or(word, |(index, _)| &word[index + 1..])
 }
 
 pub fn card_activity_text(entry: &str) -> String {
-    let text = COMMAND_RUNNER_PATTERN.replace(&activity_text(entry), SHELL_PROMPT).into_owned();
+    let text = COMMAND_RUNNER_PATTERN
+        .replace(&activity_text(entry), SHELL_PROMPT)
+        .into_owned();
     let is_command = text.starts_with(SHELL_PROMPT);
     text.split(' ')
         .enumerate()
-        .filter(|(index, word)| !(is_command && *index > 0 && COMMAND_OPTION_PATTERN.is_match(word)))
+        .filter(|(index, word)| {
+            !(is_command && *index > 0 && COMMAND_OPTION_PATTERN.is_match(word))
+        })
         .map(|(_, word)| without_directories(word))
         .collect::<Vec<_>>()
         .join(" ")
 }
 
 pub fn pull_request_number(pull_request: &PullRequest) -> String {
-    format!("#{}", pull_request.url.trim_end_matches('/').rsplit('/').next().unwrap_or(""))
+    format!(
+        "#{}",
+        pull_request
+            .url
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .unwrap_or("")
+    )
 }
 
 fn pull_request_text(pull_requests: &[PullRequest]) -> String {
-    let labels: Vec<String> =
-        pull_requests.iter().map(|pr| format!("{} {}", pull_request_number(pr), pr.state)).collect();
-    if labels.len() == 1 { format!("PR {}", labels[0]) } else { format!("PRs {}", labels.join(", ")) }
+    let labels: Vec<String> = pull_requests
+        .iter()
+        .map(|pr| format!("{} {}", pull_request_number(pr), pr.state))
+        .collect();
+    if labels.len() == 1 {
+        format!("PR {}", labels[0])
+    } else {
+        format!("PRs {}", labels.join(", "))
+    }
 }
 
 fn short_pull_request_text(pull_requests: &[PullRequest]) -> String {
@@ -690,16 +855,25 @@ fn short_pull_request_text(pull_requests: &[PullRequest]) -> String {
     }
     let mut states: Vec<(&str, usize)> = Vec::new();
     for pull_request in pull_requests {
-        match states.iter_mut().find(|(state, _)| *state == pull_request.state) {
+        match states
+            .iter_mut()
+            .find(|(state, _)| *state == pull_request.state)
+        {
             Some((_, count)) => *count += 1,
             None => states.push((&pull_request.state, 1)),
         }
     }
-    let open_count = states.iter().find(|(state, _)| *state == PULL_REQUEST_STATE_OPEN).map(|(_, count)| *count);
+    let open_count = states
+        .iter()
+        .find(|(state, _)| *state == PULL_REQUEST_STATE_OPEN)
+        .map(|(_, count)| *count);
     if let (true, Some(open_count)) = (states.len() > 1, open_count) {
         return format!("{} PRs, {open_count} open", pull_requests.len());
     }
-    let parts: Vec<String> = states.iter().map(|(state, count)| format!("{count} {state}")).collect();
+    let parts: Vec<String> = states
+        .iter()
+        .map(|(state, count)| format!("{count} {state}"))
+        .collect();
     format!("PRs {}", parts.join(", "))
 }
 
@@ -712,13 +886,23 @@ pub fn row_reason(row: &Row, snapshot: &Snapshot) -> String {
     match row.status {
         Status::Scheduled | Status::Running => {
             let home = ledger::home_directory().to_string_lossy().into_owned();
-            list_reason(task).replace(&home, "~").replace(WAITING_DIRECTORY_TEXT, BUSY_DIRECTORY_TEXT)
+            list_reason(task)
+                .replace(&home, "~")
+                .replace(WAITING_DIRECTORY_TEXT, BUSY_DIRECTORY_TEXT)
         }
         Status::Waiting => {
-            if row.detail.is_empty() { String::new() } else { format!("after {}", row.detail) }
+            if row.detail.is_empty() {
+                String::new()
+            } else {
+                format!("after {}", row.detail)
+            }
         }
         Status::Cancelled => {
-            if row.detail.is_empty() { "cancelled".to_string() } else { row.detail.clone() }
+            if row.detail.is_empty() {
+                "cancelled".to_string()
+            } else {
+                row.detail.clone()
+            }
         }
         Status::Blocked | Status::Failed => row.detail.clone(),
         Status::Finished => {
@@ -726,8 +910,16 @@ pub fn row_reason(row: &Row, snapshot: &Snapshot) -> String {
             if !pull_requests.is_empty() {
                 return pull_request_text(&pull_requests);
             }
-            let detail = row.detail.split(FINISHED_AGE_SEPARATOR).next().unwrap_or("");
-            if detail == "thread unsettled" { "thread open, no PR".to_string() } else { detail.to_string() }
+            let detail = row
+                .detail
+                .split(FINISHED_AGE_SEPARATOR)
+                .next()
+                .unwrap_or("");
+            if detail == "thread unsettled" {
+                "thread open, no PR".to_string()
+            } else {
+                detail.to_string()
+            }
         }
     }
 }
@@ -737,9 +929,16 @@ fn short_reason_text(row: &Row, reason: &str, snapshot: &Snapshot) -> String {
     if row.status == Status::Finished && !pull_requests.is_empty() {
         return short_pull_request_text(&pull_requests);
     }
-    let reason = if reason == "thread open, no PR" { "thread, no PR" } else { reason };
+    let reason = if reason == "thread open, no PR" {
+        "thread, no PR"
+    } else {
+        reason
+    };
     let mut text = EXIT_PREFIX_PATTERN
-        .replace(&reason.replace(WAITING_DIRECTORY_TEXT, BUSY_DIRECTORY_TEXT), "")
+        .replace(
+            &reason.replace(WAITING_DIRECTORY_TEXT, BUSY_DIRECTORY_TEXT),
+            "",
+        )
         .into_owned();
     for (pattern, replacement) in SHORT_REASON_PATTERNS.iter() {
         text = pattern.replace_all(&text, *replacement).into_owned();
@@ -758,7 +957,10 @@ pub fn card_snippet(row: &Row, snapshot: &Snapshot, is_checking_gate: bool) -> S
             .activity
             .get(&row.task_id)
             .and_then(|lines| lines.last())
-            .map_or_else(|| "no activity yet".to_string(), |line| card_activity_text(line));
+            .map_or_else(
+                || "no activity yet".to_string(),
+                |line| card_activity_text(line),
+            );
     }
     let mut reason = row_reason(row, snapshot);
     if row.status == Status::Scheduled {
@@ -768,8 +970,18 @@ pub fn card_snippet(row: &Row, snapshot: &Snapshot, is_checking_gate: bool) -> S
     if !short_reason.is_empty() && short_reason != NO_PR_TEXT && short_reason != "cancelled" {
         return short_reason;
     }
-    let text = task.result.as_deref().filter(|result| !result.trim().is_empty()).unwrap_or(&task.prompt);
+    let text = task
+        .result
+        .as_deref()
+        .filter(|result| !result.trim().is_empty())
+        .unwrap_or(&task.prompt);
     first_line(text.trim()).to_string()
+}
+
+/// A task result without the Markdown heading marks and emphasis golem's TUI also drops.
+pub fn plain_result(result: &str) -> String {
+    let text = MARKDOWN_EMPHASIS_PATTERN.replace_all(result.trim(), "");
+    MARKDOWN_HEADING_PATTERN.replace_all(&text, "").into_owned()
 }
 
 pub fn waiting_reason_text(row: &Row, snapshot: &Snapshot) -> String {
@@ -778,37 +990,61 @@ pub fn waiting_reason_text(row: &Row, snapshot: &Snapshot) -> String {
     }
     let reason = row_reason(row, snapshot);
     match snapshot.tasks[&row.task_id].setup_busy_retry_count {
-        Some(count) if count > 0 && !reason.is_empty() => format!("{reason} (checked {count} times)"),
+        Some(count) if count > 0 && !reason.is_empty() => {
+            format!("{reason} (checked {count} times)")
+        }
         _ => reason,
     }
 }
 
 pub fn step_display_name(tasks: &Tasks, task_id: &str) -> String {
     let has_parent = root_task_id(tasks, task_id) != task_id;
-    if has_parent { tasks[task_id].label.clone().unwrap_or_default() } else { String::new() }
+    if has_parent {
+        tasks[task_id].label.clone().unwrap_or_default()
+    } else {
+        String::new()
+    }
 }
 
 pub fn task_display_name(tasks: &Tasks, task_id: &str) -> String {
     let root_id = root_task_id(tasks, task_id);
     let name = task_name(root_id, &tasks[root_id]);
     let step = step_display_name(tasks, task_id);
-    if step.is_empty() { name } else { format!("{name} ({step})") }
+    if step.is_empty() {
+        name
+    } else {
+        format!("{name} ({step})")
+    }
 }
 
 /// The heading a row shows: the chain's label, or its root ID when it has none.
 pub fn row_title(row: &Row) -> &str {
-    if row.label.is_empty() { &row.root_id } else { &row.label }
+    if row.label.is_empty() {
+        &row.root_id
+    } else {
+        &row.label
+    }
 }
 
 pub fn repository_name(row: &Row) -> &str {
-    row.directory.trim_end_matches('/').rsplit('/').next().unwrap_or("")
+    row.directory
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or("")
 }
 
 pub fn branch_name(task: &Task) -> Option<&str> {
-    task.repository_branches.first().map(|entry| entry.branch.as_str())
+    task.repository_branches
+        .first()
+        .map(|entry| entry.branch.as_str())
 }
 
-pub fn task_fields(row: &Row, snapshot: &Snapshot, now: DateTime<Local>) -> Vec<(&'static str, String)> {
+pub fn task_fields(
+    row: &Row,
+    snapshot: &Snapshot,
+    now: DateTime<Local>,
+) -> Vec<(&'static str, String)> {
     let task = &snapshot.tasks[&row.task_id];
     let has_parent = row.task_id != row.root_id;
     let backend = if task.agent_args.is_empty() {
@@ -816,10 +1052,24 @@ pub fn task_fields(row: &Row, snapshot: &Snapshot, now: DateTime<Local>) -> Vec<
     } else {
         format!("{}  {}", task.backend, task.agent_args.join(" "))
     };
-    let worktree = task.worktree.as_deref().filter(|worktree| *worktree != task.cwd).unwrap_or("");
-    let due_at = task.due_at.as_deref().filter(|_| row.status == Status::Scheduled);
+    let worktree = task
+        .worktree
+        .as_deref()
+        .filter(|worktree| *worktree != task.cwd)
+        .unwrap_or("");
+    let due_at = task
+        .due_at
+        .as_deref()
+        .filter(|_| row.status == Status::Scheduled);
     let mut fields = vec![
-        ("Task ID", if has_parent { task_name(&row.task_id, task) } else { String::new() }),
+        (
+            "Task ID",
+            if has_parent {
+                task_name(&row.task_id, task)
+            } else {
+                String::new()
+            },
+        ),
         ("Directory", display_directory(&row.directory)),
         ("Worktree", display_directory(worktree)),
         ("Backend", backend),
@@ -827,7 +1077,11 @@ pub fn task_fields(row: &Row, snapshot: &Snapshot, now: DateTime<Local>) -> Vec<
         ("Due", moment_text(due_at, now)),
         ("Started", moment_text(task.started_at.as_deref(), now)),
         (
-            if row.status == Status::Finished { "Finished" } else { "Stopped" },
+            if row.status == Status::Finished {
+                "Finished"
+            } else {
+                "Stopped"
+            },
             moment_text(task.finished_at.as_deref(), now),
         ),
         ("Gate", task.gate.clone().unwrap_or_default()),
@@ -850,7 +1104,10 @@ pub struct ChainStep {
 
 pub fn chain_steps(row: &Row, tasks: &Tasks) -> Vec<ChainStep> {
     let statuses: Vec<Status> = row.chain_ids.iter().map(|id| tasks[id].status()).collect();
-    let active_index = statuses.iter().position(|status| *status != Status::Finished).unwrap_or(statuses.len());
+    let active_index = statuses
+        .iter()
+        .position(|status| *status != Status::Finished)
+        .unwrap_or(statuses.len());
     row.chain_ids
         .iter()
         .zip(&statuses)
@@ -858,7 +1115,11 @@ pub fn chain_steps(row: &Row, tasks: &Tasks) -> Vec<ChainStep> {
         .map(|(index, (task_id, status))| {
             let step_name = step_display_name(tasks, task_id);
             ChainStep {
-                name: if step_name.is_empty() { task_name(task_id, &tasks[task_id]) } else { step_name },
+                name: if step_name.is_empty() {
+                    task_name(task_id, &tasks[task_id])
+                } else {
+                    step_name
+                },
                 status: *status,
                 is_shown: *task_id == row.task_id,
                 is_inferable: (*status == Status::Finished && index < active_index)
@@ -873,7 +1134,11 @@ pub fn task_activity(row: &Row, snapshot: &Snapshot) -> Vec<String> {
         return lines.clone();
     }
     let task = &snapshot.tasks[&row.task_id];
-    if task.has_started() { recent_activity(&task.session_id) } else { Vec::new() }
+    if task.has_started() {
+        recent_activity(&task.session_id)
+    } else {
+        Vec::new()
+    }
 }
 
 // ---- activity view --------------------------------------------------------------------------
@@ -886,7 +1151,11 @@ pub enum ActivityLevel {
 }
 
 impl ActivityLevel {
-    pub const ALL: [ActivityLevel; 3] = [ActivityLevel::Summary, ActivityLevel::Messages, ActivityLevel::All];
+    pub const ALL: [ActivityLevel; 3] = [
+        ActivityLevel::Summary,
+        ActivityLevel::Messages,
+        ActivityLevel::All,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -917,16 +1186,23 @@ fn is_tool_line(line: &str) -> bool {
 }
 
 pub fn counted_text(count: usize, noun: &str) -> String {
-    if count == 1 { format!("{count} {noun}") } else { format!("{count} {noun}s") }
+    if count == 1 {
+        format!("{count} {noun}")
+    } else {
+        format!("{count} {noun}s")
+    }
 }
 
 pub fn activity_counts(lines: &[String]) -> String {
     let tool_count = lines.iter().filter(|line| is_tool_line(line)).count();
-    [counted_text(lines.len() - tool_count, "message"), counted_text(tool_count, "tool call")]
-        .into_iter()
-        .filter(|text| !text.starts_with("0 "))
-        .collect::<Vec<_>>()
-        .join(", ")
+    [
+        counted_text(lines.len() - tool_count, "message"),
+        counted_text(tool_count, "tool call"),
+    ]
+    .into_iter()
+    .filter(|text| !text.starts_with("0 "))
+    .collect::<Vec<_>>()
+    .join(", ")
 }
 
 pub fn activity_view(lines: &[String], level: ActivityLevel) -> Vec<ActivityItem> {
@@ -943,7 +1219,11 @@ pub fn activity_view(lines: &[String], level: ActivityLevel) -> Vec<ActivityItem
         } else if level == ActivityLevel::Messages && group.len() > 1 {
             items.push(ActivityItem::Fold(counted_text(group.len(), "tool call")));
         } else {
-            items.extend(group.iter().map(|line| ActivityItem::Tool(activity_text(line))));
+            items.extend(
+                group
+                    .iter()
+                    .map(|line| ActivityItem::Tool(activity_text(line))),
+            );
         }
     }
     items
@@ -963,12 +1243,20 @@ pub fn closable_task_ids(snapshot: &Snapshot) -> Vec<String> {
 pub fn available_actions(snapshot: &Snapshot, row: Option<&Row>) -> Vec<Action> {
     let has_closable = !closable_task_ids(snapshot).is_empty();
     let Some(row) = row else {
-        return if has_closable { vec![Action::CloseAll] } else { Vec::new() };
+        return if has_closable {
+            vec![Action::CloseAll]
+        } else {
+            Vec::new()
+        };
     };
     let task = &snapshot.tasks[&row.task_id];
     let mut actions = Vec::new();
     let is_started_cancelled = row.status == Status::Cancelled && task.has_started();
-    if matches!(row.status, Status::Blocked | Status::Failed | Status::Finished) || is_started_cancelled {
+    if matches!(
+        row.status,
+        Status::Blocked | Status::Failed | Status::Finished
+    ) || is_started_cancelled
+    {
         actions.push(Action::Pickup);
     }
     if row.status == Status::Running || ledger::progress_path(&task.session_id).exists() {
@@ -1001,11 +1289,15 @@ pub fn primary_action(snapshot: &Snapshot, row: &Row, actions: &[Action]) -> Opt
     if row.status == Status::Running {
         return Some(Action::Watch);
     }
-    let has_open_pull_request = row_pull_requests(snapshot, row).iter().any(|pr| pr.state == PULL_REQUEST_STATE_OPEN);
+    let has_open_pull_request = row_pull_requests(snapshot, row)
+        .iter()
+        .any(|pr| pr.state == PULL_REQUEST_STATE_OPEN);
     if row.status == Status::Finished && has_open_pull_request {
         return Some(Action::OpenPullRequest);
     }
-    [Action::Pickup, Action::Retry].into_iter().find(|action| actions.contains(action))
+    [Action::Pickup, Action::Retry]
+        .into_iter()
+        .find(|action| actions.contains(action))
 }
 
 #[cfg(test)]
@@ -1022,11 +1314,19 @@ mod tests {
     }
 
     fn task(status: Status) -> Task {
-        Task { status: Some(status), cwd: "/work/repo".into(), session_id: "s".into(), ..Task::default() }
+        Task {
+            status: Some(status),
+            cwd: "/work/repo".into(),
+            session_id: "s".into(),
+            ..Task::default()
+        }
     }
 
     fn tasks(entries: Vec<(&str, Task)>) -> Tasks {
-        entries.into_iter().map(|(id, task)| (id.to_string(), task)).collect()
+        entries
+            .into_iter()
+            .map(|(id, task)| (id.to_string(), task))
+            .collect()
     }
 
     #[test]
@@ -1050,7 +1350,10 @@ mod tests {
         let rows = board_rows(&tasks(vec![("a1", parent), ("a1-2", child)]), now());
         assert_eq!(rows.len(), 1);
         let row = &rows[0];
-        assert_eq!((row.task_id.as_str(), row.column, row.step.as_str()), ("a1-2", Column::Review, "2/2"));
+        assert_eq!(
+            (row.task_id.as_str(), row.column, row.step.as_str()),
+            ("a1-2", Column::Review, "2/2")
+        );
         assert_eq!(row.label, "login");
         assert_eq!(row.chain_ids, vec!["a1".to_string(), "a1-2".to_string()]);
     }
@@ -1058,11 +1361,17 @@ mod tests {
     #[test]
     fn finished_chain_moves_to_done_when_its_pull_requests_close() {
         let mut open = task(Status::Finished);
-        open.pull_requests = vec![PullRequest { url: "https://x/pull/4".into(), state: "open".into() }];
+        open.pull_requests = vec![PullRequest {
+            url: "https://x/pull/4".into(),
+            state: "open".into(),
+        }];
         let mut merged = open.clone();
         merged.pull_requests[0].state = "merged".into();
         let rows = board_rows(&tasks(vec![("a", open), ("b", merged)]), now());
-        let columns: Vec<(&str, Column)> = rows.iter().map(|row| (row.task_id.as_str(), row.column)).collect();
+        let columns: Vec<(&str, Column)> = rows
+            .iter()
+            .map(|row| (row.task_id.as_str(), row.column))
+            .collect();
         assert_eq!(columns, vec![("a", Column::Review), ("b", Column::Done)]);
     }
 
@@ -1106,7 +1415,10 @@ mod tests {
     fn card_activity_drops_runners_options_and_directories() {
         let line = "[tool] command uv run pytest -q --maxfail=1 tests/test_board.py";
         assert_eq!(card_activity_text(line), "$ pytest test_board.py");
-        assert_eq!(card_activity_text("[tool] Read src/render/canvas2d.ts"), "\u{25b8} Read canvas2d.ts");
+        assert_eq!(
+            card_activity_text("[tool] Read src/render/canvas2d.ts"),
+            "\u{25b8} Read canvas2d.ts"
+        );
     }
 
     #[test]
@@ -1114,28 +1426,57 @@ mod tests {
         let mut blocked = task(Status::Blocked);
         blocked.gate_stop_reason = Some("pytest exited with status 1: ruff found 3 errors".into());
         let all = tasks(vec![("a", blocked)]);
-        let snapshot = Snapshot { rows: board_rows(&all, now()), tasks: all, activity: HashMap::new() };
-        assert_eq!(card_snippet(&snapshot.rows[0], &snapshot, false), "3 ruff errors");
+        let snapshot = Snapshot {
+            rows: board_rows(&all, now()),
+            tasks: all,
+            activity: HashMap::new(),
+        };
+        assert_eq!(
+            card_snippet(&snapshot.rows[0], &snapshot, false),
+            "3 ruff errors"
+        );
+    }
+
+    #[test]
+    fn plain_result_drops_markdown_marks() {
+        assert_eq!(
+            plain_result("## Summary\n- **Fixed** `x`"),
+            "Summary\n- Fixed x"
+        );
     }
 
     #[test]
     fn activity_view_folds_tool_runs_at_messages_level() {
-        let lines: Vec<String> =
-            ["Planning", "[tool] Read a", "[tool] Read b", "Done", "[tool] Bash make"].map(String::from).to_vec();
-        assert_eq!(activity_view(&lines, ActivityLevel::Summary), vec![ActivityItem::Fold(
-            "2 messages, 3 tool calls".into()
-        )]);
-        assert_eq!(activity_view(&lines, ActivityLevel::Messages), vec![
-            ActivityItem::Message("Planning".into()),
-            ActivityItem::Fold("2 tool calls".into()),
-            ActivityItem::Message("Done".into()),
-            ActivityItem::Tool("$ make".into()),
-        ]);
+        let lines: Vec<String> = [
+            "Planning",
+            "[tool] Read a",
+            "[tool] Read b",
+            "Done",
+            "[tool] Bash make",
+        ]
+        .map(String::from)
+        .to_vec();
+        assert_eq!(
+            activity_view(&lines, ActivityLevel::Summary),
+            vec![ActivityItem::Fold("2 messages, 3 tool calls".into())]
+        );
+        assert_eq!(
+            activity_view(&lines, ActivityLevel::Messages),
+            vec![
+                ActivityItem::Message("Planning".into()),
+                ActivityItem::Fold("2 tool calls".into()),
+                ActivityItem::Message("Done".into()),
+                ActivityItem::Tool("$ make".into()),
+            ]
+        );
     }
 
     #[test]
     fn activity_lines_drop_a_cut_first_line_and_collapse_spaces() {
-        assert_eq!(activity_lines("tail of line\na   b\n\nc\n", true), vec!["a b".to_string(), "c".to_string()]);
+        assert_eq!(
+            activity_lines("tail of line\na   b\n\nc\n", true),
+            vec!["a b".to_string(), "c".to_string()]
+        );
     }
 
     #[test]
@@ -1143,8 +1484,20 @@ mod tests {
         let mut blocked = task(Status::Blocked);
         blocked.session_id = "no-such-session".into();
         let all = tasks(vec![("a", blocked)]);
-        let snapshot = Snapshot { rows: board_rows(&all, now()), tasks: all, activity: HashMap::new() };
+        let snapshot = Snapshot {
+            rows: board_rows(&all, now()),
+            tasks: all,
+            activity: HashMap::new(),
+        };
         let actions = available_actions(&snapshot, snapshot.rows.first());
-        assert_eq!(actions, vec![Action::Pickup, Action::RerunGate, Action::Cancel, Action::Copy]);
+        assert_eq!(
+            actions,
+            vec![
+                Action::Pickup,
+                Action::RerunGate,
+                Action::Cancel,
+                Action::Copy
+            ]
+        );
     }
 }

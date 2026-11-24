@@ -2,7 +2,7 @@
 
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
-use objc2_app_kit::{NSApplication, NSView, NSWindow};
+use objc2_app_kit::{NSApplication, NSScreen, NSView, NSWindow};
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
@@ -71,23 +71,33 @@ pub fn native_window(window: &gpui::Window) -> Option<Retained<NSWindow>> {
     view.window()
 }
 
-/// Moves and resizes the panel so its top sits just below the menu bar item.
-pub fn place_panel(panel: &NSWindow, tray_icon: &TrayIcon, width: f64, height: f64) {
-    let Some(item_frame) = status_item_frame(tray_icon) else {
-        return;
-    };
+/// The panel frame that puts its top just below the menu bar item, kept on screen.
+pub fn panel_frame(
+    panel: &NSWindow,
+    tray_icon: &TrayIcon,
+    width: f64,
+    height: f64,
+) -> Option<NSRect> {
+    let item_frame = status_item_frame(tray_icon)?;
     let item_center = item_frame.origin.x + item_frame.size.width / 2.0;
     let top = item_frame.origin.y - PANEL_GAP;
     let mut right = item_center + PANEL_RIGHT_OVERHANG.min(width / 2.0);
     let mut bottom_limit = f64::MIN;
-    if let Some(screen) = panel.screen() {
+    if let Some(screen) = panel.screen().or_else(|| item_screen(tray_icon)) {
         let visible = screen.visibleFrame();
         right = right.min(visible.origin.x + visible.size.width - SCREEN_MARGIN);
         bottom_limit = visible.origin.y + SCREEN_MARGIN;
     }
     let height = height.min(top - bottom_limit);
-    let frame = NSRect::new(NSPoint::new(right - width, top - height), NSSize::new(width, height));
-    panel.setFrame_display(frame, true);
+    Some(NSRect::new(
+        NSPoint::new(right - width, top - height),
+        NSSize::new(width, height),
+    ))
+}
+
+fn item_screen(tray_icon: &TrayIcon) -> Option<Retained<NSScreen>> {
+    let mtm = MainThreadMarker::new()?;
+    tray_icon.ns_status_item()?.button(mtm)?.window()?.screen()
 }
 
 pub fn show_panel(panel: &NSWindow) {

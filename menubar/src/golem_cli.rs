@@ -38,7 +38,10 @@ pub struct CommandOutcome {
 }
 
 fn login_shell() -> String {
-    std::env::var("SHELL").ok().filter(|shell| !shell.is_empty()).unwrap_or_else(|| "/bin/zsh".to_string())
+    std::env::var("SHELL")
+        .ok()
+        .filter(|shell| !shell.is_empty())
+        .unwrap_or_else(|| "/bin/zsh".to_string())
 }
 
 fn config_path() -> PathBuf {
@@ -54,13 +57,20 @@ fn configured_terminal() -> String {
         .ok()
         .and_then(|text| toml::from_str(&text).ok())
         .unwrap_or_default();
-    config.terminal.unwrap_or_else(|| DEFAULT_TERMINAL.to_string())
+    config
+        .terminal
+        .unwrap_or_else(|| DEFAULT_TERMINAL.to_string())
 }
 
 /// Asks the login shell for PATH and golem's location, since launchd gives apps neither.
 fn shell_environment() -> Option<(String, String)> {
-    let script = format!("printf '\\n{ENVIRONMENT_MARKER}%s\\n%s\\n' \"$PATH\" \"$(command -v golem)\"");
-    let output = Command::new(login_shell()).args(["-lic", &script]).stdin(Stdio::null()).output().ok()?;
+    let script =
+        format!("printf '\\n{ENVIRONMENT_MARKER}%s\\n%s\\n' \"$PATH\" \"$(command -v golem)\"");
+    let output = Command::new(login_shell())
+        .args(["-lic", &script])
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
     let text = String::from_utf8_lossy(&output.stdout);
     let (_, marked) = text.rsplit_once(ENVIRONMENT_MARKER)?;
     let mut lines = marked.lines();
@@ -74,7 +84,11 @@ fn fallback_executable(path_variable: &str) -> Option<PathBuf> {
     path_variable
         .split(':')
         .map(PathBuf::from)
-        .chain(FALLBACK_DIRECTORIES.iter().map(|directory| home.join(directory)))
+        .chain(
+            FALLBACK_DIRECTORIES
+                .iter()
+                .map(|directory| home.join(directory)),
+        )
         .map(|directory| directory.join("golem"))
         .find(|candidate| candidate.is_file())
 }
@@ -87,25 +101,47 @@ fn applescript_quoted(text: &str) -> String {
     format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
+/// A POSIX shell script that runs `golem pickup` and keeps a failed run's message on screen.
+fn pickup_script(executable: &str, path_variable: &str, task_id: &str) -> String {
+    format!(
+        "PATH={path}; export PATH; {golem} pickup {id}; status=$?; \
+         if [ $status -ne 0 ] && [ $status -ne {INTERRUPTED_EXIT_STATUS} ]; then \
+         printf 'golem: press Enter to close\\n'; read _; fi",
+        path = shell_quoted(path_variable),
+        golem = shell_quoted(executable),
+        id = shell_quoted(task_id),
+    )
+}
+
 pub fn first_message(output: &str) -> String {
     let line = output.trim().lines().next().unwrap_or("");
     let message = line.strip_prefix(GOLEM_PREFIX).unwrap_or(line);
     let mut chars = message.chars();
-    chars.next().map_or_else(String::new, |first| first.to_uppercase().chain(chars).collect())
+    chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(chars).collect()
+    })
 }
 
 impl Golem {
     pub fn discover() -> Golem {
         let inherited_path = std::env::var("PATH").unwrap_or_default();
-        let (path_variable, reported) = shell_environment().unwrap_or((inherited_path, String::new()));
+        let (path_variable, reported) =
+            shell_environment().unwrap_or((inherited_path, String::new()));
         let executable = Some(PathBuf::from(&reported))
             .filter(|path| path.is_absolute() && path.is_file())
             .or_else(|| fallback_executable(&path_variable));
-        Golem { executable, path_variable, terminal_app: configured_terminal() }
+        Golem {
+            executable,
+            path_variable,
+            terminal_app: configured_terminal(),
+        }
     }
 
     fn missing_outcome() -> CommandOutcome {
-        CommandOutcome { is_success: false, message: "Can't find golem on PATH".to_string() }
+        CommandOutcome {
+            is_success: false,
+            message: "Can't find golem on PATH".to_string(),
+        }
     }
 
     /// Runs `golem <subcommand> <task_id>` to completion and reports its first line of output.
@@ -115,7 +151,8 @@ impl Golem {
         };
         // Files, not pipes: an executor that golem starts inherits them and outlives it.
         let run_id = RUN_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let output_path = std::env::temp_dir().join(format!("golem-menubar-{}-{run_id}.log", std::process::id()));
+        let output_path =
+            std::env::temp_dir().join(format!("golem-menubar-{}-{run_id}.log", std::process::id()));
         let result = (|| {
             let output_file = std::fs::File::create(&output_path)?;
             let status = Command::new(executable)
@@ -125,12 +162,21 @@ impl Golem {
                 .stdout(output_file.try_clone()?)
                 .stderr(output_file)
                 .status()?;
-            Ok::<_, std::io::Error>((status, std::fs::read_to_string(&output_path).unwrap_or_default()))
+            Ok::<_, std::io::Error>((
+                status,
+                std::fs::read_to_string(&output_path).unwrap_or_default(),
+            ))
         })();
         let _ = std::fs::remove_file(&output_path);
         match result {
-            Ok((status, text)) => CommandOutcome { is_success: status.success(), message: first_message(&text) },
-            Err(error) => CommandOutcome { is_success: false, message: error.to_string() },
+            Ok((status, text)) => CommandOutcome {
+                is_success: status.success(),
+                message: first_message(&text),
+            },
+            Err(error) => CommandOutcome {
+                is_success: false,
+                message: error.to_string(),
+            },
         }
     }
 
@@ -139,33 +185,42 @@ impl Golem {
         let Some(executable) = &self.executable else {
             return Golem::missing_outcome();
         };
-        let script = format!(
-            "PATH={path}; export PATH; {golem} pickup {id}; status=$?; \
-             if [ $status -ne 0 ] && [ $status -ne {INTERRUPTED_EXIT_STATUS} ]; then \
-             printf 'golem: press Enter to close\\n'; read _; fi",
-            path = shell_quoted(&self.path_variable),
-            golem = shell_quoted(&executable.to_string_lossy()),
-            id = shell_quoted(task_id),
-        );
+        let script = pickup_script(&executable.to_string_lossy(), &self.path_variable, task_id);
         let result = if self.terminal_app == DEFAULT_TERMINAL {
             let command = format!("/bin/sh -c {}", shell_quoted(&script));
             let apple_script = format!(
                 "tell application \"Terminal\"\n activate\n do script {}\nend tell",
                 applescript_quoted(&command)
             );
-            Command::new("osascript").args(["-e", &apple_script]).output()
+            Command::new("osascript")
+                .args(["-e", &apple_script])
+                .output()
         } else {
             Command::new("open")
-                .args(["-na", &self.terminal_app, "--args", "-e", "/bin/sh", "-c", &script])
+                .args([
+                    "-na",
+                    &self.terminal_app,
+                    "--args",
+                    "-e",
+                    "/bin/sh",
+                    "-c",
+                    &script,
+                ])
                 .output()
         };
         match result {
-            Ok(output) if output.status.success() => CommandOutcome { is_success: true, message: String::new() },
+            Ok(output) if output.status.success() => CommandOutcome {
+                is_success: true,
+                message: String::new(),
+            },
             Ok(output) => CommandOutcome {
                 is_success: false,
                 message: first_message(&String::from_utf8_lossy(&output.stderr)),
             },
-            Err(error) => CommandOutcome { is_success: false, message: error.to_string() },
+            Err(error) => CommandOutcome {
+                is_success: false,
+                message: error.to_string(),
+            },
         }
     }
 }
@@ -176,7 +231,10 @@ pub fn open_url(url: &str) -> CommandOutcome {
             is_success: output.status.success(),
             message: first_message(&String::from_utf8_lossy(&output.stderr)),
         },
-        Err(error) => CommandOutcome { is_success: false, message: error.to_string() },
+        Err(error) => CommandOutcome {
+            is_success: false,
+            message: error.to_string(),
+        },
     }
 }
 
@@ -191,7 +249,23 @@ mod tests {
     }
 
     #[test]
-    fn shell_quoting_escapes_single_quotes() {
-        assert_eq!(shell_quoted("it's"), "'it'\\''s'");
+    fn pickup_script_runs_golem_with_the_task_id() {
+        let directory =
+            std::env::temp_dir().join(format!("golem-menubar-test-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let fake_golem = directory.join("golem's");
+        std::fs::write(&fake_golem, "#!/bin/sh\necho \"$@\"\n").unwrap();
+        Command::new("chmod")
+            .arg("+x")
+            .arg(&fake_golem)
+            .status()
+            .unwrap();
+        let script = pickup_script(&fake_golem.to_string_lossy(), "/usr/bin:/bin", "a1 b");
+        let output = Command::new("/bin/sh")
+            .args(["-c", &script])
+            .output()
+            .unwrap();
+        std::fs::remove_dir_all(&directory).unwrap();
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "pickup a1 b\n");
     }
 }

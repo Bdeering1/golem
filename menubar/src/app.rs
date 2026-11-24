@@ -7,8 +7,8 @@ use futures::StreamExt;
 use futures::channel::mpsc::UnboundedReceiver;
 use gpui::{
     AnyElement, BoxShadow, ClickEvent, ClipboardItem, Context, Div, FocusHandle, FontWeight, Hsla,
-    KeyDownEvent, ScrollHandle, SharedString, Stateful, Subscription, Task, Window, div, point, prelude::*, px,
-    svg,
+    KeyDownEvent, ScrollHandle, SharedString, Stateful, Subscription, Task, Window, div, point,
+    prelude::*, px, svg,
 };
 use notify::Watcher;
 use objc2::rc::Retained;
@@ -42,7 +42,12 @@ const KEY_DOWN: &str = "down";
 const KEY_UP: &str = "up";
 const KEY_BACKSPACE: &str = "backspace";
 const TAB_COLUMNS: [Column; 3] = [Column::Queued, Column::Running, Column::Review];
-const ATTENTION_ORDER: [Column; 4] = [Column::Review, Column::Running, Column::Queued, Column::Done];
+const ATTENTION_ORDER: [Column; 4] = [
+    Column::Review,
+    Column::Running,
+    Column::Queued,
+    Column::Done,
+];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Input {
@@ -89,6 +94,7 @@ pub struct BoardView {
     focus_handle: FocusHandle,
     list_scroll: ScrollHandle,
     detail_scroll: ScrollHandle,
+    palette_scroll: ScrollHandle,
     tab: Column,
     selected_roots: HashMap<Column, String>,
     is_showing_done: bool,
@@ -115,7 +121,9 @@ pub struct BoardView {
     _tasks: Vec<Task<()>>,
 }
 
-fn ledger_watcher(sender: futures::channel::mpsc::UnboundedSender<()>) -> Option<notify::RecommendedWatcher> {
+fn ledger_watcher(
+    sender: futures::channel::mpsc::UnboundedSender<()>,
+) -> Option<notify::RecommendedWatcher> {
     let state_directory = ledger::state_directory();
     let progress_directory = state_directory.join(ledger::PROGRESS_DIRECTORY_NAME);
     std::fs::create_dir_all(&progress_directory).ok()?;
@@ -124,7 +132,9 @@ fn ledger_watcher(sender: futures::channel::mpsc::UnboundedSender<()>) -> Option
             return;
         };
         let is_relevant = event.paths.iter().any(|path| {
-            let is_ledger = path.file_name().is_some_and(|name| name == ledger::LEDGER_FILE_NAME);
+            let is_ledger = path
+                .file_name()
+                .is_some_and(|name| name == ledger::LEDGER_FILE_NAME);
             let is_progress = path
                 .parent()
                 .and_then(|parent| parent.file_name())
@@ -136,8 +146,12 @@ fn ledger_watcher(sender: futures::channel::mpsc::UnboundedSender<()>) -> Option
         }
     })
     .ok()?;
-    watcher.watch(&state_directory, notify::RecursiveMode::NonRecursive).ok()?;
-    watcher.watch(&progress_directory, notify::RecursiveMode::NonRecursive).ok()?;
+    watcher
+        .watch(&state_directory, notify::RecursiveMode::NonRecursive)
+        .ok()?;
+    watcher
+        .watch(&progress_directory, notify::RecursiveMode::NonRecursive)
+        .ok()?;
     Some(watcher)
 }
 
@@ -159,7 +173,11 @@ fn kbd(text: &str, theme: &Theme) -> Div {
 }
 
 fn icon(path: &'static str, size: f32, color: Hsla) -> gpui::Svg {
-    svg().path(path).size(px(size)).flex_none().text_color(color)
+    svg()
+        .path(path)
+        .size(px(size))
+        .flex_none()
+        .text_color(color)
 }
 
 fn key_label(action: Action) -> &'static str {
@@ -219,7 +237,10 @@ impl BoardView {
                 }
             }),
             cx.spawn(async move |this, cx| {
-                let golem = cx.background_executor().spawn(async { Golem::discover() }).await;
+                let golem = cx
+                    .background_executor()
+                    .spawn(async { Golem::discover() })
+                    .await;
                 let _ = this.update(cx, |this, _| this.golem = Some(Arc::new(golem)));
             }),
         ];
@@ -232,6 +253,7 @@ impl BoardView {
             focus_handle: cx.focus_handle(),
             list_scroll: ScrollHandle::new(),
             detail_scroll: ScrollHandle::new(),
+            palette_scroll: ScrollHandle::new(),
             tab: Column::Review,
             selected_roots: HashMap::new(),
             is_showing_done: false,
@@ -266,9 +288,11 @@ impl BoardView {
     fn reload(&mut self, cx: &mut Context<Self>) {
         match ledger::load_tasks() {
             Ok(tasks) => {
+                let selected_index = self.selected_index();
                 let snapshot = board::board_snapshot(tasks, Local::now());
                 let previous = std::mem::replace(&mut self.snapshot, snapshot);
                 self.note_changes(&previous, cx);
+                self.keep_selection_position(selected_index);
                 self.load_error = None;
             }
             Err(error) => self.load_error = Some(error),
@@ -290,7 +314,13 @@ impl BoardView {
     }
 
     fn update_tray(&self) {
-        let count = |column: Column| self.snapshot.rows.iter().filter(|row| row.column == column).count();
+        let count = |column: Column| {
+            self.snapshot
+                .rows
+                .iter()
+                .filter(|row| row.column == column)
+                .count()
+        };
         let review_count = count(Column::Review);
         let title = (review_count > 0).then(|| format!(" {review_count}"));
         self.tray_icon.set_title(title);
@@ -307,8 +337,11 @@ impl BoardView {
         if previous.tasks.is_empty() {
             return;
         }
-        let before: HashMap<&str, (Column, Status)> =
-            previous.rows.iter().map(|row| (row.root_id.as_str(), (row.column, row.status))).collect();
+        let before: HashMap<&str, (Column, Status)> = previous
+            .rows
+            .iter()
+            .map(|row| (row.root_id.as_str(), (row.column, row.status)))
+            .collect();
         let until = Instant::now() + CHANGE_HIGHLIGHT_DURATION;
         let mut changes = Vec::new();
         for row in &self.snapshot.rows {
@@ -326,13 +359,21 @@ impl BoardView {
         let moved = selected.and_then(|root| {
             let row = self.snapshot.rows.iter().find(|row| row.root_id == root)?;
             let is_visible = row.column != Column::Done || self.is_showing_done;
-            (row.column != self.tab && before.contains_key(root.as_str()) && is_visible).then(|| row.clone())
+            (row.column != self.tab && before.contains_key(root.as_str()) && is_visible)
+                .then(|| row.clone())
         });
         if let Some(row) = moved {
             self.tab = row.column;
             self.selected_roots.insert(row.column, row.root_id.clone());
             let name = board::task_display_name(&self.snapshot.tasks, &row.task_id);
-            self.show_toast(format!("{name} {}, now in {}", row.status.name(), row.column.title()), cx);
+            self.show_toast(
+                format!(
+                    "{name} {}, now in {}",
+                    row.status.name(),
+                    row.column.title()
+                ),
+                cx,
+            );
             return;
         }
         if !changes.is_empty() {
@@ -352,18 +393,47 @@ impl BoardView {
         self.snapshot
             .rows
             .iter()
-            .filter(|row| self.query.is_empty() || board::is_matching(row, &self.snapshot.tasks, &self.query))
+            .filter(|row| {
+                self.query.is_empty() || board::is_matching(row, &self.snapshot.tasks, &self.query)
+            })
             .collect()
     }
 
     fn column_rows(&self, column: Column) -> Vec<&Row> {
-        self.filtered_rows().into_iter().filter(|row| row.column == column).collect()
+        self.filtered_rows()
+            .into_iter()
+            .filter(|row| row.column == column)
+            .collect()
     }
 
     fn selected_row(&self) -> Option<&Row> {
         let rows = self.column_rows(self.tab);
         let selected = self.selected_roots.get(&self.tab);
-        rows.iter().find(|row| Some(&row.root_id) == selected).or(rows.first()).copied()
+        rows.iter()
+            .find(|row| Some(&row.root_id) == selected)
+            .or(rows.first())
+            .copied()
+    }
+
+    fn selected_index(&self) -> Option<usize> {
+        let selected = self.selected_row()?.root_id.clone();
+        self.column_rows(self.tab)
+            .iter()
+            .position(|row| row.root_id == selected)
+    }
+
+    /// When the selected task leaves the group, selects the task that took its place.
+    fn keep_selection_position(&mut self, previous_index: Option<usize>) {
+        let rows = self.column_rows(self.tab);
+        let selected = self.selected_roots.get(&self.tab);
+        let is_still_shown = rows.iter().any(|row| Some(&row.root_id) == selected);
+        let (Some(index), false, Some(last)) =
+            (previous_index, is_still_shown, rows.len().checked_sub(1))
+        else {
+            return;
+        };
+        let root_id = rows[index.min(last)].root_id.clone();
+        self.selected_roots.insert(self.tab, root_id);
     }
 
     fn needs_you(&self, row: &Row) -> bool {
@@ -391,13 +461,29 @@ impl BoardView {
     }
 
     fn panel_width(&self) -> f64 {
-        if self.is_expanded { EXPANDED_PANEL_WIDTH } else { PANEL_WIDTH }
+        if self.is_expanded {
+            EXPANDED_PANEL_WIDTH
+        } else {
+            PANEL_WIDTH
+        }
     }
 
-    fn place(&self) {
-        if let Some(panel) = &self.panel {
-            macos::place_panel(panel, &self.tray_icon, self.panel_width(), PANEL_HEIGHT);
-        }
+    /// Moves the panel under the menu bar item, then shows it if asked. AppKit applies the
+    /// frame on the next turn of the run loop, because GPUI can't take a resize mid-update.
+    fn place(&self, is_showing: bool, cx: &mut Context<Self>) {
+        let Some(panel) = self.panel.clone() else {
+            return;
+        };
+        let frame = macos::panel_frame(&panel, &self.tray_icon, self.panel_width(), PANEL_HEIGHT);
+        cx.spawn(async move |_, _| {
+            if let Some(frame) = frame {
+                panel.setFrame_display(frame, true);
+            }
+            if is_showing {
+                macos::show_panel(&panel);
+            }
+        })
+        .detach();
     }
 
     fn toggle(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -405,14 +491,14 @@ impl BoardView {
             self.hide(cx);
             return;
         }
-        if self.hidden_at.is_some_and(|hidden_at| hidden_at.elapsed() < REOPEN_GUARD) {
+        if self
+            .hidden_at
+            .is_some_and(|hidden_at| hidden_at.elapsed() < REOPEN_GUARD)
+        {
             return;
         }
         self.reload(cx);
-        self.place();
-        if let Some(panel) = &self.panel {
-            macos::show_panel(panel);
-        }
+        self.place(true, cx);
         self.focus_handle.focus(window, cx);
         self.reveal_selected();
     }
@@ -459,7 +545,10 @@ impl BoardView {
     fn reveal_selected(&self) {
         let rows = self.column_rows(self.tab);
         let selected = self.selected_row().map(|row| row.root_id.clone());
-        if let Some(index) = rows.iter().position(|row| Some(&row.root_id) == selected.as_ref()) {
+        if let Some(index) = rows
+            .iter()
+            .position(|row| Some(&row.root_id) == selected.as_ref())
+        {
             self.list_scroll.scroll_to_item(index);
         }
     }
@@ -477,7 +566,9 @@ impl BoardView {
         if rows.is_empty() {
             return;
         }
-        let current = self.selected_row().and_then(|selected| rows.iter().position(|row| row.root_id == selected.root_id));
+        let current = self
+            .selected_row()
+            .and_then(|selected| rows.iter().position(|row| row.root_id == selected.root_id));
         let last = rows.len() as isize - 1;
         let index = (current.unwrap_or(0) as isize + delta).clamp(0, last) as usize;
         let root_id = rows[index].root_id.clone();
@@ -510,7 +601,7 @@ impl BoardView {
         if !is_expanded {
             self.is_following = false;
         }
-        self.place();
+        self.place(false, cx);
         self.reveal_selected();
         cx.notify();
     }
@@ -526,20 +617,33 @@ impl BoardView {
     }
 
     fn next_attention(&mut self, cx: &mut Context<Self>) {
-        let shown_columns: Vec<Column> =
-            ATTENTION_ORDER.into_iter().filter(|column| *column != Column::Done || self.is_showing_done).collect();
+        let shown_columns: Vec<Column> = ATTENTION_ORDER
+            .into_iter()
+            .filter(|column| *column != Column::Done || self.is_showing_done)
+            .collect();
         let ordered: Vec<Row> = shown_columns
             .iter()
-            .flat_map(|column| self.column_rows(*column).into_iter().cloned().collect::<Vec<_>>())
+            .flat_map(|column| {
+                self.column_rows(*column)
+                    .into_iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
             .collect();
-        let needing: Vec<usize> = (0..ordered.len()).filter(|index| self.needs_you(&ordered[*index])).collect();
+        let needing: Vec<usize> = (0..ordered.len())
+            .filter(|index| self.needs_you(&ordered[*index]))
+            .collect();
         let Some(first) = needing.first() else {
             self.show_toast(NOTHING_NEEDS_YOU_TEXT, cx);
             return;
         };
         let selected_root = self.selected_row().map(|row| row.root_id.clone());
-        let current = ordered.iter().position(|row| Some(&row.root_id) == selected_root.as_ref());
-        let after = needing.iter().find(|index| current.is_none_or(|current| **index > current));
+        let current = ordered
+            .iter()
+            .position(|row| Some(&row.root_id) == selected_root.as_ref());
+        let after = needing
+            .iter()
+            .find(|index| current.is_none_or(|current| **index > current));
         let target = ordered[*after.unwrap_or(first)].clone();
         if needing.len() == 1 && current == Some(*first) {
             self.show_toast("Only task needing you", cx);
@@ -549,7 +653,11 @@ impl BoardView {
     }
 
     fn scroll_by(&self, delta: f32) {
-        let handle = if self.is_expanded { &self.detail_scroll } else { &self.list_scroll };
+        let handle = if self.is_expanded {
+            &self.detail_scroll
+        } else {
+            &self.list_scroll
+        };
         let offset = handle.offset();
         let max_offset = handle.max_offset();
         let y = (offset.y - px(delta)).clamp(-max_offset.y, px(0.));
@@ -565,7 +673,11 @@ impl BoardView {
             return;
         }
         if action.is_confirmed() {
-            let task_id = if action == Action::CloseAll { None } else { row.map(|row| row.task_id) };
+            let task_id = if action == Action::CloseAll {
+                None
+            } else {
+                row.map(|row| row.task_id)
+            };
             self.pending = Some(Pending { action, task_id });
             self.is_showing_help = false;
             cx.notify();
@@ -577,13 +689,19 @@ impl BoardView {
     }
 
     fn request_key(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
-        let candidates: Vec<Action> = ACTIONS.into_iter().filter(|action| action.key() == key).collect();
+        let candidates: Vec<Action> = ACTIONS
+            .into_iter()
+            .filter(|action| action.key() == key)
+            .collect();
         let Some(first) = candidates.first().copied() else {
             return false;
         };
         let row = self.selected_row().cloned();
         let available = board::available_actions(&self.snapshot, row.as_ref());
-        match candidates.into_iter().find(|action| available.contains(action)) {
+        match candidates
+            .into_iter()
+            .find(|action| available.contains(action))
+        {
             Some(action) => self.request(action, cx),
             None if row.is_none() => self.show_toast("No task selected", cx),
             None => self.show_toast(first.unavailable_text(), cx),
@@ -616,15 +734,23 @@ impl BoardView {
             self.close_finished(cx);
             return;
         }
-        let row = pending
-            .task_id
-            .and_then(|task_id| self.snapshot.rows.iter().find(|row| row.task_id == task_id).cloned());
+        let row = pending.task_id.and_then(|task_id| {
+            self.snapshot
+                .rows
+                .iter()
+                .find(|row| row.task_id == task_id)
+                .cloned()
+        });
         if let Some(row) = row {
             self.perform(pending.action, &row, cx);
         }
     }
 
-    fn run_in_background(&mut self, work: impl FnOnce() -> String + Send + 'static, cx: &mut Context<Self>) {
+    fn run_in_background(
+        &mut self,
+        work: impl FnOnce() -> String + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
         let job = cx.background_executor().spawn(async move { work() });
         cx.spawn(async move |this, cx| {
             let message = job.await;
@@ -661,7 +787,11 @@ impl BoardView {
                 self.run_in_background(
                     move || {
                         let outcome = golem_cli::open_url(&pull_request.url);
-                        if outcome.is_success { opened } else { outcome.message }
+                        if outcome.is_success {
+                            opened
+                        } else {
+                            outcome.message
+                        }
                     },
                     cx,
                 );
@@ -675,7 +805,9 @@ impl BoardView {
                 let Some(golem) = self.golem.clone() else {
                     return;
                 };
-                let job = cx.background_executor().spawn(async move { golem.run(action.command(), &task_id) });
+                let job = cx
+                    .background_executor()
+                    .spawn(async move { golem.run(action.command(), &task_id) });
                 let checked_id = row.task_id.clone();
                 cx.spawn(async move |this, cx| {
                     let outcome = job.await;
@@ -698,7 +830,8 @@ impl BoardView {
                     return;
                 };
                 let backend = self.snapshot.tasks[&row.task_id].backend.clone();
-                let is_terminal_pickup = action == Action::Pickup && TERMINAL_BACKENDS.contains(&backend.as_str());
+                let is_terminal_pickup =
+                    action == Action::Pickup && TERMINAL_BACKENDS.contains(&backend.as_str());
                 let done_text = match action {
                     Action::Pickup => format!("Picked up {name}"),
                     Action::Close => format!("Closed {name}"),
@@ -712,7 +845,11 @@ impl BoardView {
                         } else {
                             golem.run(action.command(), &task_id)
                         };
-                        if !outcome.is_success || done_text.is_empty() { outcome.message } else { done_text }
+                        if !outcome.is_success || done_text.is_empty() {
+                            outcome.message
+                        } else {
+                            done_text
+                        }
                     },
                     cx,
                 );
@@ -734,7 +871,10 @@ impl BoardView {
                     .map(|outcome| outcome.message)
                     .collect();
                 failures.first().cloned().unwrap_or_else(|| {
-                    format!("Closed {}", board::counted_text(task_ids.len() - failures.len(), "task"))
+                    format!(
+                        "Closed {}",
+                        board::counted_text(task_ids.len() - failures.len(), "task")
+                    )
                 })
             },
             cx,
@@ -766,20 +906,53 @@ impl BoardView {
         let has_closable = !board::closable_task_ids(&self.snapshot).is_empty();
         let board_items = [
             Some((Command::NextAttention, "Next needing you".to_string(), "N")),
-            has_closable.then(|| (Command::Task(Action::CloseAll), "Close finished".to_string(), "\u{21e7}C")),
-            Some((Command::ToggleDone, if self.is_showing_done { "Hide Done" } else { "Show Done" }.to_string(), "A")),
+            has_closable.then(|| {
+                (
+                    Command::Task(Action::CloseAll),
+                    "Close finished".to_string(),
+                    "\u{21e7}C",
+                )
+            }),
+            Some((
+                Command::ToggleDone,
+                if self.is_showing_done {
+                    "Hide Done"
+                } else {
+                    "Show Done"
+                }
+                .to_string(),
+                "A",
+            )),
             self.selected_row().map(|_| {
-                let label = if self.is_expanded { "Hide details" } else { "Show details" };
-                (Command::ToggleDetails, label.to_string(), if self.is_expanded { "esc" } else { "\u{23ce}" })
+                let label = if self.is_expanded {
+                    "Hide details"
+                } else {
+                    "Show details"
+                };
+                (
+                    Command::ToggleDetails,
+                    label.to_string(),
+                    if self.is_expanded { "esc" } else { "\u{23ce}" },
+                )
             }),
             Some((Command::Filter, "Filter".to_string(), "/")),
             Some((Command::Help, "Keyboard shortcuts".to_string(), "?")),
             Some((Command::Quit, "Quit golem board".to_string(), "\u{2318}Q")),
         ];
         for (command, label, key) in board_items.into_iter().flatten() {
-            items.push(PaletteItem { group: "Board".to_string(), command, label, key, is_danger: false });
+            items.push(PaletteItem {
+                group: "Board".to_string(),
+                command,
+                label,
+                key,
+                is_danger: false,
+            });
         }
-        let query = self.palette.as_ref().map(|palette| palette.query.to_lowercase()).unwrap_or_default();
+        let query = self
+            .palette
+            .as_ref()
+            .map(|palette| palette.query.to_lowercase())
+            .unwrap_or_default();
         items.retain(|item| query.is_empty() || item.label.to_lowercase().contains(&query));
         items
     }
@@ -808,7 +981,11 @@ impl BoardView {
         if modifiers.platform {
             match key {
                 "k" if self.pending.is_none() => {
-                    self.palette = if self.palette.is_some() { None } else { Some(Palette::default()) };
+                    self.palette = if self.palette.is_some() {
+                        None
+                    } else {
+                        Some(Palette::default())
+                    };
                     self.is_showing_help = false;
                 }
                 "w" => self.hide(cx),
@@ -829,7 +1006,15 @@ impl BoardView {
         if modifiers.alt {
             return;
         }
-        let typed = keystroke.key_char.clone().unwrap_or_default();
+        let typed = keystroke.key_char.clone().unwrap_or_else(|| {
+            let is_single_char = key.chars().count() == 1;
+            match (is_single_char, modifiers.shift) {
+                (true, true) => key.to_uppercase(),
+                (true, false) => key.to_string(),
+                (false, _) if key == "space" => " ".to_string(),
+                (false, _) => String::new(),
+            }
+        });
         if self.palette.is_some() {
             self.handle_palette_key(key, &typed, window, cx);
         } else if self.input == Input::Filter {
@@ -850,7 +1035,13 @@ impl BoardView {
         cx.notify();
     }
 
-    fn handle_palette_key(&mut self, key: &str, typed: &str, window: &mut Window, cx: &mut Context<Self>) {
+    fn handle_palette_key(
+        &mut self,
+        key: &str,
+        typed: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let items = self.palette_items();
         let Some(palette) = self.palette.as_mut() else {
             return;
@@ -893,7 +1084,10 @@ impl BoardView {
         }
         if !self.query.is_empty() && self.column_rows(self.tab).is_empty() {
             let tabs = self.tabs();
-            if let Some(column) = tabs.into_iter().find(|column| !self.column_rows(*column).is_empty()) {
+            if let Some(column) = tabs
+                .into_iter()
+                .find(|column| !self.column_rows(*column).is_empty())
+            {
                 self.tab = column;
             }
         }
@@ -967,14 +1161,19 @@ impl BoardView {
     fn render_header(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let is_filtering = self.input == Input::Filter;
         let filter_text: AnyElement = if self.query.is_empty() && !is_filtering {
-            div().text_color(theme.text_3).child("Filter").into_any_element()
+            div()
+                .text_color(theme.text_3)
+                .child("Filter")
+                .into_any_element()
         } else {
             div()
                 .flex()
                 .items_center()
                 .min_w_0()
                 .child(div().truncate().child(self.query.clone()))
-                .when(is_filtering, |this| this.child(div().w(px(1.5)).h(px(15.)).bg(theme.accent)))
+                .when(is_filtering, |this| {
+                    this.child(div().w(px(1.5)).h(px(15.)).bg(theme.accent))
+                })
                 .into_any_element()
         };
         let mut title_row = div()
@@ -992,7 +1191,12 @@ impl BoardView {
                     .justify_center()
                     .child(icon(theme::ICON_LOGO, 14., theme.on_accent)),
             )
-            .child(div().text_size(px(14.)).font_weight(FontWeight::BOLD).child("golem"));
+            .child(
+                div()
+                    .text_size(px(14.))
+                    .font_weight(FontWeight::BOLD)
+                    .child("golem"),
+            );
         if let Some(error) = &self.load_error {
             title_row = title_row.child(
                 div()
@@ -1001,7 +1205,9 @@ impl BoardView {
                     .truncate()
                     .text_size(px(11.5))
                     .text_color(theme.orange)
-                    .child(format!("Can't read the ledger, showing the last good state: {error}")),
+                    .child(format!(
+                        "Can't read the ledger, showing the last good state: {error}"
+                    )),
             );
         }
         div()
@@ -1031,7 +1237,9 @@ impl BoardView {
                             .pr(px(7.))
                             .rounded(px(8.))
                             .bg(theme.fill)
-                            .when(is_filtering, |this| this.border_1().border_color(theme.accent))
+                            .when(is_filtering, |this| {
+                                this.border_1().border_color(theme.accent)
+                            })
                             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                                 this.input = Input::Filter;
                                 cx.notify();
@@ -1053,7 +1261,9 @@ impl BoardView {
                             .bg(theme.fill)
                             .font_weight(FontWeight::MEDIUM)
                             .hover(|style| style.bg(theme.hover))
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.next_attention(cx)))
+                            .on_click(
+                                cx.listener(|this, _: &ClickEvent, _, cx| this.next_attention(cx)),
+                            )
                             .child("Next")
                             .child(kbd("N", theme)),
                     ),
@@ -1077,7 +1287,11 @@ impl BoardView {
                 .h(px(24.))
                 .rounded(px(6.))
                 .text_color(if is_current { theme.text } else { theme.text_2 })
-                .font_weight(if is_current { FontWeight::SEMIBOLD } else { FontWeight::MEDIUM })
+                .font_weight(if is_current {
+                    FontWeight::SEMIBOLD
+                } else {
+                    FontWeight::MEDIUM
+                })
                 .when(is_current, |this| {
                     this.bg(theme.raised).shadow(vec![BoxShadow {
                         color: theme.line,
@@ -1096,14 +1310,28 @@ impl BoardView {
                         .text_color(theme.text_3)
                         .child(rows.len().to_string()),
                 )
-                .when(has_attention, |this| this.child(div().size(px(6.)).rounded_full().bg(theme.orange)))
+                .when(has_attention, |this| {
+                    this.child(div().size(px(6.)).rounded_full().bg(theme.orange))
+                })
         });
-        let mut container = div()
-            .flex()
-            .flex_col()
-            .child(div().flex().gap(px(1.)).mx(px(10.)).mt(px(9.)).mb(px(7.)).p(px(2.)).rounded(px(8.)).bg(theme.fill).children(tabs));
+        let mut container = div().flex().flex_col().child(
+            div()
+                .flex()
+                .gap(px(1.))
+                .mx(px(10.))
+                .mt(px(9.))
+                .mb(px(7.))
+                .p(px(2.))
+                .rounded(px(8.))
+                .bg(theme.fill)
+                .children(tabs),
+        );
         if !self.query.is_empty() {
-            let shown = self.filtered_rows().iter().filter(|row| self.tabs().contains(&row.column)).count();
+            let shown = self
+                .filtered_rows()
+                .iter()
+                .filter(|row| self.tabs().contains(&row.column))
+                .count();
             container = container.child(
                 div()
                     .flex()
@@ -1119,7 +1347,13 @@ impl BoardView {
                     .text_color(theme.accent)
                     .text_size(px(12.))
                     .font_weight(FontWeight::MEDIUM)
-                    .child(div().flex_1().min_w_0().truncate().child(format!("{shown} shown \u{b7} \"{}\"", self.query)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(format!("{shown} shown \u{b7} \"{}\"", self.query)),
+                    )
                     .child(
                         div()
                             .id("clear-filter")
@@ -1142,7 +1376,13 @@ impl BoardView {
         container.into_any_element()
     }
 
-    fn render_card(&self, row: &Row, is_selected: bool, theme: &Theme, cx: &mut Context<Self>) -> Stateful<Div> {
+    fn render_card(
+        &self,
+        row: &Row,
+        is_selected: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         let now = Local::now();
         let task = &self.snapshot.tasks[&row.task_id];
         let is_stuck = board::is_stuck(row, task, now);
@@ -1158,7 +1398,11 @@ impl BoardView {
         } else {
             (theme.text, theme.text_2, theme.text_3, state_color)
         };
-        let status_icon = theme::status_icon(if is_checking { Status::Running } else { row.status });
+        let status_icon = theme::status_icon(if is_checking {
+            Status::Running
+        } else {
+            row.status
+        });
         let state_word = if is_stuck { "stuck" } else { row.status.name() };
         let when = board::card_when_text(row, task, now);
         let snippet = board::card_snippet(row, &self.snapshot, is_checking);
@@ -1172,18 +1416,24 @@ impl BoardView {
             .pt(px(6.))
             .pb(px(7.))
             .rounded(px(9.))
-            .bg(if is_selected { theme.accent } else { theme.raised })
-            .border_1()
-            .border_color(if is_selected {
+            .bg(if is_selected {
                 theme.accent
-            } else if is_changed {
+            } else {
+                theme.raised
+            })
+            .border_1()
+            .border_color(if is_selected || is_changed {
                 theme.accent
             } else {
                 theme.line
             })
-            .when(!is_selected, |this| this.hover(|style| style.bg(theme.hover)))
+            .when(!is_selected, |this| {
+                this.hover(|style| style.bg(theme.hover))
+            })
             .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
-                let is_already_selected = this.selected_row().is_some_and(|row| row.root_id == root_id);
+                let is_already_selected = this
+                    .selected_row()
+                    .is_some_and(|row| row.root_id == root_id);
                 this.select(root_id.clone(), cx);
                 if event.click_count() >= 2 || is_already_selected {
                     this.set_expanded(!this.is_expanded || event.click_count() >= 2, cx);
@@ -1198,18 +1448,25 @@ impl BoardView {
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(text_3)
                     .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .child(format!("{} \u{b7} {}", board::repository_name(row), row.root_id).to_uppercase()),
+                        div().flex_1().min_w_0().truncate().child(
+                            format!("{} \u{b7} {}", board::repository_name(row), row.root_id)
+                                .to_uppercase(),
+                        ),
                     )
                     .child(
                         div()
                             .flex_none()
                             .text_size(px(11.5))
-                            .font_weight(if is_stuck { FontWeight::SEMIBOLD } else { FontWeight::MEDIUM })
-                            .text_color(if is_stuck && !is_selected { theme.orange } else { text_2 })
+                            .font_weight(if is_stuck {
+                                FontWeight::SEMIBOLD
+                            } else {
+                                FontWeight::MEDIUM
+                            })
+                            .text_color(if is_stuck && !is_selected {
+                                theme.orange
+                            } else {
+                                text_2
+                            })
                             .child(when),
                     ),
             )
@@ -1227,7 +1484,11 @@ impl BoardView {
                             .truncate()
                             .text_size(px(13.5))
                             .text_color(text)
-                            .font_weight(if is_loud { FontWeight::SEMIBOLD } else { FontWeight::MEDIUM })
+                            .font_weight(if is_loud {
+                                FontWeight::SEMIBOLD
+                            } else {
+                                FontWeight::MEDIUM
+                            })
                             .child(board::row_title(row).to_string()),
                     )
                     .when(!row.step.is_empty(), |this| {
@@ -1245,11 +1506,13 @@ impl BoardView {
                         )
                     })
                     .when(is_new, |this| {
-                        this.child(div().flex_none().size(px(7.)).rounded_full().bg(if is_selected {
-                            theme.on_accent
-                        } else {
-                            theme.accent
-                        }))
+                        this.child(div().flex_none().size(px(7.)).rounded_full().bg(
+                            if is_selected {
+                                theme.on_accent
+                            } else {
+                                theme.accent
+                            },
+                        ))
                     })
                     .child(
                         div()
@@ -1286,14 +1549,27 @@ impl BoardView {
             .flex_col()
             .gap(px(5.));
         if rows.is_empty() {
-            let text = if self.query.is_empty() { self.tab.empty_text() } else { "No matches" };
+            let text = if self.query.is_empty() {
+                self.tab.empty_text()
+            } else {
+                "No matches"
+            };
             return list
-                .child(div().py(px(34.)).flex().justify_center().text_color(theme.text_3).child(text))
+                .child(
+                    div()
+                        .py(px(34.))
+                        .flex()
+                        .justify_center()
+                        .text_color(theme.text_3)
+                        .child(text),
+                )
                 .into_any_element();
         }
         let cards: Vec<Stateful<Div>> = rows
             .iter()
-            .map(|row| self.render_card(row, Some(&row.root_id) == selected_root.as_ref(), theme, cx))
+            .map(|row| {
+                self.render_card(row, Some(&row.root_id) == selected_root.as_ref(), theme, cx)
+            })
             .collect();
         list.children(cards).into_any_element()
     }
@@ -1309,7 +1585,6 @@ impl BoardView {
     }
 
     fn disclosure(
-        &self,
         id: &'static str,
         title: &str,
         is_open: bool,
@@ -1318,83 +1593,132 @@ impl BoardView {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Div {
-        div().border_t_1().border_color(theme.line).pt(px(7.)).pb(px(2.)).child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .min_h(px(26.))
-                .child(
-                    div()
-                        .id(id)
-                        .flex()
-                        .flex_none()
-                        .items_center()
-                        .gap(px(6.))
-                        .h(px(26.))
-                        .pl(px(2.))
-                        .pr(px(6.))
-                        .rounded(px(6.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .hover(|style| style.bg(theme.hover))
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                            if id == "fields" {
-                                this.is_showing_fields = !this.is_showing_fields;
-                            } else {
-                                this.is_showing_activity = !this.is_showing_activity;
-                            }
-                            cx.notify();
-                        }))
-                        .child(
-                            icon(theme::ICON_CHEVRON, 10., theme.text_2)
-                                .when(is_open, |this| this.with_transformation(gpui::Transformation::rotate(gpui::percentage(0.25)))),
-                        )
-                        .child(title.to_string()),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .text_size(px(12.))
-                        .text_color(theme.text_3)
-                        .child(meta),
-                )
-                .children(trailing),
-        )
+        div()
+            .border_t_1()
+            .border_color(theme.line)
+            .pt(px(7.))
+            .pb(px(2.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .min_h(px(26.))
+                    .child(
+                        div()
+                            .id(id)
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .gap(px(6.))
+                            .h(px(26.))
+                            .pl(px(2.))
+                            .pr(px(6.))
+                            .rounded(px(6.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .hover(|style| style.bg(theme.hover))
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                if id == "fields" {
+                                    this.is_showing_fields = !this.is_showing_fields;
+                                } else {
+                                    this.is_showing_activity = !this.is_showing_activity;
+                                }
+                                cx.notify();
+                            }))
+                            .child(icon(theme::ICON_CHEVRON, 10., theme.text_2).when(
+                                is_open,
+                                |this| {
+                                    this.with_transformation(gpui::Transformation::rotate(
+                                        gpui::percentage(0.25),
+                                    ))
+                                },
+                            ))
+                            .child(title.to_string()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(12.))
+                            .text_color(theme.text_3)
+                            .child(meta),
+                    )
+                    .children(trailing),
+            )
     }
 
-    fn render_detail_body(&mut self, row: &Row, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_detail_body(
+        &mut self,
+        row: &Row,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let now = Local::now();
         let task = self.snapshot.tasks[&row.task_id].clone();
         let mut body = div().flex().flex_col();
-        let stop_reason = task.gate_stop_reason.clone().or(task.setup_failure_reason.clone()).unwrap_or_default();
+        let stop_reason = task
+            .gate_stop_reason
+            .clone()
+            .or(task.setup_failure_reason.clone())
+            .unwrap_or_default();
         if !stop_reason.is_empty() {
             let label = match (&task.gate_stop_reason, &task.gate) {
                 (Some(_), Some(gate)) => format!("Gate failed: {gate}"),
                 (Some(_), None) => "Gate failed".to_string(),
                 _ => "Setup failed".to_string(),
             };
-            body = body.child(self.callout(&label, &stop_reason, row.status == Status::Blocked, theme));
+            body = body.child(self.callout(
+                &label,
+                &stop_reason,
+                row.status == Status::Blocked,
+                theme,
+            ));
         }
         if board::is_stuck(row, &task, now) {
-            body = body.child(self.callout("Stuck", &board::waiting_reason_text(row, &self.snapshot), true, theme));
+            body = body.child(self.callout(
+                "Stuck",
+                &board::waiting_reason_text(row, &self.snapshot),
+                true,
+                theme,
+            ));
         }
         if !task.prompt.trim().is_empty() {
-            body = body.child(Self::section("Prompt", theme).child(div().child(task.prompt.trim().to_string())));
+            body = body.child(
+                Self::section("Prompt", theme).child(div().child(task.prompt.trim().to_string())),
+            );
         }
-        if let Some(result) = task.result.as_deref().filter(|result| !result.trim().is_empty()) {
-            let title = if row.status == Status::Failed { "Stop reason" } else { "Result" };
-            body = body.child(Self::section(title, theme).child(div().child(result.trim().to_string())));
+        if let Some(result) = task
+            .result
+            .as_deref()
+            .filter(|result| !result.trim().is_empty())
+        {
+            let title = if row.status == Status::Failed {
+                "Stop reason"
+            } else {
+                "Result"
+            };
+            body = body
+                .child(Self::section(title, theme).child(div().child(board::plain_result(result))));
         }
         if row.chain_ids.len() > 1 {
             let steps = board::chain_steps(row, &self.snapshot.tasks);
-            let mut chain = div().flex().flex_wrap().items_center().gap(px(5.)).text_size(px(12.)).text_color(theme.text_2);
+            let mut chain = div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap(px(5.))
+                .text_size(px(12.))
+                .text_color(theme.text_2);
             for (index, step) in steps.iter().enumerate() {
                 if index > 0 {
                     chain = chain.child("\u{2192}");
                 }
-                let text = if step.is_inferable { step.name.clone() } else { format!("{} \u{b7} {}", step.name, step.status.name()) };
+                let text = if step.is_inferable {
+                    step.name.clone()
+                } else {
+                    format!("{} \u{b7} {}", step.name, step.status.name())
+                };
                 chain = chain.child(
                     div()
                         .flex()
@@ -1406,9 +1730,16 @@ impl BoardView {
                         .rounded(px(10.))
                         .bg(theme.fill)
                         .when(step.is_shown, |this| {
-                            this.text_color(theme.text).font_weight(FontWeight::SEMIBOLD).border_1().border_color(theme.line)
+                            this.text_color(theme.text)
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .border_1()
+                                .border_color(theme.line)
                         })
-                        .child(icon(theme::status_icon(step.status), 11., theme.status_color(step.status, false)))
+                        .child(icon(
+                            theme::status_icon(step.status),
+                            11.,
+                            theme.status_color(step.status, false),
+                        ))
                         .child(text),
                 );
             }
@@ -1433,12 +1764,20 @@ impl BoardView {
                             this.run_in_background(
                                 move || {
                                     let outcome = golem_cli::open_url(&url);
-                                    if outcome.is_success { String::new() } else { outcome.message }
+                                    if outcome.is_success {
+                                        String::new()
+                                    } else {
+                                        outcome.message
+                                    }
                                 },
                                 cx,
                             );
                         }))
-                        .child(div().font_weight(FontWeight::BOLD).child(board::pull_request_number(&pull_request)))
+                        .child(
+                            div()
+                                .font_weight(FontWeight::BOLD)
+                                .child(board::pull_request_number(&pull_request)),
+                        )
                         .child(
                             div()
                                 .font_weight(FontWeight::SEMIBOLD)
@@ -1462,9 +1801,13 @@ impl BoardView {
         let fields_meta = if self.is_showing_fields {
             String::new()
         } else {
-            format!("{} \u{b7} {}", task.backend, board::display_directory(&task.cwd))
+            format!(
+                "{} \u{b7} {}",
+                task.backend,
+                board::display_directory(&task.cwd)
+            )
         };
-        let mut fields = self.disclosure(
+        let mut fields = Self::disclosure(
             "fields",
             "Session",
             self.is_showing_fields,
@@ -1474,19 +1817,37 @@ impl BoardView {
             cx,
         );
         if self.is_showing_fields {
-            let mut grid = div().flex().flex_col().gap(px(4.)).ml(px(18.)).mt(px(4.)).mb(px(8.)).text_size(px(12.5));
+            let mut grid = div()
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .ml(px(18.))
+                .mt(px(4.))
+                .mb(px(8.))
+                .text_size(px(12.5));
             for (label, value) in board::task_fields(row, &self.snapshot, now) {
-                let is_code = matches!(label, "Directory" | "Worktree" | "Session" | "Gate" | "Setup");
+                let is_code = matches!(
+                    label,
+                    "Directory" | "Worktree" | "Session" | "Gate" | "Setup"
+                );
                 grid = grid.child(
                     div()
                         .flex()
                         .gap(px(12.))
-                        .child(div().w(px(78.)).flex_none().text_color(theme.text_2).child(label))
+                        .child(
+                            div()
+                                .w(px(78.))
+                                .flex_none()
+                                .text_color(theme.text_2)
+                                .child(label),
+                        )
                         .child(
                             div()
                                 .flex_1()
                                 .min_w_0()
-                                .when(is_code, |this| this.font_family(MONO_FONT).text_size(px(12.)))
+                                .when(is_code, |this| {
+                                    this.font_family(MONO_FONT).text_size(px(12.))
+                                })
                                 .child(value),
                         ),
                 );
@@ -1498,7 +1859,11 @@ impl BoardView {
         let lines = self.selected_activity();
         let mut trailing: Vec<AnyElement> = Vec::new();
         if self.is_following {
-            let live = if row.status == Status::Running { "Live" } else { "Full log" };
+            let live = if row.status == Status::Running {
+                "Live"
+            } else {
+                "Full log"
+            };
             trailing.push(
                 div()
                     .flex()
@@ -1531,18 +1896,51 @@ impl BoardView {
                     }))
                     .child(level.label())
             });
-            trailing.push(div().flex().p(px(1.)).rounded(px(6.)).bg(theme.fill).children(segments).into_any_element());
+            trailing.push(
+                div()
+                    .flex()
+                    .p(px(1.))
+                    .rounded(px(6.))
+                    .bg(theme.fill)
+                    .children(segments)
+                    .into_any_element(),
+            );
             trailing.push(kbd("T", theme).into_any_element());
         }
-        let activity_meta = if self.is_showing_activity { String::new() } else { board::activity_counts(&lines) };
-        let mut activity = self.disclosure("activity", "Activity", self.is_showing_activity, activity_meta, trailing, theme, cx);
+        let activity_meta = if self.is_showing_activity {
+            String::new()
+        } else {
+            board::activity_counts(&lines)
+        };
+        let mut activity = Self::disclosure(
+            "activity",
+            "Activity",
+            self.is_showing_activity,
+            activity_meta,
+            trailing,
+            theme,
+            cx,
+        );
         if self.is_showing_activity {
-            let mut log = div().flex().flex_col().ml(px(18.)).mt(px(3.)).mb(px(6.)).text_size(px(12.5));
+            let mut log = div()
+                .flex()
+                .flex_col()
+                .ml(px(18.))
+                .mt(px(3.))
+                .mb(px(6.))
+                .text_size(px(12.5));
             if lines.is_empty() {
-                let text = if row.status == Status::Running { "No activity yet" } else { "No activity" };
+                let text = if row.status == Status::Running {
+                    "No activity yet"
+                } else {
+                    "No activity"
+                };
                 log = log.child(div().text_color(theme.text_3).child(text));
             }
-            for (index, item) in board::activity_view(&lines, self.activity_level).into_iter().enumerate() {
+            for (index, item) in board::activity_view(&lines, self.activity_level)
+                .into_iter()
+                .enumerate()
+            {
                 log = log.child(match item {
                     ActivityItem::Message(text) => div().py(px(2.)).child(text).into_any_element(),
                     ActivityItem::Tool(text) => div()
@@ -1588,7 +1986,12 @@ impl BoardView {
                     .text_color(theme.text_2)
                     .child(label.to_uppercase()),
             )
-            .child(div().font_family(MONO_FONT).text_size(px(12.)).child(text.to_string()))
+            .child(
+                div()
+                    .font_family(MONO_FONT)
+                    .text_size(px(12.))
+                    .child(text.to_string()),
+            )
     }
 
     fn render_detail(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
@@ -1605,11 +2008,15 @@ impl BoardView {
         let now = Local::now();
         let task = self.snapshot.tasks[&row.task_id].clone();
         let rows = self.column_rows(self.tab);
-        let position = rows.iter().position(|candidate| candidate.root_id == row.root_id).unwrap_or(0);
+        let position = rows
+            .iter()
+            .position(|candidate| candidate.root_id == row.root_id)
+            .unwrap_or(0);
         let row_count = rows.len();
         let is_stuck = board::is_stuck(&row, &task, now);
         let state_color = theme.status_color(row.status, is_stuck);
-        let mut sub_parts = vec![board::card_when_text(&row, &task, now).replacen("stuck ", "overdue ", 1)];
+        let mut sub_parts =
+            vec![board::card_when_text(&row, &task, now).replacen("stuck ", "overdue ", 1)];
         sub_parts.push(board::start_text(&row, &task, now));
         if let Some(branch) = board::branch_name(&task) {
             sub_parts.push(branch.to_string());
@@ -1629,21 +2036,26 @@ impl BoardView {
                     .child(if is_stuck { "stuck" } else { row.status.name() }),
             );
         for part in sub_parts {
-            sub = sub.child(div().text_color(theme.text_3).child("\u{b7}")).child(part);
+            sub = sub
+                .child(div().text_color(theme.text_3).child("\u{b7}"))
+                .child(part);
         }
-        let pager_button = |id: &'static str, label: &'static str, delta: isize, cx: &mut Context<Self>| {
-            div()
-                .id(id)
-                .min_w(px(24.))
-                .h(px(24.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(6.))
-                .hover(|style| style.bg(theme.hover))
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.move_selection(delta, cx)))
-                .child(label)
-        };
+        let pager_button =
+            |id: &'static str, label: &'static str, delta: isize, cx: &mut Context<Self>| {
+                div()
+                    .id(id)
+                    .min_w(px(24.))
+                    .h(px(24.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(6.))
+                    .hover(|style| style.bg(theme.hover))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.move_selection(delta, cx)
+                    }))
+                    .child(label)
+            };
         let head = div()
             .pl(px(18.))
             .pr(px(12.))
@@ -1658,11 +2070,10 @@ impl BoardView {
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.text_3)
                     .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .child(format!("{} / {}", board::repository_name(&row), row.root_id).to_uppercase()),
+                        div().flex_1().min_w_0().truncate().child(
+                            format!("{} / {}", board::repository_name(&row), row.root_id)
+                                .to_uppercase(),
+                        ),
                     )
                     .child(
                         div()
@@ -1685,7 +2096,9 @@ impl BoardView {
                             .justify_center()
                             .rounded(px(6.))
                             .hover(|style| style.bg(theme.hover))
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.set_expanded(false, cx)))
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.set_expanded(false, cx)
+                            }))
                             .child(icon(theme::ICON_FOLD, 15., theme.text_2)),
                     ),
             )
@@ -1720,63 +2133,75 @@ impl BoardView {
                                 .child(format!("step {}", row.step)),
                         )
                     })
-                    .when(board::is_new_for_review(&self.snapshot.tasks, &row), |this| {
-                        this.child(
-                            div()
-                                .flex_none()
-                                .px(px(6.))
-                                .rounded(px(8.))
-                                .bg(theme.accent_soft)
-                                .text_color(theme.accent)
-                                .text_size(px(10.5))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child("new"),
-                        )
-                    }),
+                    .when(
+                        board::is_new_for_review(&self.snapshot.tasks, &row),
+                        |this| {
+                            this.child(
+                                div()
+                                    .flex_none()
+                                    .px(px(6.))
+                                    .rounded(px(8.))
+                                    .bg(theme.accent_soft)
+                                    .text_color(theme.accent)
+                                    .text_size(px(10.5))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child("new"),
+                            )
+                        },
+                    ),
             )
             .child(sub);
         let body = self.render_detail_body(&row, theme, cx);
         let actions = board::available_actions(&self.snapshot, Some(&row));
         let primary = board::primary_action(&self.snapshot, &row, &actions);
-        let buttons = actions.into_iter().filter(|action| *action != Action::CloseAll).map(|action| {
-            let is_on = action == Action::Watch && self.is_following;
-            let label = match action {
-                Action::Watch if is_on => "Following",
-                Action::Watch if row.status != Status::Running => "Log",
-                _ => action.label(),
-            };
-            let is_primary = Some(action) == primary && !is_on;
-            let is_danger = action == Action::Cancel;
-            let (background, foreground) = if is_primary {
-                (theme.accent, theme.on_accent)
-            } else if is_on {
-                (theme.accent_soft, theme.accent)
-            } else if is_danger {
-                (theme.fill, theme.red)
-            } else {
-                (theme.fill, theme.text)
-            };
-            let key_chip = kbd(key_label(action), theme).when(is_primary, |this| {
-                this.bg(gpui::rgba(0xffffff38)).text_color(theme.on_accent)
+        let buttons = actions
+            .into_iter()
+            .filter(|action| *action != Action::CloseAll)
+            .map(|action| {
+                let is_on = action == Action::Watch && self.is_following;
+                let label = match action {
+                    Action::Watch if is_on => "Following",
+                    Action::Watch if row.status != Status::Running => "Log",
+                    _ => action.label(),
+                };
+                let is_primary = Some(action) == primary && !is_on;
+                let is_danger = action == Action::Cancel;
+                let (background, foreground) = if is_primary {
+                    (theme.accent, theme.on_accent)
+                } else if is_on {
+                    (theme.accent_soft, theme.accent)
+                } else if is_danger {
+                    (theme.fill, theme.red)
+                } else {
+                    (theme.fill, theme.text)
+                };
+                let key_chip = kbd(key_label(action), theme).when(is_primary, |this| {
+                    this.bg(gpui::rgba(0xffffff38)).text_color(theme.on_accent)
+                });
+                div()
+                    .id(action.label())
+                    .flex()
+                    .items_center()
+                    .gap(px(7.))
+                    .h(px(26.))
+                    .pl(px(10.))
+                    .pr(px(6.))
+                    .rounded(px(7.))
+                    .bg(background)
+                    .text_color(foreground)
+                    .font_weight(if is_primary {
+                        FontWeight::SEMIBOLD
+                    } else {
+                        FontWeight::MEDIUM
+                    })
+                    .when(is_danger, |this| this.ml_auto())
+                    .hover(|style| style.opacity(0.9))
+                    .on_click(
+                        cx.listener(move |this, _: &ClickEvent, _, cx| this.request(action, cx)),
+                    )
+                    .child(label)
+                    .child(key_chip)
             });
-            div()
-                .id(action.label())
-                .flex()
-                .items_center()
-                .gap(px(7.))
-                .h(px(26.))
-                .pl(px(10.))
-                .pr(px(6.))
-                .rounded(px(7.))
-                .bg(background)
-                .text_color(foreground)
-                .font_weight(if is_primary { FontWeight::SEMIBOLD } else { FontWeight::MEDIUM })
-                .when(is_danger, |this| this.ml_auto())
-                .hover(|style| style.opacity(0.9))
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.request(action, cx)))
-                .child(label)
-                .child(key_chip)
-        });
         div()
             .flex_1()
             .min_w_0()
@@ -1831,7 +2256,12 @@ impl BoardView {
     }
 
     fn render_footer(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let done_count = self.snapshot.rows.iter().filter(|row| row.column == Column::Done).count();
+        let done_count = self
+            .snapshot
+            .rows
+            .iter()
+            .filter(|row| row.column == Column::Done)
+            .count();
         let has_closable = !board::closable_task_ids(&self.snapshot).is_empty();
         let done_label: AnyElement = if self.is_showing_done {
             div().child("Hide Done").into_any_element()
@@ -1860,7 +2290,9 @@ impl BoardView {
             .when(has_closable, |this| {
                 this.child(
                     Self::footer_button("close-finished", theme)
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.request(Action::CloseAll, cx)))
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.request(Action::CloseAll, cx)
+                        }))
                         .child("Close finished")
                         .child(kbd("\u{21e7}C", theme)),
                 )
@@ -1888,10 +2320,24 @@ impl BoardView {
     }
 
     fn scrim(&self, theme: &Theme) -> Div {
-        div().absolute().top_0().left_0().size_full().flex().justify_center().items_start().bg(theme.scrim)
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .flex()
+            .justify_center()
+            .items_start()
+            .bg(theme.scrim)
     }
 
-    fn sheet_button(id: &'static str, label: String, key: &str, is_primary: bool, theme: &Theme) -> Stateful<Div> {
+    fn sheet_button(
+        id: &'static str,
+        label: String,
+        key: &str,
+        is_primary: bool,
+        theme: &Theme,
+    ) -> Stateful<Div> {
         div()
             .id(id)
             .flex_1()
@@ -1902,10 +2348,20 @@ impl BoardView {
             .h(px(28.))
             .rounded(px(7.))
             .bg(if is_primary { theme.accent } else { theme.fill })
-            .text_color(if is_primary { theme.on_accent } else { theme.text })
-            .font_weight(if is_primary { FontWeight::SEMIBOLD } else { FontWeight::MEDIUM })
+            .text_color(if is_primary {
+                theme.on_accent
+            } else {
+                theme.text
+            })
+            .font_weight(if is_primary {
+                FontWeight::SEMIBOLD
+            } else {
+                FontWeight::MEDIUM
+            })
             .child(label)
-            .child(kbd(key, theme).when(is_primary, |this| this.bg(gpui::rgba(0xffffff38)).text_color(theme.on_accent)))
+            .child(kbd(key, theme).when(is_primary, |this| {
+                this.bg(gpui::rgba(0xffffff38)).text_color(theme.on_accent)
+            }))
     }
 
     fn sheet(theme: &Theme, width: f32) -> Div {
@@ -1924,33 +2380,71 @@ impl BoardView {
             }])
     }
 
-    fn render_confirm(&self, pending: &Pending, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let row = pending.task_id.as_ref().and_then(|task_id| self.snapshot.rows.iter().find(|row| &row.task_id == task_id));
+    fn render_confirm(
+        &self,
+        pending: &Pending,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let row = pending.task_id.as_ref().and_then(|task_id| {
+            self.snapshot
+                .rows
+                .iter()
+                .find(|row| &row.task_id == task_id)
+        });
         let (title, body, verb) = match (pending.action, row) {
             (Action::CloseAll, _) => {
                 let count = board::closable_task_ids(&self.snapshot).len();
-                (format!("Close {}?", board::counted_text(count, "finished task")), "They move to Done.".to_string(), "Close all".to_string())
+                (
+                    format!("Close {}?", board::counted_text(count, "finished task")),
+                    "They move to Done.".to_string(),
+                    "Close all".to_string(),
+                )
             }
             (action, Some(row)) => {
                 let name = board::task_display_name(&self.snapshot.tasks, &row.task_id);
                 let body = match action {
                     Action::Close => "It moves to Done.",
-                    Action::Cancel if row.status == Status::Running => "The agent stops and the task moves to Done.",
+                    Action::Cancel if row.status == Status::Running => {
+                        "The agent stops and the task moves to Done."
+                    }
                     Action::Cancel => "The task moves to Done.",
                     _ => "It restarts from its prompt.",
                 };
-                let verb = if action == Action::Cancel { "Cancel task" } else { action.label() };
-                (format!("{} {name}?", action.label()), body.to_string(), verb.to_string())
+                let verb = if action == Action::Cancel {
+                    "Cancel task"
+                } else {
+                    action.label()
+                };
+                (
+                    format!("{} {name}?", action.label()),
+                    body.to_string(),
+                    verb.to_string(),
+                )
             }
-            (_, None) => ("Task no longer exists".to_string(), String::new(), "OK".to_string()),
+            (_, None) => (
+                "Task no longer exists".to_string(),
+                String::new(),
+                "OK".to_string(),
+            ),
         };
-        let decline = if pending.action == Action::Cancel { "Keep" } else { "Cancel" };
+        let decline = if pending.action == Action::Cancel {
+            "Keep"
+        } else {
+            "Cancel"
+        };
         self.scrim(theme)
             .id("confirm")
             .occlude()
             .child(
                 Self::sheet(theme, 340.)
-                    .child(div().text_size(px(14.)).font_weight(FontWeight::BOLD).mb(px(3.)).child(title))
+                    .child(
+                        div()
+                            .text_size(px(14.))
+                            .font_weight(FontWeight::BOLD)
+                            .mb(px(3.))
+                            .child(title),
+                    )
                     .child(div().text_color(theme.text_2).child(body))
                     .child(
                         div()
@@ -1958,12 +2452,24 @@ impl BoardView {
                             .gap(px(8.))
                             .mt(px(14.))
                             .child(
-                                Self::sheet_button("decline", decline.to_string(), "esc", false, theme)
-                                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.answer(false, cx))),
+                                Self::sheet_button(
+                                    "decline",
+                                    decline.to_string(),
+                                    "esc",
+                                    false,
+                                    theme,
+                                )
+                                .on_click(
+                                    cx.listener(|this, _: &ClickEvent, _, cx| {
+                                        this.answer(false, cx)
+                                    }),
+                                ),
                             )
                             .child(
                                 Self::sheet_button("accept", verb, "\u{23ce}", true, theme)
-                                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.answer(true, cx))),
+                                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                        this.answer(true, cx)
+                                    })),
                             ),
                     ),
             )
@@ -2021,7 +2527,14 @@ impl BoardView {
                     .gap(px(6.))
                     .py(px(2.))
                     .text_size(px(12.))
-                    .child(div().w(px(92.)).flex().gap(px(2.)).children(keys.split(' ').map(|key| kbd(key, theme))))
+                    .child(
+                        div()
+                            .w(px(104.))
+                            .flex_none()
+                            .flex()
+                            .gap(px(2.))
+                            .children(keys.split(' ').map(|key| kbd(key, theme))),
+                    )
                     .child(text.to_string())
             });
             div()
@@ -2054,7 +2567,11 @@ impl BoardView {
                 .items_center()
                 .gap(px(3.))
                 .text_size(px(12.))
-                .child(icon(theme::status_icon(status), 11., theme.status_color(status, false)))
+                .child(icon(
+                    theme::status_icon(status),
+                    11.,
+                    theme.status_color(status, false),
+                ))
                 .child(status.name())
         });
         let width = (self.panel_width() as f32 - 24.).min(640.);
@@ -2063,17 +2580,28 @@ impl BoardView {
             .occlude()
             .child(
                 Self::sheet(theme, width)
-                    .child(div().text_size(px(14.)).font_weight(FontWeight::BOLD).child("Keyboard shortcuts"))
+                    .child(
+                        div()
+                            .text_size(px(14.))
+                            .font_weight(FontWeight::BOLD)
+                            .child("Keyboard shortcuts"),
+                    )
                     .child(div().flex().flex_wrap().gap(px(22.)).children(columns))
-                    .child(div().flex().flex_wrap().gap(px(10.)).mt(px(12.)).children(legend))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap(px(10.))
+                            .mt(px(12.))
+                            .children(legend),
+                    )
                     .child(
                         div().flex().mt(px(14.)).child(
-                            Self::sheet_button("help-ok", "OK".to_string(), "esc", false, theme).on_click(cx.listener(
-                                |this, _: &ClickEvent, _, cx| {
+                            Self::sheet_button("help-ok", "OK".to_string(), "esc", false, theme)
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                                     this.is_showing_help = false;
                                     cx.notify();
-                                },
-                            )),
+                                })),
                         ),
                     ),
             )
@@ -2083,11 +2611,29 @@ impl BoardView {
     fn render_palette(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let items = self.palette_items();
         let palette = self.palette.as_ref();
-        let query = palette.map(|palette| palette.query.clone()).unwrap_or_default();
-        let current = palette.map_or(0, |palette| palette.index.min(items.len().saturating_sub(1)));
-        let mut list = div().id("palette-list").max_h(px(340.)).overflow_y_scroll().px(px(5.)).pt(px(4.)).pb(px(6.));
+        let query = palette
+            .map(|palette| palette.query.clone())
+            .unwrap_or_default();
+        let current = palette.map_or(0, |palette| {
+            palette.index.min(items.len().saturating_sub(1))
+        });
+        let mut list = div()
+            .id("palette-list")
+            .max_h(px(420.))
+            .overflow_y_scroll()
+            .track_scroll(&self.palette_scroll)
+            .px(px(5.))
+            .pt(px(4.))
+            .pb(px(6.));
         let mut group = String::new();
+        let mut child_count = 0;
         for (index, item) in items.iter().enumerate() {
+            if index == current {
+                let heading_count = usize::from(item.group != group);
+                self.palette_scroll
+                    .scroll_to_item(child_count + heading_count);
+            }
+            child_count += 1 + usize::from(item.group != group);
             if item.group != group {
                 group = item.group.clone();
                 list = list.child(
@@ -2122,18 +2668,43 @@ impl BoardView {
                     .rounded(px(6.))
                     .text_color(foreground)
                     .when(is_current, |this| this.bg(theme.accent))
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.run_command(command, window, cx)))
-                    .child(div().flex_1().min_w_0().truncate().child(item.label.clone()))
-                    .child(kbd(item.key, theme).when(is_current, |this| this.bg(gpui::rgba(0xffffff38)).text_color(theme.on_accent))),
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.run_command(command, window, cx)
+                    }))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(item.label.clone()),
+                    )
+                    .child(kbd(item.key, theme).when(is_current, |this| {
+                        this.bg(gpui::rgba(0xffffff38)).text_color(theme.on_accent)
+                    })),
             );
         }
         if items.is_empty() {
-            list = list.child(div().py(px(18.)).flex().justify_center().text_color(theme.text_3).child("No matches"));
+            list = list.child(
+                div()
+                    .py(px(18.))
+                    .flex()
+                    .justify_center()
+                    .text_color(theme.text_3)
+                    .child("No matches"),
+            );
         }
         let search_text: AnyElement = if query.is_empty() {
-            div().text_color(theme.text_3).child("Search actions").into_any_element()
+            div()
+                .text_color(theme.text_3)
+                .child("Search actions")
+                .into_any_element()
         } else {
-            div().flex().items_center().child(query).child(div().w(px(1.5)).h(px(16.)).bg(theme.accent)).into_any_element()
+            div()
+                .flex()
+                .items_center()
+                .child(query)
+                .child(div().w(px(1.5)).h(px(16.)).bg(theme.accent))
+                .into_any_element()
         };
         self.scrim(theme)
             .id("palette")
@@ -2209,7 +2780,12 @@ impl Render for BoardView {
             .flex_col()
             .min_h_0()
             .min_w_0()
-            .when(self.is_expanded, |this| this.w(px(SIDE_WIDTH)).flex_none().border_r_1().border_color(theme.line))
+            .when(self.is_expanded, |this| {
+                this.w(px(SIDE_WIDTH))
+                    .flex_none()
+                    .border_r_1()
+                    .border_color(theme.line)
+            })
             .when(!self.is_expanded, |this| this.flex_1())
             .child(self.render_tabs(&theme, cx))
             .child(self.render_list(&theme, cx));

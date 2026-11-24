@@ -123,8 +123,12 @@ fn icon_body(path: &str) -> Option<&'static str> {
     Some(match path {
         "icons/scheduled.svg" => r#"<circle cx="8" cy="8" r="6.1"/><path d="M8 4.6V8l2.4 1.6"/>"#,
         "icons/waiting.svg" => r#"<circle cx="8" cy="8" r="6.1" stroke-dasharray="2.4 2.4"/>"#,
-        "icons/running.svg" => r#"<circle cx="8" cy="8" r="6.1"/><path d="M6.7 5.6v4.8L10.5 8z" fill="black"/>"#,
-        "icons/blocked.svg" => r#"<rect x="3.2" y="3.2" width="9.6" height="9.6" rx="2.2" fill="black" stroke="none"/>"#,
+        "icons/running.svg" => {
+            r#"<circle cx="8" cy="8" r="6.1"/><path d="M6.7 5.6v4.8L10.5 8z" fill="black"/>"#
+        }
+        "icons/blocked.svg" => {
+            r#"<rect x="3.2" y="3.2" width="9.6" height="9.6" rx="2.2" fill="black" stroke="none"/>"#
+        }
         "icons/failed.svg" => r#"<path d="M4.2 4.2l7.6 7.6M11.8 4.2l-7.6 7.6"/>"#,
         "icons/finished.svg" => r#"<path d="M3.2 8.6l3.1 3.1 6.5-7.4"/>"#,
         "icons/cancelled.svg" => r#"<circle cx="8" cy="8" r="6.1"/><path d="M4 12L12 4"/>"#,
