@@ -739,6 +739,17 @@ impl BoardView {
         self.detail_scroll.set_offset(point(px(0.), px(0.)));
     }
 
+    /// The activity items that fold tool calls at the Messages level, for E to open them all.
+    fn fold_indexes(&mut self) -> HashSet<usize> {
+        let lines = self.selected_activity();
+        board::activity_view(&lines, ActivityLevel::Messages)
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| matches!(item, ActivityItem::Fold(_)))
+            .map(|(index, _)| index)
+            .collect()
+    }
+
     fn select(&mut self, root_id: String, cx: &mut Context<Self>) {
         self.selected_roots.insert(self.tab, root_id);
         self.expanded_sections.clear();
@@ -1583,12 +1594,14 @@ impl BoardView {
                 }
             }
             (_, "e") => {
-                let is_expanding =
-                    self.is_following || self.expanded_sections.len() < EXPANDABLE_SECTIONS.len();
-                self.expanded_sections = if is_expanding {
-                    EXPANDABLE_SECTIONS.into_iter().collect()
+                let fold_indexes = self.fold_indexes();
+                let is_expanding = self.is_following
+                    || self.expanded_sections.len() < EXPANDABLE_SECTIONS.len()
+                    || self.expanded_folds != fold_indexes;
+                (self.expanded_sections, self.expanded_folds) = if is_expanding {
+                    (EXPANDABLE_SECTIONS.into_iter().collect(), fold_indexes)
                 } else {
-                    HashSet::new()
+                    (HashSet::new(), HashSet::new())
                 };
                 self.is_revealing_full_text = is_expanding;
                 self.is_following = false;
@@ -3450,7 +3463,7 @@ impl BoardView {
                 ("C", "close, dismiss"),
                 ("X", "cancel"),
                 ("Y", "copy ID"),
-                ("E", "full text"),
+                ("E", "expand all"),
                 ("I", "session"),
                 ("T", "activity level"),
             ],
@@ -3732,13 +3745,13 @@ impl BoardView {
     }
 
     /// Toasts sit over the footer so they never cover a card.
+    /// A row above the footer that the list shrinks for, so the toast never hides a card.
     fn render_toast(&self, toast: &Toast, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         div()
-            .absolute()
-            .bottom(px(BOTTOM_BAR_HEIGHT + 6.))
-            .left_0()
-            .w_full()
+            .flex_none()
             .px(px(8.))
+            .pt(px(4.))
+            .pb(px(6.))
             .child(
                 div()
                     .id("toast")
@@ -3751,13 +3764,6 @@ impl BoardView {
                     .bg(theme.toast)
                     .border_1()
                     .border_color(theme.line)
-                    .shadow(vec![BoxShadow {
-                        color: gpui::rgba(0x00000040).into(),
-                        offset: point(px(0.), px(4.)),
-                        blur_radius: px(14.),
-                        spread_radius: px(0.),
-                        inset: false,
-                    }])
                     .text_size(px(12.))
                     .font_weight(FontWeight::MEDIUM)
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
@@ -3820,10 +3826,10 @@ impl Render for BoardView {
             .child(self.render_header(&theme, cx))
             .child(self.render_tabs(&theme, cx))
             .child(self.render_list(&theme, cx))
-            .child(self.render_footer(&theme, cx))
             .when_some(self.toast.as_ref(), |this, toast| {
                 this.child(self.render_toast(toast, &theme, cx))
-            });
+            })
+            .child(self.render_footer(&theme, cx));
         // Details open to the left so the list stays where it was under the pointer.
         let mut body = div().flex_1().min_h_0().flex();
         if self.is_expanded {
