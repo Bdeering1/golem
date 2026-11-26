@@ -97,6 +97,9 @@ const STOPPED_MESSAGE_ITEM_LIMIT: usize = 3;
 /// cutting through them.
 const PALETTE_TOP: f32 = 8.0;
 const PALETTE_CHROME_HEIGHT: f32 = 58.0;
+const PALETTE_LIST_MAX_HEIGHT: f32 = 420.0;
+/// Added to the chrome's margin so a palette that grew the panel ends 12 pt from its edge.
+const PALETTE_BOTTOM_INSET: f32 = 6.0;
 const PALETTE_ROW_HEIGHT: f32 = 28.0;
 const PALETTE_HEADING_HEIGHT: f32 = 28.5;
 const PALETTE_LIST_PADDING: f32 = 5.0;
@@ -666,8 +669,10 @@ impl BoardView {
             .max()
             .unwrap_or(0);
         let list_height = (longest as f64 * CARD_PITCH).max(EMPTY_LIST_HEIGHT);
-        let minimum_height = if self.is_showing_help || self.palette.is_some() {
+        let minimum_height = if self.is_showing_help {
             HELP_PANEL_HEIGHT
+        } else if self.palette.is_some() {
+            self.palette_panel_height()
         } else {
             MIN_PANEL_HEIGHT
         };
@@ -683,6 +688,14 @@ impl BoardView {
         };
         (PANEL_CHROME_HEIGHT + load_error_height + toast_height + list_height)
             .clamp(minimum_height, PANEL_HEIGHT)
+    }
+
+    /// Fits the palette's unfiltered list, so the panel doesn't resize while searching.
+    fn palette_panel_height(&self) -> f64 {
+        let list_height =
+            palette_list_height(&self.all_palette_items(), f32::MAX).min(PALETTE_LIST_MAX_HEIGHT);
+        let height = PALETTE_CHROME_HEIGHT + list_height + PALETTE_BOTTOM_INSET;
+        (height as f64).max(MIN_PANEL_HEIGHT)
     }
 
     /// Moves the panel under the menu bar item, then shows it if asked. AppKit applies the
@@ -1433,6 +1446,17 @@ impl BoardView {
     }
 
     fn palette_items(&self) -> Vec<PaletteItem> {
+        let query = self
+            .palette
+            .as_ref()
+            .map(|palette| palette.query.to_lowercase())
+            .unwrap_or_default();
+        let mut items = self.all_palette_items();
+        items.retain(|item| query.is_empty() || item.label.to_lowercase().contains(&query));
+        items
+    }
+
+    fn all_palette_items(&self) -> Vec<PaletteItem> {
         let mut items = Vec::new();
         if let Some(row) = self.selected_row() {
             for action in board::available_actions(&self.snapshot, Some(row)) {
@@ -1522,12 +1546,6 @@ impl BoardView {
                 is_danger: false,
             });
         }
-        let query = self
-            .palette
-            .as_ref()
-            .map(|palette| palette.query.to_lowercase())
-            .unwrap_or_default();
-        items.retain(|item| query.is_empty() || item.label.to_lowercase().contains(&query));
         items
     }
 
@@ -1647,6 +1665,9 @@ impl BoardView {
                 (KEY_ESCAPE | KEY_ENTER, _) => self.error_detail = None,
                 (KEY_DOWN, _) | (_, "j") => scroll_handle_by(&self.error_scroll, ERROR_LINE_STEP),
                 (KEY_UP, _) | (_, "k") => scroll_handle_by(&self.error_scroll, -ERROR_LINE_STEP),
+                ("space", _) if modifiers.shift => {
+                    scroll_handle_by(&self.error_scroll, -ERROR_PAGE_STEP);
+                }
                 ("pagedown" | "space", _) => {
                     scroll_handle_by(&self.error_scroll, ERROR_PAGE_STEP);
                 }
@@ -1657,6 +1678,8 @@ impl BoardView {
             self.handle_filter_key(key, &typed, cx);
         } else if key == "tab" && modifiers.shift {
             self.move_tab(-1, cx);
+        } else if key == "space" && modifiers.shift {
+            self.scroll_by(-SCROLL_STEP);
         } else {
             self.handle_board_key(key, &typed, cx);
         }
@@ -2492,7 +2515,7 @@ impl BoardView {
                             .truncate()
                             .text_color(snippet_color)
                             .when(is_code, |this| {
-                                this.font_family(MONO_FONT).text_size(px(11.5))
+                                this.font_family(MONO_FONT).text_size(px(11.))
                             })
                             .child(snippet),
                     )
@@ -4137,7 +4160,8 @@ impl BoardView {
         let current = palette.map_or(0, |palette| {
             palette.index.min(items.len().saturating_sub(1))
         });
-        let available_height = (self.panel_height() as f32 - PALETTE_CHROME_HEIGHT).min(420.);
+        let available_height =
+            (self.panel_height() as f32 - PALETTE_CHROME_HEIGHT).min(PALETTE_LIST_MAX_HEIGHT);
         let full_height = palette_list_height(&items, f32::MAX);
         let is_overflowing = full_height > available_height;
         // An overflowing list shows part of the next row, so it reads as scrollable.
