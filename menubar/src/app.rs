@@ -83,6 +83,8 @@ const PALETTE_HEADING_HEIGHT: f32 = 28.5;
 const PALETTE_LIST_PADDING: f32 = 5.0;
 const PALETTE_MIN_PEEK: f32 = 8.0;
 const PALETTE_FADE_HEIGHT: f32 = 22.0;
+/// Tall enough to fade a whole line, so a cut-off section reads as more below.
+const DETAIL_FADE_HEIGHT: f32 = 32.0;
 const NOTHING_NEEDS_YOU_TEXT: &str = "Nothing needs you right now";
 const GOLEM_MISSING_TEXT: &str = "Still looking for golem";
 const TERMINAL_BACKENDS: [&str; 2] = ["claude", "codex"];
@@ -168,7 +170,7 @@ pub struct BoardView {
     /// The full text of an error toast that has no task to open, shown in its own sheet.
     error_detail: Option<ErrorDetail>,
     /// Whether any ledger read has succeeded, so an empty list can mean "nothing" rather than "unknown".
-    has_loaded: bool,
+    loaded_at: Option<DateTime<Local>>,
     golem: Option<Arc<Golem>>,
     tray_icon: TrayIcon,
     panel: Option<Retained<NSWindow>>,
@@ -362,7 +364,7 @@ impl BoardView {
             snapshot: Snapshot::default(),
             load_error: None,
             error_detail: None,
-            has_loaded: false,
+            loaded_at: None,
             golem: None,
             tray_icon: macos::create_tray_icon(),
             panel: macos::native_window(window),
@@ -421,7 +423,7 @@ impl BoardView {
                 self.note_changes(&previous, cx);
                 self.keep_selection_position(selected_index);
                 self.load_error = None;
-                self.has_loaded = true;
+                self.loaded_at = Some(Local::now());
             }
             Err(error) => self.load_error = Some(error),
         }
@@ -1034,6 +1036,27 @@ impl BoardView {
             &self.list_scroll
         };
         scroll_handle_by(handle, delta);
+    }
+
+    /// The time the board's durations count to, held at the last good read while the ledger
+    /// can't be read, so stale cards don't look live.
+    fn board_now(&self) -> DateTime<Local> {
+        match (&self.load_error, self.loaded_at) {
+            (Some(_), Some(loaded_at)) => loaded_at,
+            _ => Local::now(),
+        }
+    }
+
+    fn load_error_text(&self) -> String {
+        let Some(loaded_at) = self.loaded_at else {
+            return LOAD_ERROR_TITLE.to_string();
+        };
+        let seconds = (Local::now() - loaded_at).num_seconds();
+        if seconds < 60 {
+            return "Can't read the ledger \u{b7} last read just now".to_string();
+        }
+        let age = board::duration_text(seconds as f64);
+        format!("Can't read the ledger \u{b7} last read {age} ago")
     }
 
     /// While the filter is edited, letter keys type, so bare-letter keycaps hide.
@@ -2019,11 +2042,7 @@ impl BoardView {
                                 .min_w_0()
                                 .truncate()
                                 .text_color(theme.orange)
-                                .child(if self.has_loaded {
-                                    "Can't read the ledger, showing the last good state"
-                                } else {
-                                    LOAD_ERROR_TITLE
-                                }),
+                                .child(self.load_error_text()),
                         )
                         .child(
                             div()
@@ -2114,7 +2133,7 @@ impl BoardView {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        let now = Local::now();
+        let now = self.board_now();
         let task = &self.snapshot.tasks[&row.task_id];
         let is_stuck = board::is_stuck(row, task, now);
         let busy_action = self.busy_actions.get(&row.task_id).copied();
@@ -2329,7 +2348,7 @@ impl BoardView {
             .flex_col()
             .gap(px(CARD_GAP));
         if rows.is_empty() {
-            let text = if !self.has_loaded && self.load_error.is_some() {
+            let text = if self.loaded_at.is_none() && self.load_error.is_some() {
                 "Tasks unavailable"
             } else if self.query.is_empty() {
                 self.tab.empty_text()
@@ -2372,7 +2391,7 @@ impl BoardView {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let now = Local::now();
+        let now = self.board_now();
         let task = self.snapshot.tasks[&row.task_id].clone();
         let mut body: Vec<AnyElement> = Vec::new();
         let stop_reason = task
@@ -2555,7 +2574,7 @@ impl BoardView {
                     .items_center()
                     .gap(px(6.))
                     .text_size(px(12.5))
-                    .child(div().w(px(42.)).flex_none().text_color(theme.text_3).child(
+                    .child(div().flex_none().text_color(theme.text_3).child(
                         if index < shown_index {
                             "Before"
                         } else {
@@ -2921,7 +2940,7 @@ impl BoardView {
                 .child(format!("No task selected in {}", self.tab.title()))
                 .into_any_element();
         };
-        let now = Local::now();
+        let now = self.board_now();
         let task = self.snapshot.tasks[&row.task_id].clone();
         let is_stuck = board::is_stuck(&row, &task, now);
         let state_color = theme.status_color(row.status, is_stuck);
@@ -3137,24 +3156,30 @@ impl BoardView {
                             .pl(px(18.))
                             .pr(px(18.))
                             .pt(px(2.))
-                            .pb(px(16.))
+                            .pb(px(DETAIL_FADE_HEIGHT + 4.))
                             .flex()
                             .flex_col()
                             .children(body),
                     )
-                    .child(div().absolute().bottom_0().left_0().w_full().h(px(20.)).bg(
-                        linear_gradient(
-                            180.,
-                            linear_color_stop(
-                                Hsla {
-                                    a: 0.,
-                                    ..theme.panel
-                                },
-                                0.,
-                            ),
-                            linear_color_stop(theme.panel, 1.),
-                        ),
-                    )),
+                    .child(
+                        div()
+                            .absolute()
+                            .bottom_0()
+                            .left_0()
+                            .w_full()
+                            .h(px(DETAIL_FADE_HEIGHT))
+                            .bg(linear_gradient(
+                                180.,
+                                linear_color_stop(
+                                    Hsla {
+                                        a: 0.,
+                                        ..theme.panel
+                                    },
+                                    0.,
+                                ),
+                                linear_color_stop(theme.panel, 1.),
+                            )),
+                    ),
             )
             .child(
                 div()
@@ -3190,8 +3215,8 @@ impl BoardView {
     }
 
     fn render_footer(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        // A bottom sheet floats just above the footer, so the footer empties rather than peek out.
-        if self.pending.is_some() || self.error_detail.is_some() {
+        // Overlays cover the footer's controls, so it empties rather than show them inert.
+        if self.palette.is_some() || self.is_sheet_open() {
             return div().h(px(BOTTOM_BAR_HEIGHT)).into_any_element();
         }
         let done_count = self.column_rows(Column::Done).len();
