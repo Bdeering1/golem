@@ -222,7 +222,7 @@ impl Action {
         match self {
             Action::Pickup => "Pick up failed",
             Action::Retry => "Retry failed",
-            Action::RerunGate => "Gate still failing",
+            Action::RerunGate => "Recheck failed",
             Action::Close | Action::CloseAll => "Close failed",
             Action::Cancel => "Cancel failed",
             Action::Dismiss => "Dismiss failed",

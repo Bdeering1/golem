@@ -169,6 +169,7 @@ struct PaletteItem {
 struct Palette {
     query: String,
     caret: usize,
+    anchor: Option<usize>,
     index: usize,
 }
 
@@ -222,8 +223,8 @@ pub struct BoardView {
     is_showing_done: bool,
     query: String,
     query_caret: usize,
-    /// The other end of the active input's selection, counted like its caret.
-    input_anchor: Option<usize>,
+    /// The other end of the filter's selection, counted like its caret.
+    query_anchor: Option<usize>,
     input: Input,
     is_expanded: bool,
     /// A stopped task with a Result shows its activity as one counts line until opened.
@@ -422,7 +423,7 @@ impl BoardView {
             is_showing_done: false,
             query: String::new(),
             query_caret: 0,
-            input_anchor: None,
+            query_anchor: None,
             input: Input::None,
             is_expanded: false,
             is_activity_open: false,
@@ -559,8 +560,8 @@ impl BoardView {
             let name = board::task_display_name(&self.snapshot.tasks, &row.task_id);
             self.show_toast(
                 format!(
-                    "{name} {}, now in {}",
-                    row.status.name(),
+                    "{}, now in {}: {name}",
+                    sentence_case(row.status.name()),
                     row.column.title()
                 ),
                 cx,
@@ -1016,7 +1017,7 @@ impl BoardView {
 
     fn show_error_detail(&mut self, detail: ErrorDetail) {
         self.is_error_copied = false;
-        self.input_anchor = None;
+        self.query_anchor = None;
         self.error_scroll.set_offset(point(px(0.), px(0.)));
         self.error_detail = Some(detail);
     }
@@ -1024,7 +1025,6 @@ impl BoardView {
     fn set_palette(&mut self, palette: Option<Palette>, cx: &mut Context<Self>) {
         let was_open = self.palette.is_some();
         self.palette = palette;
-        self.input_anchor = None;
         self.palette_scroll.scroll_to_item(0);
         if was_open != self.palette.is_some() {
             self.place(false, cx);
@@ -1745,7 +1745,7 @@ impl BoardView {
 
     fn handle_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         if self.palette.is_none() && self.input != Input::Filter {
-            self.input_anchor = None;
+            self.query_anchor = None;
         }
         let keystroke = &event.keystroke;
         let modifiers = keystroke.modifiers;
@@ -1784,12 +1784,9 @@ impl BoardView {
                     self.edit_active_input(&format!("{selecting}{edge}"), "");
                 }
                 "a" if self.palette.is_some() || self.input == Input::Filter => {
-                    let text_size = self
-                        .palette
-                        .as_ref()
-                        .map_or(self.query.len(), |palette| palette.query.len());
                     self.edit_active_input("end", "");
-                    self.input_anchor = Some(text_size);
+                    let (text, _, anchor) = self.active_input_mut();
+                    *anchor = Some(text.len());
                 }
                 _ => return,
             }
@@ -1971,14 +1968,30 @@ impl BoardView {
         self.palette_scroll.scroll_to_item(0);
     }
 
-    /// Edits the active input, the palette's search or else the filter.
+    /// The active input's text, caret and selection anchor: the palette's search or else the
+    /// filter.
+    fn active_input(&self) -> (&str, usize, Option<usize>) {
+        match &self.palette {
+            Some(palette) => (&palette.query, palette.caret, palette.anchor),
+            None => (&self.query, self.query_caret, self.query_anchor),
+        }
+    }
+
+    fn active_input_mut(&mut self) -> (&mut String, &mut usize, &mut Option<usize>) {
+        match self.palette.as_mut() {
+            Some(palette) => (&mut palette.query, &mut palette.caret, &mut palette.anchor),
+            None => (
+                &mut self.query,
+                &mut self.query_caret,
+                &mut self.query_anchor,
+            ),
+        }
+    }
+
     fn edit_active_input(&mut self, key: &str, typed: &str) -> bool {
-        let (text, caret) = match self.palette.as_mut() {
-            Some(palette) => (&mut palette.query, &mut palette.caret),
-            None => (&mut self.query, &mut self.query_caret),
-        };
+        let (text, caret, anchor) = self.active_input_mut();
         let before = text.clone();
-        let is_handled = edit_input(text, caret, &mut self.input_anchor, key, typed);
+        let is_handled = edit_input(text, caret, anchor, key, typed);
         if *text != before {
             self.after_query_change();
         }
@@ -1986,11 +1999,8 @@ impl BoardView {
     }
 
     fn selected_input_text(&self) -> Option<String> {
-        let (text, caret) = match &self.palette {
-            Some(palette) => (&palette.query, palette.caret),
-            None => (&self.query, self.query_caret),
-        };
-        selection_range(text, caret, self.input_anchor).map(|range| text[range].to_string())
+        let (text, caret, anchor) = self.active_input();
+        selection_range(text, caret, anchor).map(|range| text[range].to_string())
     }
 
     /// Pastes the clipboard's text, on one line, into the palette search or the filter.
@@ -2344,20 +2354,19 @@ fn word_end(text: &str, index: usize) -> usize {
 // ---- rendering ------------------------------------------------------------------------------
 
 impl BoardView {
-    /// Text being typed with its caret, scrolled just enough to keep the caret in view; a
-    /// click moves the caret to the nearest character.
+    /// The active input's text with its caret, scrolled just enough to keep the caret in view;
+    /// a click moves the caret to the nearest character.
     fn editing_text(
         &self,
         id: &'static str,
-        text: &str,
-        caret: usize,
         font_size: f32,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
+        let (text, caret, anchor) = self.active_input();
         let caret_height = font_size + 2.;
         let caret_index = text.len() - caret.min(text.len());
-        let selection = selection_range(text, caret, self.input_anchor);
+        let selection = selection_range(text, caret, anchor);
         let is_selected = selection.is_some();
         let (start, end) =
             selection.map_or((caret_index, caret_index), |range| (range.start, range.end));
@@ -2421,29 +2430,24 @@ impl BoardView {
         is_extending: bool,
         window: &mut Window,
     ) {
-        let (text, old_caret) = match &self.palette {
-            Some(palette) => (palette.query.clone(), palette.caret),
-            None => (self.query.clone(), self.query_caret),
-        };
+        let (text, old_caret, _) = self.active_input();
+        let text = text.to_string();
         let x = click_x - self.input_scroll.bounds().left() - self.input_scroll.offset().x;
         let run = window.text_style().to_run(text.len());
         let line = window
             .text_system()
             .shape_line(text.clone().into(), font_size, &[run], None);
         let caret = text.len() - line.closest_index_for_x(x).min(text.len());
-        self.input_anchor = match is_extending {
-            true => Some(self.input_anchor.unwrap_or(old_caret)),
+        let (_, active_caret, anchor) = self.active_input_mut();
+        *anchor = match is_extending {
+            true => Some(anchor.unwrap_or(old_caret)),
             false => Some(caret),
         };
-        match self.palette.as_mut() {
-            Some(palette) => palette.caret = caret,
-            None => self.query_caret = caret,
-        }
+        *active_caret = caret;
     }
 
     fn render_header(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        // The palette's input shares the filter's selection anchor, so the filter shows no
-        // caret or selection while the palette is open.
+        // `editing_text` draws the active input, which is the palette's search while it's open.
         let is_filtering = self.input == Input::Filter && self.palette.is_none();
         let filter_text: AnyElement = if self.query.is_empty() && !is_filtering {
             div()
@@ -2451,7 +2455,7 @@ impl BoardView {
                 .child("Filter")
                 .into_any_element()
         } else if is_filtering {
-            self.editing_text("query", &self.query, self.query_caret, 13., theme, cx)
+            self.editing_text("query", 13., theme, cx)
                 .into_any_element()
         } else {
             div()
@@ -2501,7 +2505,7 @@ impl BoardView {
                             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                                 if this.input != Input::Filter {
                                     this.query_caret = 0;
-                                    this.input_anchor = None;
+                                    this.query_anchor = None;
                                 }
                                 this.input = Input::Filter;
                                 cx.notify();
@@ -4569,7 +4573,6 @@ impl BoardView {
         let query = palette
             .map(|palette| palette.query.clone())
             .unwrap_or_default();
-        let caret = palette.map_or(0, |palette| palette.caret);
         let current = palette.map_or(0, |palette| {
             palette.index.min(items.len().saturating_sub(1))
         });
@@ -4669,7 +4672,7 @@ impl BoardView {
                 .child("Search actions")
                 .into_any_element()
         } else {
-            self.editing_text("palette-query", &query, caret, 14., theme, cx)
+            self.editing_text("palette-query", 14., theme, cx)
                 .into_any_element()
         };
         self.scrim(theme)
