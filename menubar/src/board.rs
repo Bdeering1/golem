@@ -191,6 +191,11 @@ impl Action {
         }
     }
 
+    /// Cancel and Dismiss lose work, so they confirm only with their own key pressed again.
+    pub fn is_destructive(self) -> bool {
+        matches!(self, Action::Cancel | Action::Dismiss)
+    }
+
     pub fn is_confirmed(self) -> bool {
         matches!(
             self,

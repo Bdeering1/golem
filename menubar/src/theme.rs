@@ -29,6 +29,8 @@ pub struct Theme {
     pub scrim: Hsla,
     pub red: Hsla,
     pub orange: Hsla,
+    /// Icons only need 3:1, so the light theme's blocked square stays orange, not brown.
+    pub orange_icon: Hsla,
     pub cyan: Hsla,
     pub purple: Hsla,
     pub green: Hsla,
@@ -65,6 +67,7 @@ impl Theme {
             scrim: rgba(0x00000038).into(),
             red: rgba(0xc4271bff).into(),
             orange: rgba(0x9e5600ff).into(),
+            orange_icon: rgba(0xc46a00ff).into(),
             cyan: rgba(0x0b6c86ff).into(),
             purple: rgba(0x8b46c9ff).into(),
             green: rgba(0x177a36ff).into(),
@@ -94,12 +97,20 @@ impl Theme {
             scrim: rgba(0x00000059).into(),
             red: rgba(0xff6257ff).into(),
             orange: rgba(0xffa733ff).into(),
+            orange_icon: rgba(0xffa733ff).into(),
             cyan: rgba(0x3fc6dcff).into(),
             purple: rgba(0xcf87ffff).into(),
             green: rgba(0x3ddc68ff).into(),
             gray: rgba(0x9a9aa2ff).into(),
             indigo: rgba(0x9fa3eaff).into(),
         }
+    }
+
+    pub fn status_icon_color(&self, status: Status, is_stuck: bool) -> Hsla {
+        if is_stuck || status == Status::Blocked {
+            return self.orange_icon;
+        }
+        self.status_color(status, is_stuck)
     }
 
     pub fn status_color(&self, status: Status, is_stuck: bool) -> Hsla {

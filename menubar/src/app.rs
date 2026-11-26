@@ -60,6 +60,7 @@ const BUSY_PULSE_PERIOD: Duration = Duration::from_millis(1400);
 const BUSY_PULSE_FPS: f32 = 30.0;
 const CHARS_PER_LINE: usize = 80;
 const PROMPT_LINE_LIMIT: usize = 3;
+const PARAGRAPH_GAP: f32 = 7.;
 const RESULT_LINE_LIMIT: usize = 12;
 const CALLOUT_LINE_LIMIT: usize = 4;
 const SECTION_RESULT: &str = "result";
@@ -1416,10 +1417,15 @@ impl BoardView {
         });
         if self.palette.is_some() {
             self.handle_palette_key(key, &typed, window, cx);
-        } else if self.pending.is_some() {
+        } else if let Some(action) = self.pending.as_ref().map(|pending| pending.action) {
+            // Return opens and closes details all day, so it never confirms losing work.
+            let is_destructive = action.is_destructive();
             match (key, typed.as_str()) {
-                (KEY_ENTER, _) | (_, "y") => self.answer(true, cx),
                 (KEY_ESCAPE, _) | (_, "n") => self.answer(false, cx),
+                (_, typed) if is_destructive && !event.is_held && typed == action.key() => {
+                    self.answer(true, cx)
+                }
+                (KEY_ENTER, _) | (_, "y") if !is_destructive => self.answer(true, cx),
                 _ => {}
             }
         } else if self.is_showing_help {
@@ -1998,7 +2004,7 @@ impl BoardView {
         let is_changed = self.changed_until.contains_key(&row.root_id);
         let state_color = match busy_action {
             Some(_) => theme.text_3,
-            None => theme.status_color(row.status, is_stuck),
+            None => theme.status_icon_color(row.status, is_stuck),
         };
         let when = board::card_when_text(row, task, now);
         let (snippet, snippet_color) = match (busy_action, action_error) {
@@ -2456,7 +2462,7 @@ impl BoardView {
                     .child(icon(
                         theme::status_icon(step.status),
                         11.,
-                        theme.status_color(step.status, false),
+                        theme.status_icon_color(step.status, false),
                     ))
                     .child(div().min_w_0().truncate().child(step.name.clone()))
                     .when(!step.is_inferable, |this| {
@@ -2515,18 +2521,29 @@ impl BoardView {
             (true, true) => text.lines().take(line_limit).collect::<Vec<_>>().join("\n"),
             (true, false) => text.split_whitespace().collect::<Vec<_>>().join(" "),
         };
+        let body = match (is_clamped, is_diagnostic) {
+            (false, _) => style(div())
+                .flex()
+                .flex_col()
+                .gap(px(PARAGRAPH_GAP))
+                .children(
+                    shown_text
+                        .split("\n\n")
+                        .map(|paragraph| paragraph.trim_matches('\n'))
+                        .filter(|paragraph| !paragraph.is_empty())
+                        .map(|paragraph| div().child(code_marked_text(paragraph))),
+                ),
+            (true, true) => style(div()).truncate().child(code_marked_text(&shown_text)),
+            (true, false) => style(div())
+                .line_clamp(line_limit)
+                .text_ellipsis()
+                .child(code_marked_text(&shown_text)),
+        };
         div()
             .flex()
             .flex_col()
             .gap(px(3.))
-            .child(
-                style(div())
-                    .when(is_clamped && is_diagnostic, |this| this.truncate())
-                    .when(is_clamped && !is_diagnostic, |this| {
-                        this.line_clamp(line_limit).text_ellipsis()
-                    })
-                    .child(code_marked_text(&shown_text)),
-            )
+            .child(body)
             .when(is_long, |this| {
                 this.child(
                     div()
@@ -2826,7 +2843,11 @@ impl BoardView {
                     .gap(px(5.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(state_color)
-                    .child(icon(theme::status_icon(row.status), 13., state_color))
+                    .child(icon(
+                        theme::status_icon(row.status),
+                        13.,
+                        theme.status_icon_color(row.status, is_stuck),
+                    ))
                     .child(if is_stuck { "stuck" } else { row.status.name() }),
             );
         let pull_requests = board::row_pull_requests(&self.snapshot, &row);
@@ -3094,16 +3115,34 @@ impl BoardView {
                 div()
                     .flex_1()
                     .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
                     .px(px(6.))
-                    .truncate()
                     .text_size(px(12.))
-                    .text_color(theme.text)
+                    .text_color(theme.text_2)
                     .font_weight(FontWeight::MEDIUM)
                     .children(
                         self.toast
                             .as_ref()
                             .filter(|toast| !toast.is_error)
-                            .map(|toast| toast.text.clone()),
+                            .map(|toast| {
+                                [
+                                    div()
+                                        .flex_none()
+                                        .size(px(5.))
+                                        .rounded_full()
+                                        .bg(theme.accent)
+                                        .into_any_element(),
+                                    div()
+                                        .min_w_0()
+                                        .truncate()
+                                        .child(toast.text.clone())
+                                        .into_any_element(),
+                                ]
+                            })
+                            .into_iter()
+                            .flatten(),
                     ),
             )
             .child(
@@ -3204,6 +3243,20 @@ impl BoardView {
             }])
     }
 
+    /// Confirmations and errors rise from the bottom edge, so the task stays visible above.
+    fn bottom_sheet(&self, theme: &Theme) -> Div {
+        Self::sheet(theme, self.sheet_width(SMALL_SHEET_MAX_WIDTH))
+            .rounded_b(px(0.))
+            .rounded_t(px(12.))
+            .shadow(vec![BoxShadow {
+                color: gpui::rgba(0x00000059).into(),
+                offset: point(px(0.), px(-8.)),
+                blur_radius: px(30.),
+                spread_radius: px(0.),
+                inset: false,
+            }])
+    }
+
     fn render_confirm(
         &self,
         pending: &Pending,
@@ -3258,27 +3311,22 @@ impl BoardView {
                 "OK".to_string(),
             ),
         };
+        let accept_key = if pending.action.is_destructive() {
+            key_label(pending.action)
+        } else {
+            "\u{23ce}".to_string()
+        };
         let decline = if pending.action == Action::Cancel {
             "Keep"
         } else {
             "Cancel"
         };
-        // Anchored at the bottom, by the button that asked, so the task stays visible above.
         self.scrim(theme)
             .id("confirm")
             .occlude()
             .items_end()
             .child(
-                Self::sheet(theme, self.sheet_width(SMALL_SHEET_MAX_WIDTH))
-                    .rounded_b(px(0.))
-                    .rounded_t(px(12.))
-                    .shadow(vec![BoxShadow {
-                        color: gpui::rgba(0x00000059).into(),
-                        offset: point(px(0.), px(-8.)),
-                        blur_radius: px(30.),
-                        spread_radius: px(0.),
-                        inset: false,
-                    }])
+                self.bottom_sheet(theme)
                     .child(
                         div()
                             .text_size(px(14.))
@@ -3311,7 +3359,7 @@ impl BoardView {
                                 Self::sheet_button(
                                     "accept",
                                     verb,
-                                    "\u{23ce}",
+                                    &accept_key,
                                     true,
                                     pending.action == Action::Cancel,
                                     theme,
@@ -3337,12 +3385,13 @@ impl BoardView {
         self.scrim(theme)
             .id("error-detail")
             .occlude()
+            .items_end()
             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                 this.error_detail = None;
                 cx.notify();
             }))
             .child(
-                Self::sheet(theme, self.sheet_width(SMALL_SHEET_MAX_WIDTH))
+                self.bottom_sheet(theme)
                     .id("error-sheet")
                     .on_click(|_, _, cx| cx.stop_propagation())
                     .child(
@@ -3496,7 +3545,7 @@ impl BoardView {
                 .child(icon(
                     theme::status_icon(status),
                     11.,
-                    theme.status_color(status, false),
+                    theme.status_icon_color(status, false),
                 ))
                 .child(status.name())
         });
