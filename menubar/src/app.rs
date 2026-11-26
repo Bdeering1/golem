@@ -196,8 +196,6 @@ pub struct BoardView {
     shown_root_id: Option<String>,
     /// The panel size render last asked AppKit for, so content changes resize it once.
     placed_size: Option<(f64, f64)>,
-    /// Set by E so the next render scrolls to the first section it expanded.
-    is_revealing_full_text: bool,
     pending: Option<Pending>,
     is_showing_help: bool,
     palette: Option<Palette>,
@@ -382,7 +380,6 @@ impl BoardView {
             expanded_folds: HashSet::new(),
             shown_root_id: None,
             placed_size: None,
-            is_revealing_full_text: false,
             pending: None,
             is_showing_help: false,
             palette: None,
@@ -1494,7 +1491,13 @@ impl BoardView {
                 self.query.clear();
                 self.input = Input::None;
             }
-            KEY_ENTER | KEY_DOWN | KEY_UP => self.input = Input::None,
+            // Leaving the filter also does what the key does, so one press moves or opens.
+            KEY_ENTER | KEY_DOWN | KEY_UP => {
+                self.input = Input::None;
+                self.show_matching_tab();
+                self.handle_board_key(key, typed, cx);
+                return;
+            }
             KEY_BACKSPACE => {
                 self.query.pop();
             }
@@ -1591,7 +1594,6 @@ impl BoardView {
                 };
                 self.is_activity_open = is_expanding;
                 self.is_showing_earlier = is_expanding;
-                self.is_revealing_full_text = is_expanding;
                 self.is_following = false;
                 if !self.is_expanded {
                     self.set_expanded(true, cx);
@@ -2348,42 +2350,21 @@ impl BoardView {
         let session = self
             .is_showing_fields
             .then(|| self.render_session(row, now, theme));
-        let is_result_long = task
-            .result
-            .as_deref()
-            .is_some_and(|result| is_long_text(&board::plain_result(result), RESULT_LINE_LIMIT));
-        let is_prompt_long = is_long_text(&task.prompt, PROMPT_LINE_LIMIT);
-        // Each section pairs with whether E expands it, so E can scroll to the first one.
         let sections = if self.is_following {
-            vec![(Some(activity), false)]
+            vec![Some(activity)]
         } else if row.status == Status::Running {
-            vec![
-                (Some(activity), false),
-                (chain, false),
-                (prompt, is_prompt_long),
-                (session, false),
-            ]
+            vec![Some(activity), chain, prompt, session]
         } else {
             vec![
-                (result, is_result_long),
-                (pull_requests, false),
-                (chain, false),
-                (prompt, is_prompt_long),
-                (Some(activity), false),
-                (session, false),
+                result,
+                pull_requests,
+                chain,
+                prompt,
+                Some(activity),
+                session,
             ]
         };
-        for (section, is_expandable) in sections {
-            let Some(section) = section else {
-                continue;
-            };
-            if is_expandable && self.is_revealing_full_text {
-                self.detail_scroll.scroll_to_top_of_item(body.len());
-                self.is_revealing_full_text = false;
-            }
-            body.push(section);
-        }
-        self.is_revealing_full_text = false;
+        body.extend(sections.into_iter().flatten());
         body
     }
 
@@ -3103,30 +3084,27 @@ impl BoardView {
             .px(px(7.))
             .border_t_1()
             .border_color(theme.line)
-            .map(
-                |this| match self.toast.as_ref().filter(|toast| !toast.is_error) {
-                    // A passing message borrows the footer's left side, so the panel keeps its size.
-                    Some(toast) => this.child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .pl(px(7.))
-                            .truncate()
-                            .text_size(px(12.))
-                            .text_color(theme.text)
-                            .font_weight(FontWeight::MEDIUM)
-                            .child(toast.text.clone()),
+            .child(
+                Self::footer_button("toggle-done", theme)
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_done(cx)))
+                    .child(done_label),
+            )
+            // A passing message sits in the footer's free space, so the panel keeps its size.
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .px(px(6.))
+                    .truncate()
+                    .text_size(px(12.))
+                    .text_color(theme.text)
+                    .font_weight(FontWeight::MEDIUM)
+                    .children(
+                        self.toast
+                            .as_ref()
+                            .filter(|toast| !toast.is_error)
+                            .map(|toast| toast.text.clone()),
                     ),
-                    None => this
-                        .child(
-                            Self::footer_button("toggle-done", theme)
-                                .on_click(
-                                    cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_done(cx)),
-                                )
-                                .child(done_label),
-                        )
-                        .child(div().flex_1()),
-                },
             )
             .child(
                 Self::footer_button("palette", theme)
