@@ -1222,7 +1222,10 @@ impl ActivityLevel {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ActivityItem {
-    Fold(String),
+    /// Counts for the whole log, shown in place of it at the Summary level.
+    Summary(String),
+    /// A run of tool calls hidden at the Messages level, holding their display text.
+    Fold(Vec<String>),
     Tool(String),
     Message(String),
 }
@@ -1256,19 +1259,16 @@ pub fn activity_view(lines: &[String], level: ActivityLevel) -> Vec<ActivityItem
         return Vec::new();
     }
     if level == ActivityLevel::Summary {
-        let latest = lines.iter().rev().find(|line| !is_tool_line(line));
-        return latest
-            .map(|line| ActivityItem::Message(line.clone()))
-            .into_iter()
-            .chain([ActivityItem::Fold(activity_counts(lines))])
-            .collect();
+        return vec![ActivityItem::Summary(activity_counts(lines))];
     }
     let mut items = Vec::new();
     for group in lines.chunk_by(|left, right| is_tool_line(left) == is_tool_line(right)) {
         if !is_tool_line(&group[0]) {
             items.extend(group.iter().map(|line| ActivityItem::Message(line.clone())));
         } else if level == ActivityLevel::Messages && group.len() > 1 {
-            items.push(ActivityItem::Fold(counted_text(group.len(), "tool call")));
+            items.push(ActivityItem::Fold(
+                group.iter().map(|line| activity_text(line)).collect(),
+            ));
         } else {
             items.extend(
                 group
@@ -1488,16 +1488,13 @@ mod tests {
         .to_vec();
         assert_eq!(
             activity_view(&lines, ActivityLevel::Summary),
-            vec![
-                ActivityItem::Message("Done".into()),
-                ActivityItem::Fold("2 messages, 3 tool calls".into())
-            ]
+            vec![ActivityItem::Summary("2 messages, 3 tool calls".into())]
         );
         assert_eq!(
             activity_view(&lines, ActivityLevel::Messages),
             vec![
                 ActivityItem::Message("Planning".into()),
-                ActivityItem::Fold("2 tool calls".into()),
+                ActivityItem::Fold(vec!["Read a".into(), "Read b".into()]),
                 ActivityItem::Message("Done".into()),
                 ActivityItem::Tool("$ make".into()),
             ]

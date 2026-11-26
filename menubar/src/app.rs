@@ -7,9 +7,9 @@ use futures::StreamExt;
 use futures::channel::mpsc::UnboundedReceiver;
 use gpui::{
     Animation, AnimationExt, AnyElement, BoxShadow, ClickEvent, ClipboardItem, Context, Div,
-    FocusHandle, FontWeight, Hsla, KeyDownEvent, ScrollEvent, ScrollHandle, SharedString, Stateful,
-    Subscription, Task, Window, div, linear_color_stop, linear_gradient, point, prelude::*,
-    pulsating_between, px, svg,
+    ElementId, FocusHandle, FontWeight, Hsla, KeyDownEvent, ScrollEvent, ScrollHandle,
+    SharedString, Stateful, Subscription, Task, Window, div, linear_color_stop, linear_gradient,
+    point, prelude::*, pulsating_between, px, relative, svg,
 };
 use notify::Watcher;
 use objc2::rc::Retained;
@@ -35,6 +35,7 @@ const CARD_GAP: f32 = 2.0;
 const BOTTOM_BAR_HEIGHT: f32 = 37.0;
 /// The shortcuts sheet's height plus the footer below it; the palette uses it too.
 const HELP_PANEL_HEIGHT: f64 = 545.0;
+const SMALL_SHEET_MAX_WIDTH: f32 = 440.0;
 const REPOSITORY_MAX_WIDTH: f32 = 120.0;
 const CARD_PITCH: f64 = 63.0;
 const EMPTY_LIST_HEIGHT: f64 = 90.0;
@@ -101,8 +102,6 @@ enum Command {
     ToggleDone,
     ToggleDetails,
     ToggleSession,
-    Filter,
-    Help,
     Quit,
 }
 
@@ -157,6 +156,7 @@ pub struct BoardView {
     panel: Option<Retained<NSWindow>>,
     focus_handle: FocusHandle,
     list_scroll: ScrollHandle,
+    error_scroll: ScrollHandle,
     detail_scroll: ScrollHandle,
     palette_scroll: ScrollHandle,
     tab: Column,
@@ -173,6 +173,8 @@ pub struct BoardView {
     is_showing_fields: bool,
     /// Clamped sections the user expanded, by toggle id; E expands or collapses all of them.
     expanded_sections: HashSet<&'static str>,
+    /// Activity items, by index, whose folded tool calls were opened in place.
+    expanded_folds: HashSet<usize>,
     /// Set by E so the next render scrolls to the first section it expanded.
     is_revealing_full_text: bool,
     pending: Option<Pending>,
@@ -340,6 +342,7 @@ impl BoardView {
             panel: macos::native_window(window),
             focus_handle: cx.focus_handle(),
             list_scroll: ScrollHandle::new(),
+            error_scroll: ScrollHandle::new(),
             detail_scroll: ScrollHandle::new(),
             palette_scroll: ScrollHandle::new(),
             tab: Column::Review,
@@ -354,6 +357,7 @@ impl BoardView {
             paused_lines: Vec::new(),
             is_showing_fields: false,
             expanded_sections: HashSet::new(),
+            expanded_folds: HashSet::new(),
             is_revealing_full_text: false,
             pending: None,
             is_showing_help: false,
@@ -707,6 +711,7 @@ impl BoardView {
     fn select(&mut self, root_id: String, cx: &mut Context<Self>) {
         self.selected_roots.insert(self.tab, root_id);
         self.expanded_sections.clear();
+        self.expanded_folds.clear();
         self.input = Input::None;
         self.is_following = false;
         self.detail_scroll.set_offset(point(px(0.), px(0.)));
@@ -721,7 +726,7 @@ impl BoardView {
             self.handle_palette_key(key, "", window, cx);
             return;
         }
-        if self.pending.is_some() || self.is_showing_help {
+        if self.is_sheet_open() {
             return;
         }
         let input = self.input;
@@ -750,6 +755,7 @@ impl BoardView {
         self.tab = column;
         self.is_following = false;
         self.expanded_sections.clear();
+        self.expanded_folds.clear();
         self.detail_scroll.set_offset(point(px(0.), px(0.)));
         self.reveal_selected();
         cx.notify();
@@ -917,10 +923,12 @@ impl BoardView {
         } else {
             &self.list_scroll
         };
-        let offset = handle.offset();
-        let max_offset = handle.max_offset();
-        let y = (offset.y - px(delta)).clamp(-max_offset.y, px(0.));
-        handle.set_offset(point(offset.x, y));
+        scroll_handle_by(handle, delta);
+    }
+
+    /// Whether a sheet covers the board, so board keys and navigation must not reach it.
+    fn is_sheet_open(&self) -> bool {
+        self.pending.is_some() || self.is_showing_help || self.error_detail.is_some()
     }
 
     // ---- actions ----------------------------------------------------------------------------
@@ -1211,6 +1219,29 @@ impl BoardView {
                     is_danger: action == Action::Cancel,
                 });
             }
+            let details_label = if self.is_expanded {
+                "Hide details"
+            } else {
+                "Show details"
+            };
+            let session_label = if self.is_showing_fields && self.is_expanded {
+                "Hide session info"
+            } else {
+                "Show session info"
+            };
+            let details_key = if self.is_expanded { "esc" } else { "\u{23ce}" };
+            for (command, label, key) in [
+                (Command::ToggleDetails, details_label, details_key),
+                (Command::ToggleSession, session_label, "I"),
+            ] {
+                items.push(PaletteItem {
+                    group: board::row_title(row).to_string(),
+                    command,
+                    label: label.to_string(),
+                    key: key.to_string(),
+                    is_danger: false,
+                });
+            }
         }
         let has_closable = !board::closable_task_ids(&self.snapshot).is_empty();
         let board_items = [
@@ -1232,28 +1263,6 @@ impl BoardView {
                 .to_string(),
                 "A",
             )),
-            self.selected_row().map(|_| {
-                let label = if self.is_expanded {
-                    "Hide details"
-                } else {
-                    "Show details"
-                };
-                (
-                    Command::ToggleDetails,
-                    label.to_string(),
-                    if self.is_expanded { "esc" } else { "\u{23ce}" },
-                )
-            }),
-            self.selected_row().map(|_| {
-                let label = if self.is_showing_fields && self.is_expanded {
-                    "Hide session info"
-                } else {
-                    "Show session info"
-                };
-                (Command::ToggleSession, label.to_string(), "I")
-            }),
-            Some((Command::Filter, "Filter".to_string(), "/")),
-            Some((Command::Help, "Keyboard shortcuts".to_string(), "?")),
             Some((Command::Quit, "Quit golem board".to_string(), "\u{2318}Q")),
         ];
         for (command, label, key) in board_items.into_iter().flatten() {
@@ -1282,8 +1291,6 @@ impl BoardView {
             Command::ToggleDone => self.toggle_done(cx),
             Command::ToggleDetails => self.set_expanded(!self.is_expanded, cx),
             Command::ToggleSession => self.toggle_session(cx),
-            Command::Filter => self.input = Input::Filter,
-            Command::Help => self.set_help(true, cx),
             Command::Quit => cx.quit(),
         }
         self.focus_handle.focus(window, cx);
@@ -1298,7 +1305,7 @@ impl BoardView {
         let key = keystroke.key.as_str();
         if modifiers.platform {
             match key {
-                "k" if self.pending.is_none() => {
+                "k" if self.pending.is_none() && self.error_detail.is_none() => {
                     let palette = if self.palette.is_some() {
                         None
                     } else {
@@ -1318,14 +1325,15 @@ impl BoardView {
         }
         if modifiers.control {
             match key {
-                "d" | "u"
-                    if self.palette.is_some()
-                        || self.pending.is_some()
-                        || self.is_showing_help
-                        || self.error_detail.is_some() =>
-                {
-                    return;
+                "d" | "u" if self.error_detail.is_some() => {
+                    let delta = if key == "d" {
+                        SCROLL_STEP
+                    } else {
+                        -SCROLL_STEP
+                    };
+                    scroll_handle_by(&self.error_scroll, delta);
                 }
+                "d" | "u" if self.palette.is_some() || self.is_sheet_open() => return,
                 "d" => self.scroll_by(SCROLL_STEP),
                 "u" => self.scroll_by(-SCROLL_STEP),
                 "n" | "j" => self.move_while_typing(1, window, cx),
@@ -1362,6 +1370,12 @@ impl BoardView {
         } else if let Some(text) = self.error_detail.clone() {
             match (key, typed.as_str()) {
                 (KEY_ESCAPE | KEY_ENTER, _) => self.error_detail = None,
+                (KEY_DOWN | "pagedown" | "space", _) | (_, "j") => {
+                    scroll_handle_by(&self.error_scroll, SCROLL_STEP);
+                }
+                (KEY_UP | "pageup", _) | (_, "k") => {
+                    scroll_handle_by(&self.error_scroll, -SCROLL_STEP);
+                }
                 (_, "c") => {
                     cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
                     self.error_detail = None;
@@ -1468,7 +1482,7 @@ impl BoardView {
             palette.index = 0;
             return;
         }
-        if self.pending.is_some() || self.is_showing_help {
+        if self.is_sheet_open() {
             return;
         }
         self.input = Input::Filter;
@@ -1575,6 +1589,38 @@ fn lines_since_pause<'a>(
     };
     let index = current_lines.iter().rposition(|line| line == paused_tail)?;
     Some(&current_lines[index + 1..])
+}
+
+fn tool_line(text: String, theme: &Theme) -> Div {
+    div()
+        .py(px(2.))
+        .pl(px(12.))
+        .font_family(MONO_FONT)
+        .text_size(px(12.))
+        .text_color(theme.text_2)
+        .child(text)
+}
+
+/// A muted, clickable stand-in for activity that is not shown.
+fn fold_row(id: impl Into<ElementId>, theme: &Theme) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex()
+        .gap(px(5.))
+        .py(px(2.))
+        .px(px(4.))
+        .ml(px(8.))
+        .rounded(px(5.))
+        .text_size(px(12.))
+        .text_color(theme.text_3)
+        .hover(|style| style.bg(theme.hover))
+}
+
+fn scroll_handle_by(handle: &ScrollHandle, delta: f32) {
+    let offset = handle.offset();
+    let max_offset = handle.max_offset();
+    let y = (offset.y - px(delta)).clamp(-max_offset.y, px(0.));
+    handle.set_offset(point(offset.x, y));
 }
 
 /// The palette list's child position for an item, counting the group headings rendered before it.
@@ -1775,7 +1821,10 @@ impl BoardView {
     }
 
     fn render_tabs(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let tabs = self.tabs().into_iter().map(|column| {
+        let columns = self.tabs();
+        // Sized in quarters, so showing Done adds a tab without moving the others.
+        let bar_width = relative(columns.len() as f32 / BOARD_COLUMNS.len() as f32);
+        let tabs = columns.into_iter().map(|column| {
             let rows = self.column_rows(column);
             let is_current = column == self.tab;
             let has_attention = rows.iter().any(|row| self.needs_you(row));
@@ -1821,16 +1870,16 @@ impl BoardView {
                 })
         });
         let container = div().flex().flex_col().child(
-            div()
-                .flex()
-                .gap(px(1.))
-                .mx(px(10.))
-                .mt(px(9.))
-                .mb(px(7.))
-                .p(px(2.))
-                .rounded(px(8.))
-                .bg(theme.fill)
-                .children(tabs),
+            div().flex().mx(px(10.)).mt(px(9.)).mb(px(7.)).child(
+                div()
+                    .flex()
+                    .w(bar_width)
+                    .gap(px(1.))
+                    .p(px(2.))
+                    .rounded(px(8.))
+                    .bg(theme.fill)
+                    .children(tabs),
+            ),
         );
         container.into_any_element()
     }
@@ -2446,17 +2495,20 @@ impl BoardView {
             .id("activity-level")
             .flex()
             .items_center()
-            .gap(px(5.))
-            .px(px(4.))
-            .rounded(px(5.))
-            .text_size(px(11.5))
-            .text_color(theme.text_3)
+            .gap(px(4.))
+            .px(px(6.))
+            .rounded(px(4.))
+            .bg(theme.fill)
+            .text_size(px(11.))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(theme.text_2)
             .hover(|style| style.bg(theme.hover))
             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                 this.activity_level = this.next_activity_level();
                 cx.notify();
             }))
-            .child(shown_level.label());
+            .child(shown_level.label())
+            .child(icon(theme::ICON_CHEVRON, 8., theme.text_3));
         let live = self.is_following.then(|| {
             let (color, label) = match (self.is_follow_paused, row.status) {
                 (true, _) if new_activity.is_some() => (
@@ -2544,25 +2596,44 @@ impl BoardView {
                         .child(div().flex_1().h(px(1.)).bg(theme.accent_soft)),
                 );
             }
-            log = log.child(match item {
-                ActivityItem::Message(text) => div()
-                    .py(px(2.))
-                    .when(is_history, |this| this.text_color(theme.text_2))
-                    .child(text),
-                ActivityItem::Tool(text) => div()
-                    .py(px(2.))
-                    .pl(px(12.))
-                    .font_family(MONO_FONT)
-                    .text_size(px(12.))
-                    .text_color(theme.text_2)
-                    .child(text),
-                ActivityItem::Fold(text) => div()
-                    .py(px(2.))
-                    .pl(px(12.))
-                    .text_size(px(12.))
-                    .text_color(theme.text_3)
-                    .child(text),
-            });
+            match item {
+                ActivityItem::Message(text) => {
+                    log = log.child(
+                        div()
+                            .py(px(2.))
+                            .when(is_history, |this| this.text_color(theme.text_2))
+                            .child(text),
+                    );
+                }
+                ActivityItem::Tool(text) => log = log.child(tool_line(text, theme)),
+                ActivityItem::Fold(tools) if self.expanded_folds.contains(&index) => {
+                    log = log.children(tools.into_iter().map(|text| tool_line(text, theme)));
+                }
+                ActivityItem::Fold(tools) => {
+                    log = log.child(
+                        fold_row(("activity-fold", index), theme)
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.expanded_folds.insert(index);
+                                cx.notify();
+                            }))
+                            .items_center()
+                            .child(board::counted_text(tools.len(), "tool call"))
+                            .child(icon(theme::ICON_CHEVRON, 8., theme.text_3)),
+                    );
+                }
+                ActivityItem::Summary(text) => {
+                    log = log.child(
+                        fold_row("activity-summary", theme)
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.activity_level = ActivityLevel::All;
+                                cx.notify();
+                            }))
+                            .child(text)
+                            .child("\u{b7}")
+                            .child(div().text_color(theme.accent).child("Show all")),
+                    );
+                }
+            }
         }
         div()
             .flex()
@@ -2955,6 +3026,11 @@ impl BoardView {
             }))
     }
 
+    /// Sheets span the panel less a 12 pt inset, so no header text shows clipped at their sides.
+    fn sheet_width(&self, max_width: f32) -> f32 {
+        (self.panel_width() as f32 - 24.).min(max_width)
+    }
+
     fn sheet(theme: &Theme, width: f32) -> Div {
         div()
             .w(px(width))
@@ -3034,7 +3110,7 @@ impl BoardView {
             .id("confirm")
             .occlude()
             .child(
-                Self::sheet(theme, 340.)
+                Self::sheet(theme, self.sheet_width(SMALL_SHEET_MAX_WIDTH))
                     .child(
                         div()
                             .text_size(px(14.))
@@ -3099,7 +3175,7 @@ impl BoardView {
                 cx.notify();
             }))
             .child(
-                Self::sheet(theme, 380.)
+                Self::sheet(theme, self.sheet_width(SMALL_SHEET_MAX_WIDTH))
                     .id("error-sheet")
                     .on_click(|_, _, cx| cx.stop_propagation())
                     .child(
@@ -3118,6 +3194,7 @@ impl BoardView {
                             .mt(px(8.))
                             .max_h(px(220.))
                             .overflow_y_scroll()
+                            .track_scroll(&self.error_scroll)
                             .text_color(theme.text_2)
                             .child(text.clone()),
                     )
@@ -3206,15 +3283,13 @@ impl BoardView {
             &[
                 ("\u{2191}\u{2193} J K", "select"),
                 ("\u{2190}\u{2192} H L", "switch group"),
-                ("tab \u{21e7}tab", "next group"),
                 ("\u{2303}N \u{2303}P", "select in search"),
                 (jump_keys.as_str(), "jump to group"),
                 ("G \u{21e7}G", "first, last"),
                 ("N", "next needing you"),
                 ("\u{23ce}", "details"),
                 ("esc", "back"),
-                ("space \u{2303}D", "scroll down"),
-                ("\u{2303}U", "scroll up"),
+                ("\u{2423} \u{2303}D \u{2303}U", "scroll"),
             ],
         );
         let board_keys = section(
@@ -3315,7 +3390,7 @@ impl BoardView {
                     .child(chain_chip),
             );
         let [move_column, task_column] = columns;
-        let width = (self.panel_width() as f32 - 24.).min(640.);
+        let width = self.sheet_width(640.);
         self.scrim(theme)
             .id("help")
             .occlude()
