@@ -2089,6 +2089,29 @@ fn lines_since_pause<'a>(
     Some(&current_lines[index + 1..])
 }
 
+fn found_style(theme: &Theme) -> HighlightStyle {
+    HighlightStyle {
+        color: Some(theme.on_found),
+        background_color: Some(theme.found),
+        ..HighlightStyle::default()
+    }
+}
+
+/// `text` with each match of the filter query marked, so every card shows why it matched.
+fn marked_matches(text: &str, query: &str, theme: &Theme) -> StyledText {
+    let lowered = text.to_lowercase();
+    let query = query.to_lowercase();
+    // Lowercasing can change the byte length, which would misplace the marks.
+    let highlights: Vec<_> = if query.is_empty() || lowered.len() != text.len() {
+        Vec::new()
+    } else {
+        (lowered.match_indices(&query))
+            .map(|(start, _)| (start..start + query.len(), found_style(theme)))
+            .collect()
+    };
+    StyledText::new(text.to_string()).with_highlights(highlights)
+}
+
 /// golem and agents mark commands and paths with backticks; show those in the code font instead.
 fn code_marked_text(text: &str) -> StyledText {
     if text.matches('`').count() % 2 == 1 {
@@ -2604,6 +2627,9 @@ impl BoardView {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let now = self.board_now();
+        // The bulk close sheet is about other cards, so the selection steps back under it.
+        let is_selected = is_selected
+            && !(self.pending.as_ref()).is_some_and(|pending| pending.action == Action::CloseAll);
         let task = &self.snapshot.tasks[&row.task_id];
         let is_stuck = board::is_stuck(row, task, now);
         let busy_action = self.busy_actions.get(&row.task_id).copied();
@@ -2635,19 +2661,18 @@ impl BoardView {
                 || (busy_action.is_none()
                     && action_error.is_none()
                     && board::is_tool_snippet(row, &self.snapshot)));
-        let snippet: AnyElement = match excerpt {
-            Some((text, range)) => {
-                let highlight = HighlightStyle {
-                    color: Some(theme.text),
-                    background_color: Some(theme.accent_soft),
+        let snippet = match excerpt {
+            Some(excerpt) => {
+                let source = HighlightStyle {
+                    color: Some(theme.text_3),
                     ..HighlightStyle::default()
                 };
-                let highlights = (!range.is_empty()).then_some((range, highlight));
-                StyledText::new(text)
-                    .with_highlights(highlights)
-                    .into_any_element()
+                let found = (!excerpt.match_range.is_empty())
+                    .then_some((excerpt.match_range, found_style(theme)));
+                StyledText::new(excerpt.text)
+                    .with_highlights([(0..excerpt.source_size, source)].into_iter().chain(found))
             }
-            None => snippet.into_any_element(),
+            None => marked_matches(&snippet, &self.query, theme),
         };
         let is_covered = self.palette.is_some() || self.is_sheet_open();
         let quick_action =
@@ -2740,7 +2765,7 @@ impl BoardView {
                             .text_size(px(13.5))
                             .font_weight(FontWeight::MEDIUM)
                             .when(is_handled, |this| this.text_color(theme.text_2))
-                            .child(board::row_title(row).to_string()),
+                            .child(marked_matches(board::row_title(row), &self.query, theme)),
                     )
                     .child(
                         div()
@@ -2770,7 +2795,11 @@ impl BoardView {
                             .max_w(px(REPOSITORY_MAX_WIDTH))
                             .truncate()
                             .text_color(theme.text_3)
-                            .child(board::repository_name(row).to_string()),
+                            .child(marked_matches(
+                                board::repository_name(row),
+                                &self.query,
+                                theme,
+                            )),
                     )
                     .child(
                         div()

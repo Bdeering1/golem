@@ -26,6 +26,10 @@ pub struct Theme {
     /// The selected card; a muted blue, so it differs from hover's grey but its filled quick
     /// action stays the only strong blue.
     pub selection: Hsla,
+    /// Filter matches, in a find-in-page yellow with dark text so they don't read as a text
+    /// selection.
+    pub found: Hsla,
+    pub on_found: Hsla,
     /// Darker accent and red for filled controls, so white labels on them stay readable.
     pub accent_fill: Hsla,
     pub red_fill: Hsla,
@@ -67,6 +71,8 @@ impl Theme {
             accent: rgba(0x0a66e4ff).into(),
             accent_soft: rgba(0x0a66e41f).into(),
             selection: rgba(0x2a5bb524).into(),
+            found: rgba(0xffd60aa6).into(),
+            on_found: rgba(0x000000db).into(),
             accent_fill: rgba(0x0a66e4ff).into(),
             red_fill: rgba(0xd92d20ff).into(),
             changed: rgba(0x0a66e40f).into(),
@@ -99,6 +105,8 @@ impl Theme {
             accent: rgba(0x2f8cffff).into(),
             accent_soft: rgba(0x2f8cff33).into(),
             selection: rgba(0x9db4ff26).into(),
+            found: rgba(0xffd60ae0).into(),
+            on_found: rgba(0x000000e6).into(),
             accent_fill: rgba(0x0b6bdeff).into(),
             red_fill: rgba(0xd92d20ff).into(),
             changed: rgba(0x2f8cff1a).into(),

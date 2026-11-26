@@ -776,13 +776,17 @@ pub fn is_matching(row: &Row, snapshot: &Snapshot, query: &str) -> bool {
         .any(|(_, field)| field.to_lowercase().contains(&query))
 }
 
+#[derive(Debug, PartialEq)]
+pub struct MatchExcerpt {
+    /// Starts with the name of the field it came from.
+    pub text: String,
+    pub source_size: usize,
+    pub match_range: Range<usize>,
+}
+
 /// For a card whose title, repo and line don't show the query, the line of a hidden field
-/// that matched, named and from a little before the match, with the match's range in it.
-pub fn match_excerpt(
-    row: &Row,
-    snapshot: &Snapshot,
-    query: &str,
-) -> Option<(String, Range<usize>)> {
+/// that matched, named and from a little before the match.
+pub fn match_excerpt(row: &Row, snapshot: &Snapshot, query: &str) -> Option<MatchExcerpt> {
     let query = query.to_lowercase();
     let visible = [
         row_title(row).to_string(),
@@ -804,7 +808,11 @@ pub fn match_excerpt(
     let lowered = line.to_lowercase();
     // Lowercasing can change a line's byte length, which would misplace the highlight.
     let Some(start) = lowered.find(&query).filter(|_| lowered.len() == line.len()) else {
-        return Some((format!("{source}: {line}"), 0..0));
+        return Some(MatchExcerpt {
+            text: format!("{source} {line}"),
+            source_size: source.len(),
+            match_range: 0..0,
+        });
     };
     let context_start = line[..start]
         .char_indices()
@@ -812,12 +820,13 @@ pub fn match_excerpt(
         .nth(EXCERPT_CONTEXT_SIZE - 1)
         .map_or(0, |(index, _)| index);
     let ellipsis = if context_start > 0 { "\u{2026}" } else { "" };
-    let prefix = format!("{source}: {ellipsis}");
+    let prefix = format!("{source} {ellipsis}");
     let match_start = prefix.len() + start - context_start;
-    Some((
-        format!("{prefix}{}", &line[context_start..]),
-        match_start..match_start + query.len(),
-    ))
+    Some(MatchExcerpt {
+        text: format!("{prefix}{}", &line[context_start..]),
+        source_size: source.len(),
+        match_range: match_start..match_start + query.len(),
+    })
 }
 
 /// Characters of context kept before a filter match shown on a card.
@@ -1108,6 +1117,21 @@ pub fn card_snippet(row: &Row, snapshot: &Snapshot) -> String {
     let mut reason = row_reason(row, snapshot);
     if row.status == Status::Scheduled {
         reason = PATH_PREFIX_PATTERN.replace_all(&reason, "").into_owned();
+    }
+    let result_line = (task.result.as_deref())
+        .map(|result| first_line(plain_result(result).trim()).to_string())
+        .filter(|line| !line.is_empty());
+    let pull_requests = row_pull_requests(snapshot, row);
+    // A finished task's PR is on its quick action, so its result says more; only a PR that
+    // isn't open needs its state.
+    if let (Status::Finished, [pull_request], Some(result_line)) =
+        (row.status, pull_requests.as_slice(), &result_line)
+    {
+        let number = pull_request_number(pull_request);
+        return match pull_request.state.as_str() {
+            PULL_REQUEST_STATE_OPEN => format!("{number} \u{b7} {result_line}"),
+            state => format!("{number} {state} \u{b7} {result_line}"),
+        };
     }
     let short_reason = short_reason_text(row, &reason, snapshot);
     // These only restate the status icon, so the result or prompt says more.
@@ -1576,9 +1600,9 @@ mod tests {
         assert!(!is_matching(blocked_row, &snapshot, "#41 2"));
         assert!(is_matching(running_row, &snapshot, "10 runs pass"));
         assert!(!is_matching(running_row, &snapshot, "b fix"));
-        let (excerpt, range) = match_excerpt(running_row, &snapshot, "FLAKY").unwrap();
-        assert_eq!(&excerpt[range], "flaky");
-        assert!(excerpt.starts_with("Prompt"));
+        let excerpt = match_excerpt(running_row, &snapshot, "FLAKY").unwrap();
+        assert_eq!(&excerpt.text[excerpt.match_range], "flaky");
+        assert_eq!(&excerpt.text[..excerpt.source_size], "Prompt");
         assert_eq!(match_excerpt(running_row, &snapshot, "10 runs"), None);
     }
 
