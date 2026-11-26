@@ -447,6 +447,15 @@ def latest_run_outcome(
     return failed_run_outcome(1, failure, failure.get("message"), run.get("status"))
 
 
+def is_sent_run_cancelled_before_start(
+    projection: ledger.JsonObject, watcher: ThreadWatcher
+) -> bool:
+    return any(
+        run.get("id") == watcher.run_id and t3_code.is_cancelled_before_start(run)
+        for run in json_objects(projection.get("runs"))
+    )
+
+
 def wait_for_quiet_thread(
     outcome: common.RunOutcome,
     watcher: ThreadWatcher,
@@ -455,7 +464,9 @@ def wait_for_quiet_thread(
     # T3 Code runs a subagent's follow-up in a new run, which `thread send --wait` doesn't follow.
     while True:
         if projection is not None:
-            run = t3_code.latest_run_not_cancelled_before_start(projection, watcher.run_id)
+            if is_sent_run_cancelled_before_start(projection, watcher):
+                return outcome
+            run = t3_code.latest_run_not_cancelled_before_start(projection)
             if is_request_pending(projection):
                 return waiting_outcome(last_reply(projection, run))
             is_active = has_active_run(run)
