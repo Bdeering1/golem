@@ -195,6 +195,7 @@ pub struct BoardView {
     expanded_folds: HashSet<usize>,
     /// The task the details last showed; any other selection resets the per-task view.
     shown_root_id: Option<String>,
+    is_error_copied: bool,
     /// The panel size render last asked AppKit for, so content changes resize it once.
     placed_size: Option<(f64, f64)>,
     pending: Option<Pending>,
@@ -380,6 +381,7 @@ impl BoardView {
             expanded_sections: HashSet::new(),
             expanded_folds: HashSet::new(),
             shown_root_id: None,
+            is_error_copied: false,
             placed_size: None,
             pending: None,
             is_showing_help: false,
@@ -736,7 +738,14 @@ impl BoardView {
     }
 
     /// Follow, opened text and scroll belong to one task, so a new selection starts fresh.
-    fn reset_task_view(&mut self) {
+    /// Clears the view's per-task state only when another task is selected, so an extra
+    /// J at the end of the list or a repeated click keeps folds, Follow and scroll.
+    fn reset_view_if_task_changed(&mut self) {
+        let selected_root_id = self.selected_row().map(|row| row.root_id.clone());
+        if selected_root_id == self.shown_root_id {
+            return;
+        }
+        self.shown_root_id = selected_root_id;
         self.is_following = false;
         self.is_follow_paused = false;
         self.paused_lines.clear();
@@ -765,11 +774,8 @@ impl BoardView {
 
     fn select(&mut self, root_id: String, cx: &mut Context<Self>) {
         self.selected_roots.insert(self.tab, root_id);
-        self.expanded_sections.clear();
-        self.expanded_folds.clear();
         self.input = Input::None;
-        self.is_following = false;
-        self.detail_scroll.set_offset(point(px(0.), px(0.)));
+        self.reset_view_if_task_changed();
         self.reveal_selected();
         cx.notify();
     }
@@ -862,14 +868,16 @@ impl BoardView {
     }
 
     fn copy_error_detail(&mut self, cx: &mut Context<Self>) {
-        let Some(detail) = self.error_detail.take() else {
+        let Some(detail) = &self.error_detail else {
             return;
         };
         cx.write_to_clipboard(ClipboardItem::new_string(detail.text.to_string()));
-        self.show_toast("Copied the error", cx);
+        self.is_error_copied = true;
+        cx.notify();
     }
 
     fn show_error_detail(&mut self, detail: ErrorDetail) {
+        self.is_error_copied = false;
         self.error_scroll.set_offset(point(px(0.), px(0.)));
         self.error_detail = Some(detail);
     }
@@ -3432,7 +3440,11 @@ impl BoardView {
                                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                                     this.copy_error_detail(cx);
                                 }))
-                                .child("Copy")
+                                .child(if self.is_error_copied {
+                                    "Copied"
+                                } else {
+                                    "Copy"
+                                })
                                 .child(kbd("\u{2318}C", theme)),
                         ),
                     ),
@@ -3854,11 +3866,7 @@ impl Render for BoardView {
         if !self.tabs().contains(&self.tab) {
             self.tab = Column::Review;
         }
-        let selected_root_id = self.selected_row().map(|row| row.root_id.clone());
-        if selected_root_id != self.shown_root_id {
-            self.shown_root_id = selected_root_id;
-            self.reset_task_view();
-        }
+        self.reset_view_if_task_changed();
         let size = (self.panel_width(), self.panel_height());
         if self.is_visible() && self.placed_size != Some(size) {
             self.placed_size = Some(size);
