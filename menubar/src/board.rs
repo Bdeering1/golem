@@ -736,17 +736,29 @@ pub fn board_snapshot(tasks: Tasks, now: DateTime<Local>) -> Snapshot {
     }
 }
 
+/// Matches what a card or its details show: IDs, labels, prompts, results, failure reasons
+/// and PR numbers, plus the directory.
 pub fn is_matching(row: &Row, tasks: &Tasks, query: &str) -> bool {
     let searched: Vec<String> = row
         .chain_ids
         .iter()
         .map(|id| {
             let task = &tasks[id];
-            format!(
-                "{id} {} {}",
-                task.label.as_deref().unwrap_or(""),
-                task.prompt
-            )
+            let pull_requests: Vec<String> =
+                task.pull_requests.iter().map(pull_request_number).collect();
+            [
+                Some(id.as_str()),
+                task.label.as_deref(),
+                Some(task.prompt.as_str()),
+                task.result.as_deref(),
+                task.gate_stop_reason.as_deref(),
+                task.setup_failure_reason.as_deref(),
+                Some(pull_requests.join(" ").as_str()),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" ")
         })
         .collect();
     format!("{} {}", row.directory, searched.join(" "))
@@ -1462,6 +1474,22 @@ mod tests {
             .map(|row| (row.task_id.as_str(), row.column))
             .collect();
         assert_eq!(columns, vec![("a", Column::Review), ("b", Column::Done)]);
+    }
+
+    #[test]
+    fn filter_matches_what_cards_show() {
+        let mut blocked = task(Status::Blocked);
+        blocked.gate_stop_reason = Some("3 tests failed in checkout.spec.ts".into());
+        blocked.pull_requests = vec![PullRequest {
+            url: "https://x/pull/412".into(),
+            state: "open".into(),
+        }];
+        let tasks = tasks(vec![("a", blocked)]);
+        let row = &board_rows(&tasks, now())[0];
+        for query in ["#412", "CHECKOUT.spec", "a"] {
+            assert!(is_matching(row, &tasks, query), "{query}");
+        }
+        assert!(!is_matching(row, &tasks, "#41 2"));
     }
 
     #[test]

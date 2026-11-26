@@ -8,10 +8,10 @@ use futures::StreamExt;
 use futures::channel::mpsc::UnboundedReceiver;
 use gpui::{
     Animation, AnimationExt, AnyElement, BoxShadow, ClickEvent, ClipboardItem, Context, Div,
-    ElementId, FocusHandle, FontWeight, HighlightStyle, Hsla, KeyDownEvent, ScrollEvent,
-    ScrollHandle, SharedString, Stateful, StyledText, Subscription, Task, Transformation, Window,
-    div, linear_color_stop, linear_gradient, point, prelude::*, pulsating_between, px, radians,
-    svg,
+    ElementId, FocusHandle, FontWeight, HighlightStyle, Hsla, KeyDownEvent, MouseButton,
+    MouseDownEvent, Pixels, ScrollEvent, ScrollHandle, SharedString, Stateful, StyledText,
+    Subscription, Task, Transformation, Window, div, linear_color_stop, linear_gradient, point,
+    prelude::*, pulsating_between, px, radians, svg,
 };
 use notify::Watcher;
 use objc2::rc::Retained;
@@ -62,6 +62,13 @@ const BUSY_PULSE_FPS: f32 = 30.0;
 const CHARS_PER_LINE: usize = 80;
 const PROMPT_LINE_LIMIT: usize = 3;
 const PARAGRAPH_GAP: f32 = 7.;
+/// Session fields the palette offers to copy, for handing off to a terminal.
+const COPYABLE_FIELDS: [(&str, &str); 4] = [
+    ("Directory", "Copy directory"),
+    ("Worktree", "Copy worktree path"),
+    ("Branch", "Copy branch"),
+    ("Session", "Copy session ID"),
+];
 const RESULT_LINE_LIMIT: usize = 12;
 const CALLOUT_LINE_LIMIT: usize = 4;
 const SECTION_RESULT: &str = "result";
@@ -115,6 +122,8 @@ enum Command {
     ToggleDone,
     ToggleDetails,
     ToggleSession,
+    /// Copies the selected task's Session field with this label.
+    CopyField(&'static str),
     Quit,
 }
 
@@ -1373,6 +1382,15 @@ impl BoardView {
         );
     }
 
+    /// The selected task's Session field with this label, when it has one.
+    fn selected_field(&self, label: &str) -> Option<String> {
+        let row = self.selected_row()?;
+        board::task_fields(row, &self.snapshot, self.board_now())
+            .into_iter()
+            .find(|(field_label, value)| *field_label == label && !value.is_empty())
+            .map(|(_, value)| value)
+    }
+
     fn palette_items(&self) -> Vec<PaletteItem> {
         let mut items = Vec::new();
         if let Some(row) = self.selected_row() {
@@ -1405,14 +1423,23 @@ impl BoardView {
                 "Show session info"
             };
             let details_key = if self.is_expanded { "esc" } else { "\u{23ce}" };
-            for (command, label, key) in [
-                (Command::ToggleDetails, details_label, details_key),
-                (Command::ToggleSession, session_label, "I"),
-            ] {
+            let copy_items = COPYABLE_FIELDS
+                .into_iter()
+                .filter(|(field, _)| self.selected_field(field).is_some())
+                .map(|(field, text)| (Command::CopyField(field), text.to_string(), ""));
+            let view_items = [
+                (
+                    Command::ToggleDetails,
+                    details_label.to_string(),
+                    details_key,
+                ),
+                (Command::ToggleSession, session_label.to_string(), "I"),
+            ];
+            for (command, label, key) in view_items.into_iter().chain(copy_items) {
                 items.push(PaletteItem {
                     group: board::row_title(row).to_string(),
                     command,
-                    label: label.to_string(),
+                    label,
                     key: key.to_string(),
                     is_danger: false,
                 });
@@ -1466,6 +1493,12 @@ impl BoardView {
             Command::ToggleDone => self.toggle_done(cx),
             Command::ToggleDetails => self.set_expanded(!self.is_expanded, cx),
             Command::ToggleSession => self.toggle_session(cx),
+            Command::CopyField(label) => {
+                if let Some(value) = self.selected_field(label) {
+                    cx.write_to_clipboard(ClipboardItem::new_string(value));
+                    self.show_toast("Copied", cx);
+                }
+            }
             Command::Quit => cx.quit(),
         }
         self.focus_handle.focus(window, cx);
@@ -1933,15 +1966,18 @@ fn edit_input(text: &mut String, caret: &mut usize, key: &str, typed: &str) -> b
 // ---- rendering ------------------------------------------------------------------------------
 
 impl BoardView {
-    /// Text being typed with its caret, scrolled just enough to keep the caret in view.
+    /// Text being typed with its caret, scrolled just enough to keep the caret in view; a
+    /// click moves the caret to the nearest character.
     fn editing_text(
         &self,
         id: &'static str,
         text: &str,
         caret: usize,
-        caret_height: f32,
+        font_size: f32,
         theme: &Theme,
+        cx: &mut Context<Self>,
     ) -> Stateful<Div> {
+        let caret_height = font_size + 2.;
         let (before, after) = text.split_at(text.len() - caret.min(text.len()));
         self.input_scroll.scroll_to_item(1);
         let run = |text: &str| {
@@ -1957,6 +1993,13 @@ impl BoardView {
             .items_center()
             .overflow_x_scroll()
             .track_scroll(&self.input_scroll)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    this.place_caret(event.position.x, px(font_size), window);
+                    cx.notify();
+                }),
+            )
             .child(run(before))
             .child(
                 div()
@@ -1968,6 +2011,24 @@ impl BoardView {
             .child(run(after))
     }
 
+    /// Moves the active input's caret to the character nearest `click_x`.
+    fn place_caret(&mut self, click_x: Pixels, font_size: Pixels, window: &mut Window) {
+        let text = match &self.palette {
+            Some(palette) => palette.query.clone(),
+            None => self.query.clone(),
+        };
+        let x = click_x - self.input_scroll.bounds().left() - self.input_scroll.offset().x;
+        let run = window.text_style().to_run(text.len());
+        let line = window
+            .text_system()
+            .shape_line(text.clone().into(), font_size, &[run], None);
+        let caret = text.len() - line.closest_index_for_x(x).min(text.len());
+        match self.palette.as_mut() {
+            Some(palette) => palette.caret = caret,
+            None => self.query_caret = caret,
+        }
+    }
+
     fn render_header(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let is_filtering = self.input == Input::Filter;
         let filter_text: AnyElement = if self.query.is_empty() && !is_filtering {
@@ -1976,7 +2037,7 @@ impl BoardView {
                 .child("Filter")
                 .into_any_element()
         } else if is_filtering {
-            self.editing_text("query", &self.query, self.query_caret, 15., theme)
+            self.editing_text("query", &self.query, self.query_caret, 13., theme, cx)
                 .into_any_element()
         } else {
             div()
@@ -2021,6 +2082,9 @@ impl BoardView {
                                 this.border_1().border_color(theme.accent)
                             })
                             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                if this.input != Input::Filter {
+                                    this.query_caret = 0;
+                                }
                                 this.input = Input::Filter;
                                 cx.notify();
                             }))
@@ -3927,10 +3991,12 @@ impl BoardView {
                             .truncate()
                             .child(item.label.clone()),
                     )
-                    .child(kbd(&item.key, theme).when(is_current, |this| {
-                        this.bg(gpui::rgba(FILLED_KEYCAP_BACKGROUND))
-                            .text_color(theme.on_accent)
-                    })),
+                    .when(!item.key.is_empty(), |this| {
+                        this.child(kbd(&item.key, theme).when(is_current, |this| {
+                            this.bg(gpui::rgba(FILLED_KEYCAP_BACKGROUND))
+                                .text_color(theme.on_accent)
+                        }))
+                    }),
             );
         }
         if items.is_empty() {
@@ -3949,7 +4015,7 @@ impl BoardView {
                 .child("Search actions")
                 .into_any_element()
         } else {
-            self.editing_text("palette-query", &query, caret, 16., theme)
+            self.editing_text("palette-query", &query, caret, 14., theme, cx)
                 .into_any_element()
         };
         self.scrim(theme)
