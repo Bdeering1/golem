@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -26,10 +26,16 @@ use crate::theme::{self, MONO_FONT, Theme};
 const PANEL_WIDTH: f64 = 440.0;
 const EXPANDED_PANEL_WIDTH: f64 = 860.0;
 const PANEL_HEIGHT: f64 = 640.0;
+const MIN_PANEL_HEIGHT: f64 = 320.0;
+/// Collapsed-panel layout heights used to fit the panel to its longest group.
+const PANEL_CHROME_HEIGHT: f64 = 140.0;
+const CARD_PITCH: f64 = 66.0;
+const EMPTY_LIST_HEIGHT: f64 = 90.0;
 const SIDE_WIDTH: f32 = 340.0;
 const TICK_INTERVAL: Duration = Duration::from_secs(1);
 const RELOAD_DEBOUNCE: Duration = Duration::from_millis(80);
 const TOAST_DURATION: Duration = Duration::from_secs(3);
+const ERROR_TOAST_DURATION: Duration = Duration::from_secs(8);
 const CHANGE_HIGHLIGHT_DURATION: Duration = Duration::from_secs(10);
 /// A menu bar click that lands this soon after the panel hid itself is the click that hid it.
 const REOPEN_GUARD: Duration = Duration::from_millis(300);
@@ -81,6 +87,18 @@ struct Palette {
     index: usize,
 }
 
+struct Toast {
+    text: SharedString,
+    id: u64,
+    is_error: bool,
+}
+
+/// The result of a background `golem` run: the toast text and whether it reports a failure.
+struct Outcome {
+    message: String,
+    is_error: bool,
+}
+
 struct Pending {
     action: Action,
     task_id: Option<String>,
@@ -105,13 +123,14 @@ pub struct BoardView {
     activity_level: ActivityLevel,
     is_following: bool,
     is_showing_fields: bool,
+    is_showing_prompt: bool,
     is_showing_activity: bool,
     pending: Option<Pending>,
     is_showing_help: bool,
     palette: Option<Palette>,
-    toast: Option<(SharedString, u64)>,
+    toast: Option<Toast>,
     toast_count: u64,
-    checking_gates: HashSet<String>,
+    busy_actions: HashMap<String, Action>,
     pull_request_presses: HashMap<String, usize>,
     changed_until: HashMap<String, Instant>,
     detail_activity: Option<(String, Vec<String>)>,
@@ -270,13 +289,14 @@ impl BoardView {
             activity_level: ActivityLevel::Messages,
             is_following: false,
             is_showing_fields: false,
+            is_showing_prompt: false,
             is_showing_activity: true,
             pending: None,
             is_showing_help: false,
             palette: None,
             toast: None,
             toast_count: 0,
-            checking_gates: HashSet::new(),
+            busy_actions: HashMap::new(),
             pull_request_presses: HashMap::new(),
             changed_until: HashMap::new(),
             detail_activity: None,
@@ -475,13 +495,33 @@ impl BoardView {
         }
     }
 
+    /// The collapsed panel fits its longest group so it doesn't change height when switching tabs.
+    fn panel_height(&self) -> f64 {
+        if self.is_expanded || self.is_showing_help || self.palette.is_some() {
+            return PANEL_HEIGHT;
+        }
+        let longest = self
+            .tabs()
+            .into_iter()
+            .map(|column| self.column_rows(column).len())
+            .max()
+            .unwrap_or(0);
+        let list_height = (longest as f64 * CARD_PITCH).max(EMPTY_LIST_HEIGHT);
+        (PANEL_CHROME_HEIGHT + list_height).clamp(MIN_PANEL_HEIGHT, PANEL_HEIGHT)
+    }
+
     /// Moves the panel under the menu bar item, then shows it if asked. AppKit applies the
     /// frame on the next turn of the run loop, because GPUI can't take a resize mid-update.
     fn place(&self, is_showing: bool, cx: &mut Context<Self>) {
         let Some(panel) = self.panel.clone() else {
             return;
         };
-        let frame = macos::panel_frame(&panel, &self.tray_icon, self.panel_width(), PANEL_HEIGHT);
+        let frame = macos::panel_frame(
+            &panel,
+            &self.tray_icon,
+            self.panel_width(),
+            self.panel_height(),
+        );
         cx.spawn(async move |_, _| {
             if let Some(frame) = frame {
                 panel.setFrame_display(frame, true);
@@ -527,17 +567,39 @@ impl BoardView {
     }
 
     fn show_toast(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.show_message(text, false, cx);
+    }
+
+    fn show_message(
+        &mut self,
+        text: impl Into<SharedString>,
+        is_error: bool,
+        cx: &mut Context<Self>,
+    ) {
         let text = text.into();
         if text.is_empty() {
             return;
         }
         self.toast_count += 1;
         let toast_id = self.toast_count;
-        self.toast = Some((text, toast_id));
+        self.toast = Some(Toast {
+            text,
+            id: toast_id,
+            is_error,
+        });
+        let duration = if is_error {
+            ERROR_TOAST_DURATION
+        } else {
+            TOAST_DURATION
+        };
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(TOAST_DURATION).await;
+            cx.background_executor().timer(duration).await;
             let _ = this.update(cx, |this, cx| {
-                if this.toast.as_ref().is_some_and(|(_, id)| *id == toast_id) {
+                if this
+                    .toast
+                    .as_ref()
+                    .is_some_and(|toast| toast.id == toast_id)
+                {
                     this.toast = None;
                     cx.notify();
                 }
@@ -562,6 +624,7 @@ impl BoardView {
 
     fn select(&mut self, root_id: String, cx: &mut Context<Self>) {
         self.selected_roots.insert(self.tab, root_id);
+        self.is_showing_prompt = false;
         self.is_following = false;
         self.detail_scroll.set_offset(point(px(0.), px(0.)));
         self.reveal_selected();
@@ -613,6 +676,26 @@ impl BoardView {
         cx.notify();
     }
 
+    /// The palette needs the full panel height, so the panel grows while it shows.
+    fn set_palette(&mut self, palette: Option<Palette>, cx: &mut Context<Self>) {
+        let is_resizing = palette.is_some() != self.palette.is_some();
+        self.palette = palette;
+        if is_resizing {
+            self.place(false, cx);
+        }
+        cx.notify();
+    }
+
+    /// The shortcuts sheet needs the full panel height, so the panel grows while it shows.
+    fn set_help(&mut self, is_showing: bool, cx: &mut Context<Self>) {
+        if self.is_showing_help == is_showing {
+            return;
+        }
+        self.is_showing_help = is_showing;
+        self.place(false, cx);
+        cx.notify();
+    }
+
     fn toggle_done(&mut self, cx: &mut Context<Self>) {
         self.is_showing_done = !self.is_showing_done;
         if self.is_showing_done {
@@ -620,6 +703,7 @@ impl BoardView {
         } else if self.tab == Column::Done {
             self.tab = Column::Review;
         }
+        self.place(false, cx);
         cx.notify();
     }
 
@@ -686,7 +770,7 @@ impl BoardView {
                 row.map(|row| row.task_id)
             };
             self.pending = Some(Pending { action, task_id });
-            self.is_showing_help = false;
+            self.set_help(false, cx);
             cx.notify();
             return;
         }
@@ -753,25 +837,36 @@ impl BoardView {
         }
     }
 
+    /// Runs `work` off the main thread, marking each `busy` task with its action until it returns.
     fn run_in_background(
         &mut self,
-        work: impl FnOnce() -> String + Send + 'static,
+        busy: Vec<(String, Action)>,
+        work: impl FnOnce() -> Outcome + Send + 'static,
         cx: &mut Context<Self>,
     ) {
+        self.busy_actions.extend(busy.iter().cloned());
         let job = cx.background_executor().spawn(async move { work() });
         cx.spawn(async move |this, cx| {
-            let message = job.await;
+            let outcome = job.await;
             let _ = this.update(cx, |this, cx| {
-                this.show_toast(message, cx);
+                for (task_id, _) in &busy {
+                    this.busy_actions.remove(task_id);
+                }
+                this.show_message(outcome.message, outcome.is_error, cx);
                 this.reload(cx);
             });
         })
         .detach();
+        cx.notify();
     }
 
     fn perform(&mut self, action: Action, row: &Row, cx: &mut Context<Self>) {
-        let name = board::task_display_name(&self.snapshot.tasks, &row.task_id);
+        let name = board::row_title(row).to_string();
         let task_id = row.task_id.clone();
+        if let Some(busy_action) = self.busy_actions.get(&task_id) {
+            self.show_toast(busy_action.busy_text(), cx);
+            return;
+        }
         match action {
             Action::Watch => self.toggle_follow(cx),
             Action::Copy => {
@@ -792,45 +887,10 @@ impl BoardView {
                     opened += &format!(" ({} of {})", press + 1, pull_requests.len());
                 }
                 self.run_in_background(
-                    move || {
-                        let outcome = golem_cli::open_url(&pull_request.url);
-                        if outcome.is_success {
-                            opened
-                        } else {
-                            outcome.message
-                        }
-                    },
+                    Vec::new(),
+                    move || outcome_or(golem_cli::open_url(&pull_request.url), opened),
                     cx,
                 );
-            }
-            Action::RerunGate => {
-                let Some(golem) = self.golem.clone() else {
-                    self.show_toast(GOLEM_MISSING_TEXT, cx);
-                    return;
-                };
-                if !self.checking_gates.insert(task_id.clone()) {
-                    self.show_toast(format!("Already rechecking {name}"), cx);
-                    return;
-                }
-                self.show_toast(format!("Rechecking the gate for {name}"), cx);
-                let job = cx
-                    .background_executor()
-                    .spawn(async move { golem.run(action.command(), &task_id) });
-                let checked_id = row.task_id.clone();
-                cx.spawn(async move |this, cx| {
-                    let outcome = job.await;
-                    let _ = this.update(cx, |this, cx| {
-                        this.checking_gates.remove(&checked_id);
-                        let message = if outcome.is_success {
-                            format!("Gate passed for {name}; follow-ups started")
-                        } else {
-                            format!("Gate still failing for {name}: {}", outcome.message)
-                        };
-                        this.show_toast(message, cx);
-                        this.reload(cx);
-                    });
-                })
-                .detach();
             }
             _ => {
                 let Some(golem) = self.golem.clone() else {
@@ -842,22 +902,27 @@ impl BoardView {
                     action == Action::Pickup && TERMINAL_BACKENDS.contains(&backend.as_str());
                 let done_text = match action {
                     Action::Pickup => format!("Picked up {name}"),
+                    Action::Retry => format!("Retrying {name}"),
+                    Action::RerunGate => format!("Gate passed for {name}; follow-ups started"),
                     Action::Close => format!("Closed {name}"),
                     Action::Cancel => format!("Cancelled {name}"),
                     _ => String::new(),
                 };
+                let busy = vec![(task_id.clone(), action)];
                 self.run_in_background(
+                    busy,
                     move || {
                         let outcome = if is_terminal_pickup {
                             golem.pickup_in_terminal(&task_id)
                         } else {
                             golem.run(action.command(), &task_id)
                         };
-                        if !outcome.is_success || done_text.is_empty() {
-                            outcome.message
-                        } else {
-                            done_text
+                        let mut result = outcome_or(outcome, done_text);
+                        if action == Action::RerunGate && result.is_error {
+                            result.message =
+                                format!("Gate still failing for {name}: {}", result.message);
                         }
+                        result
                     },
                     cx,
                 );
@@ -871,7 +936,12 @@ impl BoardView {
             return;
         };
         let task_ids = board::closable_task_ids(&self.snapshot);
+        let busy = task_ids
+            .iter()
+            .map(|task_id| (task_id.clone(), Action::Close))
+            .collect();
         self.run_in_background(
+            busy,
             move || {
                 let failures: Vec<String> = task_ids
                     .iter()
@@ -879,12 +949,16 @@ impl BoardView {
                     .filter(|outcome| !outcome.is_success)
                     .map(|outcome| outcome.message)
                     .collect();
-                failures.first().cloned().unwrap_or_else(|| {
-                    format!(
-                        "Closed {}",
-                        board::counted_text(task_ids.len() - failures.len(), "task")
-                    )
-                })
+                match failures.first() {
+                    Some(failure) => Outcome {
+                        message: failure.clone(),
+                        is_error: true,
+                    },
+                    None => Outcome {
+                        message: format!("Closed {}", board::counted_text(task_ids.len(), "task")),
+                        is_error: false,
+                    },
+                }
             },
             cx,
         );
@@ -967,14 +1041,14 @@ impl BoardView {
     }
 
     fn run_command(&mut self, command: Command, window: &mut Window, cx: &mut Context<Self>) {
-        self.palette = None;
+        self.set_palette(None, cx);
         match command {
             Command::Task(action) => self.request(action, cx),
             Command::NextAttention => self.next_attention(cx),
             Command::ToggleDone => self.toggle_done(cx),
             Command::ToggleDetails => self.set_expanded(!self.is_expanded, cx),
             Command::Filter => self.input = Input::Filter,
-            Command::Help => self.is_showing_help = true,
+            Command::Help => self.set_help(true, cx),
             Command::Quit => cx.quit(),
         }
         self.focus_handle.focus(window, cx);
@@ -990,12 +1064,13 @@ impl BoardView {
         if modifiers.platform {
             match key {
                 "k" if self.pending.is_none() => {
-                    self.palette = if self.palette.is_some() {
+                    let palette = if self.palette.is_some() {
                         None
                     } else {
                         Some(Palette::default())
                     };
-                    self.is_showing_help = false;
+                    self.set_palette(palette, cx);
+                    self.set_help(false, cx);
                 }
                 "w" => self.hide(cx),
                 "q" => cx.quit(),
@@ -1027,8 +1102,6 @@ impl BoardView {
         });
         if self.palette.is_some() {
             self.handle_palette_key(key, &typed, window, cx);
-        } else if self.input == Input::Filter {
-            self.handle_filter_key(key, &typed, cx);
         } else if self.pending.is_some() {
             match (key, typed.as_str()) {
                 (KEY_ENTER, _) | (_, "y") => self.answer(true, cx),
@@ -1037,8 +1110,10 @@ impl BoardView {
             }
         } else if self.is_showing_help {
             if matches!(key, KEY_ESCAPE | KEY_ENTER) || matches!(typed.as_str(), "?" | "q") {
-                self.is_showing_help = false;
+                self.set_help(false, cx);
             }
+        } else if self.input == Input::Filter {
+            self.handle_filter_key(key, &typed, cx);
         } else if key == "tab" && modifiers.shift {
             self.move_tab(-1, cx);
         } else {
@@ -1059,7 +1134,7 @@ impl BoardView {
             return;
         };
         match key {
-            KEY_ESCAPE => self.palette = None,
+            KEY_ESCAPE => self.set_palette(None, cx),
             KEY_DOWN | KEY_UP if !items.is_empty() => {
                 let step = if key == KEY_DOWN { 1 } else { items.len() - 1 };
                 palette.index = (palette.index + step) % items.len();
@@ -1132,15 +1207,10 @@ impl BoardView {
                 let index = typed.parse::<usize>().unwrap_or(1) - 1;
                 self.set_tab(BOARD_COLUMNS[index], cx);
             }
-            (_, "/") => {
-                self.input = Input::Filter;
-                if self.is_expanded {
-                    self.set_expanded(false, cx);
-                }
-            }
+            (_, "/") => self.input = Input::Filter,
             (_, "n") => self.next_attention(cx),
             (_, "a") => self.toggle_done(cx),
-            (_, "?") => self.is_showing_help = true,
+            (_, "?") => self.set_help(true, cx),
             (_, "t") => {
                 self.activity_level = self.activity_level.next();
                 self.is_showing_activity = true;
@@ -1160,6 +1230,24 @@ impl BoardView {
                 self.request_key(typed, cx);
             }
         }
+    }
+}
+
+/// A failed run reports golem's own message; a successful one says `done_text` when there is one.
+fn outcome_or(outcome: golem_cli::CommandOutcome, done_text: String) -> Outcome {
+    match (outcome.is_success, done_text.is_empty()) {
+        (false, _) => Outcome {
+            message: outcome.message,
+            is_error: true,
+        },
+        (true, true) => Outcome {
+            message: outcome.message,
+            is_error: false,
+        },
+        (true, false) => Outcome {
+            message: done_text,
+            is_error: false,
+        },
     }
 }
 
@@ -1188,54 +1276,29 @@ impl BoardView {
                 })
                 .into_any_element()
         };
-        let mut title_row = div()
+        let logo = div()
+            .size(px(22.))
+            .flex_none()
+            .rounded(px(6.))
+            .bg(theme.accent)
             .flex()
             .items_center()
-            .gap(px(8.))
-            .h(px(22.))
-            .child(
-                div()
-                    .size(px(20.))
-                    .rounded(px(6.))
-                    .bg(theme.accent)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(icon(theme::ICON_LOGO, 14., theme.on_accent)),
-            )
-            .child(
-                div()
-                    .text_size(px(14.))
-                    .font_weight(FontWeight::BOLD)
-                    .child("golem"),
-            );
-        if let Some(error) = &self.load_error {
-            title_row = title_row.child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(px(11.5))
-                    .text_color(theme.orange)
-                    .child(format!(
-                        "Can't read the ledger, showing the last good state: {error}"
-                    )),
-            );
-        }
+            .justify_center()
+            .child(icon(theme::ICON_LOGO, 15., theme.on_accent));
         div()
             .flex()
             .flex_col()
-            .gap(px(7.))
-            .px(px(12.))
-            .pt(px(10.))
-            .pb(px(9.))
+            .gap(px(6.))
+            .px(px(10.))
+            .py(px(9.))
             .border_b_1()
             .border_color(theme.line)
-            .child(title_row)
             .child(
                 div()
                     .flex()
-                    .gap(px(6.))
+                    .items_center()
+                    .gap(px(7.))
+                    .child(logo)
                     .child(
                         div()
                             .id("filter")
@@ -1258,7 +1321,31 @@ impl BoardView {
                             }))
                             .child(icon(theme::ICON_SEARCH, 13., theme.text_2))
                             .child(div().flex_1().min_w_0().child(filter_text))
-                            .child(kbd("/", theme)),
+                            .map(|this| {
+                                if self.query.is_empty() {
+                                    return this.child(kbd("/", theme));
+                                }
+                                this.child(
+                                    div()
+                                        .id("clear-filter")
+                                        .size(px(16.))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded_full()
+                                        .bg(theme.text_3)
+                                        .text_color(theme.panel)
+                                        .text_size(px(11.))
+                                        .font_weight(FontWeight::BOLD)
+                                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                            cx.stop_propagation();
+                                            this.query.clear();
+                                            this.input = Input::None;
+                                            cx.notify();
+                                        }))
+                                        .child("\u{d7}"),
+                                )
+                            }),
                     )
                     .child(
                         div()
@@ -1280,6 +1367,17 @@ impl BoardView {
                             .child(kbd("N", theme)),
                     ),
             )
+            .when_some(self.load_error.clone(), |this, error| {
+                this.child(
+                    div()
+                        .truncate()
+                        .text_size(px(11.5))
+                        .text_color(theme.orange)
+                        .child(format!(
+                            "Can't read the ledger, showing the last good state: {error}"
+                        )),
+                )
+            })
             .into_any_element()
     }
 
@@ -1326,7 +1424,7 @@ impl BoardView {
                     this.child(div().size(px(6.)).rounded_full().bg(theme.orange))
                 })
         });
-        let mut container = div().flex().flex_col().child(
+        let container = div().flex().flex_col().child(
             div()
                 .flex()
                 .gap(px(1.))
@@ -1338,53 +1436,6 @@ impl BoardView {
                 .bg(theme.fill)
                 .children(tabs),
         );
-        if !self.query.is_empty() {
-            let shown = self
-                .filtered_rows()
-                .iter()
-                .filter(|row| self.tabs().contains(&row.column))
-                .count();
-            container = container.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .mx(px(10.))
-                    .mb(px(7.))
-                    .pl(px(10.))
-                    .pr(px(4.))
-                    .py(px(3.))
-                    .rounded(px(7.))
-                    .bg(theme.accent_soft)
-                    .text_color(theme.accent)
-                    .text_size(px(12.))
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .child(format!("{shown} shown \u{b7} \"{}\"", self.query)),
-                    )
-                    .child(
-                        div()
-                            .id("clear-filter")
-                            .flex()
-                            .gap(px(5.))
-                            .items_center()
-                            .px(px(6.))
-                            .rounded(px(5.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                this.query.clear();
-                                this.input = Input::None;
-                                cx.notify();
-                            }))
-                            .child("Clear")
-                            .child(kbd("esc", theme)),
-                    ),
-            );
-        }
         container.into_any_element()
     }
 
@@ -1398,105 +1449,58 @@ impl BoardView {
         let now = Local::now();
         let task = &self.snapshot.tasks[&row.task_id];
         let is_stuck = board::is_stuck(row, task, now);
-        let is_new = board::is_new_for_review(&self.snapshot.tasks, row);
-        let is_checking = self.checking_gates.contains(&row.task_id);
-        let is_running = row.status == Status::Running || is_checking;
-        let is_loud = is_running || self.needs_you(row);
+        let busy_action = self.busy_actions.get(&row.task_id).copied();
+        let is_running = row.status == Status::Running || busy_action.is_some();
         let is_changed = self.changed_until.contains_key(&row.root_id);
         let state_color = theme.status_color(row.status, is_stuck);
-        let (text, text_2, text_3, mark) = if is_selected {
-            let soft: Hsla = gpui::rgba(0xffffffe6).into();
-            (theme.on_accent, soft, soft, theme.on_accent)
-        } else {
-            (theme.text, theme.text_2, theme.text_3, state_color)
+        let (status_icon, state_color) = match busy_action {
+            Some(_) => (theme::status_icon(Status::Running), theme.blue),
+            None => (theme::status_icon(row.status), state_color),
         };
-        let status_icon = theme::status_icon(if is_checking {
-            Status::Running
-        } else {
-            row.status
-        });
-        let state_word = if is_stuck { "stuck" } else { row.status.name() };
         let when = board::card_when_text(row, task, now);
-        let snippet = board::card_snippet(row, &self.snapshot, is_checking);
+        let snippet = busy_action.map_or_else(
+            || board::card_snippet(row, &self.snapshot),
+            |action| action.busy_text().to_string(),
+        );
+        let is_code =
+            snippet.starts_with(board::SHELL_PROMPT) || snippet.starts_with(board::TOOL_MARK);
         let root_id = row.root_id.clone();
         div()
             .id(SharedString::from(format!("card-{}", row.root_id)))
             .flex()
             .flex_col()
-            .gap(px(1.))
-            .px(px(10.))
-            .pt(px(6.))
-            .pb(px(7.))
-            .rounded(px(9.))
-            .bg(if is_selected {
-                theme.accent
-            } else {
-                theme.raised
-            })
+            .gap(px(2.))
+            .pl(px(10.))
+            .pr(px(11.))
+            .py(px(8.))
+            .rounded(px(8.))
             .border_1()
-            .border_color(if is_selected || is_changed {
-                theme.accent
-            } else {
-                theme.line
+            .map(|this| match (is_selected, is_changed) {
+                (true, _) => this.bg(theme.accent_soft).border_color(theme.accent),
+                (false, true) => this.bg(theme.changed).border_color(theme.line),
+                (false, false) => this
+                    .bg(theme.raised)
+                    .border_color(theme.line)
+                    .hover(|style| style.bg(theme.hover)),
             })
-            .when(!is_selected, |this| {
-                this.hover(|style| style.bg(theme.hover))
-            })
-            .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
-                let is_already_selected = this
-                    .selected_row()
-                    .is_some_and(|row| row.root_id == root_id);
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                 this.select(root_id.clone(), cx);
-                if event.click_count() >= 2 || is_already_selected {
-                    this.set_expanded(!this.is_expanded || event.click_count() >= 2, cx);
-                }
+                this.set_expanded(true, cx);
             }))
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(8.))
-                    .text_size(px(10.5))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(text_3)
-                    .child(
-                        div().flex_1().min_w_0().truncate().child(
-                            format!("{} \u{b7} {}", board::repository_name(row), row.root_id)
-                                .to_uppercase(),
-                        ),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_size(px(11.5))
-                            .font_weight(if is_stuck {
-                                FontWeight::SEMIBOLD
-                            } else {
-                                FontWeight::MEDIUM
-                            })
-                            .text_color(if is_stuck && !is_selected {
-                                theme.orange
-                            } else {
-                                text_2
-                            })
-                            .child(when),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
+                    .gap(px(7.))
                     .min_w_0()
-                    .child(icon(status_icon, 14., mark))
+                    .child(icon(status_icon, 14., state_color))
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
                             .truncate()
                             .text_size(px(13.5))
-                            .text_color(text)
-                            .font_weight(if is_loud {
+                            .font_weight(if is_running || self.needs_you(row) {
                                 FontWeight::SEMIBOLD
                             } else {
                                 FontWeight::MEDIUM
@@ -1509,40 +1513,50 @@ impl BoardView {
                                 .flex_none()
                                 .px(px(5.))
                                 .rounded(px(4.))
-                                .border_1()
-                                .border_color(if is_selected { text_2 } else { theme.line })
+                                .bg(theme.fill)
                                 .text_size(px(10.5))
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(text_2)
+                                .text_color(theme.text_2)
                                 .child(row.step.clone()),
                         )
-                    })
-                    .when(is_new, |this| {
-                        this.child(div().flex_none().size(px(7.)).rounded_full().bg(
-                            if is_selected {
-                                theme.on_accent
-                            } else {
-                                theme.accent
-                            },
-                        ))
                     })
                     .child(
                         div()
                             .flex_none()
-                            .text_size(px(12.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(mark)
-                            .child(state_word),
+                            .text_size(px(11.5))
+                            .font_weight(if is_stuck {
+                                FontWeight::SEMIBOLD
+                            } else {
+                                FontWeight::NORMAL
+                            })
+                            .text_color(if is_stuck { theme.orange } else { theme.text_3 })
+                            .child(when),
                     ),
             )
             .child(
                 div()
-                    .pl(px(20.))
-                    .truncate()
-                    .text_size(if is_running { px(11.5) } else { px(12.) })
-                    .text_color(text_2)
-                    .when(is_running, |this| this.font_family(MONO_FONT))
-                    .child(snippet),
+                    .flex()
+                    .gap(px(6.))
+                    .pl(px(21.))
+                    .min_w_0()
+                    .text_size(px(12.))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(theme.text_3)
+                            .child(board::repository_name(row).to_string()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(theme.text_2)
+                            .when(is_code, |this| {
+                                this.font_family(MONO_FONT).text_size(px(11.5))
+                            })
+                            .child(snippet),
+                    ),
             )
     }
 
@@ -1695,11 +1709,6 @@ impl BoardView {
                 theme,
             ));
         }
-        if !task.prompt.trim().is_empty() {
-            body = body.child(
-                Self::section("Prompt", theme).child(div().child(task.prompt.trim().to_string())),
-            );
-        }
         if let Some(result) = task
             .result
             .as_deref()
@@ -1712,6 +1721,53 @@ impl BoardView {
             };
             body = body
                 .child(Self::section(title, theme).child(div().child(board::plain_result(result))));
+        }
+        let pull_requests = board::row_pull_requests(&self.snapshot, row);
+        if !pull_requests.is_empty() {
+            let mut list = div().flex().flex_col().gap(px(3.)).text_size(px(12.5));
+            for pull_request in pull_requests {
+                let url = pull_request.url.clone();
+                let is_open = pull_request.state == "open";
+                list = list.child(
+                    div()
+                        .id(SharedString::from(format!("pr-{}", pull_request.url)))
+                        .flex()
+                        .gap(px(6.))
+                        .items_baseline()
+                        .rounded(px(5.))
+                        .hover(|style| style.bg(theme.hover))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            let url = url.clone();
+                            this.run_in_background(
+                                Vec::new(),
+                                move || outcome_or(golem_cli::open_url(&url), String::new()),
+                                cx,
+                            );
+                        }))
+                        .child(
+                            div()
+                                .font_weight(FontWeight::BOLD)
+                                .child(board::pull_request_number(&pull_request)),
+                        )
+                        .child(
+                            div()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(if is_open { theme.green } else { theme.gray })
+                                .child(pull_request.state.clone()),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .font_family(MONO_FONT)
+                                .text_size(px(11.5))
+                                .text_color(theme.text_3)
+                                .child(pull_request.url.trim_start_matches("https://").to_string()),
+                        ),
+                );
+            }
+            body = body.child(Self::section("Pull requests", theme).child(list));
         }
         if row.chain_ids.len() > 1 {
             let steps = board::chain_steps(row, &self.snapshot.tasks);
@@ -1757,67 +1813,27 @@ impl BoardView {
             }
             body = body.child(Self::section("Chain", theme).child(chain));
         }
-        let pull_requests = board::row_pull_requests(&self.snapshot, row);
-        if !pull_requests.is_empty() {
-            let mut list = div().flex().flex_col().gap(px(3.)).text_size(px(12.5));
-            for pull_request in pull_requests {
-                let url = pull_request.url.clone();
-                let is_open = pull_request.state == "open";
-                list = list.child(
+        if !task.prompt.trim().is_empty() {
+            let is_showing_prompt = self.is_showing_prompt;
+            body = body.child(
+                Self::section("Prompt", theme).child(
                     div()
-                        .id(SharedString::from(format!("pr-{}", pull_request.url)))
-                        .flex()
-                        .gap(px(6.))
-                        .items_baseline()
-                        .rounded(px(5.))
-                        .hover(|style| style.bg(theme.hover))
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                            let url = url.clone();
-                            this.run_in_background(
-                                move || {
-                                    let outcome = golem_cli::open_url(&url);
-                                    if outcome.is_success {
-                                        String::new()
-                                    } else {
-                                        outcome.message
-                                    }
-                                },
-                                cx,
-                            );
+                        .id("prompt")
+                        .text_color(theme.text_2)
+                        .when(!is_showing_prompt, |this| this.line_clamp(3))
+                        .hover(|style| style.text_color(theme.text))
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.is_showing_prompt = !this.is_showing_prompt;
+                            cx.notify();
                         }))
-                        .child(
-                            div()
-                                .font_weight(FontWeight::BOLD)
-                                .child(board::pull_request_number(&pull_request)),
-                        )
-                        .child(
-                            div()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(if is_open { theme.green } else { theme.gray })
-                                .child(pull_request.state.clone()),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .font_family(MONO_FONT)
-                                .text_size(px(11.5))
-                                .text_color(theme.text_3)
-                                .child(pull_request.url.trim_start_matches("https://").to_string()),
-                        ),
-                );
-            }
-            body = body.child(Self::section("Pull requests", theme).child(list));
+                        .child(task.prompt.trim().to_string()),
+                ),
+            );
         }
         let fields_meta = if self.is_showing_fields {
             String::new()
         } else {
-            format!(
-                "{} \u{b7} {}",
-                task.backend,
-                board::display_directory(&task.cwd)
-            )
+            format!("{} \u{b7} {}", task.backend, board::repository_name(row))
         };
         let mut fields = Self::disclosure(
             "fields",
@@ -2019,12 +2035,6 @@ impl BoardView {
         };
         let now = Local::now();
         let task = self.snapshot.tasks[&row.task_id].clone();
-        let rows = self.column_rows(self.tab);
-        let position = rows
-            .iter()
-            .position(|candidate| candidate.root_id == row.root_id)
-            .unwrap_or(0);
-        let row_count = rows.len();
         let is_stuck = board::is_stuck(&row, &task, now);
         let state_color = theme.status_color(row.status, is_stuck);
         let mut sub_parts =
@@ -2043,8 +2053,12 @@ impl BoardView {
             .text_color(theme.text_2)
             .child(
                 div()
+                    .flex()
+                    .items_center()
+                    .gap(px(5.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(state_color)
+                    .child(icon(theme::status_icon(row.status), 13., state_color))
                     .child(if is_stuck { "stuck" } else { row.status.name() }),
             );
         for part in sub_parts {
@@ -2052,53 +2066,24 @@ impl BoardView {
                 .child(div().text_color(theme.text_3).child("\u{b7}"))
                 .child(part);
         }
-        let pager_button =
-            |id: &'static str, label: &'static str, delta: isize, cx: &mut Context<Self>| {
-                div()
-                    .id(id)
-                    .min_w(px(24.))
-                    .h(px(24.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(6.))
-                    .hover(|style| style.bg(theme.hover))
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.move_selection(delta, cx)
-                    }))
-                    .child(label)
-            };
         let head = div()
             .pl(px(18.))
             .pr(px(12.))
-            .py(px(10.))
+            .pt(px(12.))
+            .pb(px(10.))
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap(px(8.))
-                    .h(px(24.))
-                    .text_size(px(11.))
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .h(px(20.))
+                    .text_size(px(11.5))
                     .text_color(theme.text_3)
-                    .child(
-                        div().flex_1().min_w_0().truncate().child(
-                            format!("{} / {}", board::repository_name(&row), row.root_id)
-                                .to_uppercase(),
-                        ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(2.))
-                            .text_size(px(12.))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme.text_2)
-                            .child(pager_button("previous", "\u{2039}", -1, cx))
-                            .child(format!("{} of {row_count}", position + 1))
-                            .child(pager_button("next-task", "\u{203a}", 1, cx)),
-                    )
+                    .child(div().flex_1().min_w_0().truncate().child(format!(
+                        "{} \u{b7} {}",
+                        board::repository_name(&row),
+                        row.root_id
+                    )))
                     .child(
                         div()
                             .id("collapse")
@@ -2119,15 +2104,13 @@ impl BoardView {
                     .flex()
                     .items_center()
                     .gap(px(8.))
-                    .mt(px(3.))
-                    .mb(px(3.))
-                    .child(icon(theme::status_icon(row.status), 18., state_color))
+                    .mb(px(4.))
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_size(px(20.))
+                            .text_size(px(19.))
                             .font_weight(FontWeight::BOLD)
                             .child(board::row_title(&row).to_string()),
                     )
@@ -2135,85 +2118,80 @@ impl BoardView {
                         this.child(
                             div()
                                 .flex_none()
-                                .px(px(5.))
+                                .px(px(6.))
                                 .rounded(px(4.))
-                                .border_1()
-                                .border_color(theme.line)
-                                .text_size(px(10.5))
+                                .bg(theme.fill)
+                                .text_size(px(11.))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(theme.text_2)
                                 .child(format!("step {}", row.step)),
                         )
-                    })
-                    .when(
-                        board::is_new_for_review(&self.snapshot.tasks, &row),
-                        |this| {
-                            this.child(
-                                div()
-                                    .flex_none()
-                                    .px(px(6.))
-                                    .rounded(px(8.))
-                                    .bg(theme.accent_soft)
-                                    .text_color(theme.accent)
-                                    .text_size(px(10.5))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child("new"),
-                            )
-                        },
-                    ),
+                    }),
             )
             .child(sub);
         let body = self.render_detail_body(&row, theme, cx);
         let actions = board::available_actions(&self.snapshot, Some(&row));
         let primary = board::primary_action(&self.snapshot, &row, &actions);
-        let buttons = actions
+        let is_running = row.status == Status::Running;
+        let busy_action = self.busy_actions.get(&row.task_id).copied();
+        let mut actions: Vec<Action> = actions
             .into_iter()
-            .filter(|action| *action != Action::CloseAll)
-            .map(|action| {
-                let is_on = action == Action::Watch && self.is_following;
-                let label = match action {
-                    Action::Watch if is_on => "Following",
-                    Action::Watch if row.status != Status::Running => "Log",
-                    _ => action.label(),
-                };
-                let is_primary = Some(action) == primary && !is_on;
-                let is_danger = action == Action::Cancel;
-                let (background, foreground) = if is_primary {
-                    (theme.accent, theme.on_accent)
-                } else if is_on {
-                    (theme.accent_soft, theme.accent)
-                } else if is_danger {
-                    (theme.fill, theme.red)
-                } else {
-                    (theme.fill, theme.text)
-                };
-                let key_chip = kbd(&key_label(action), theme).when(is_primary, |this| {
-                    this.bg(gpui::rgba(0xffffff38)).text_color(theme.on_accent)
-                });
-                div()
-                    .id(action.label())
-                    .flex()
-                    .items_center()
-                    .gap(px(7.))
-                    .h(px(26.))
-                    .pl(px(10.))
-                    .pr(px(6.))
-                    .rounded(px(7.))
-                    .bg(background)
-                    .text_color(foreground)
-                    .font_weight(if is_primary {
-                        FontWeight::SEMIBOLD
-                    } else {
-                        FontWeight::MEDIUM
-                    })
-                    .when(is_danger, |this| this.ml_auto())
-                    .hover(|style| style.opacity(0.9))
-                    .on_click(
-                        cx.listener(move |this, _: &ClickEvent, _, cx| this.request(action, cx)),
-                    )
-                    .child(label)
-                    .child(key_chip)
+            .filter(|action| match action {
+                Action::CloseAll | Action::Copy => false,
+                Action::Watch => is_running,
+                _ => true,
+            })
+            .collect();
+        actions.sort_by_key(|action| Some(*action) != primary);
+        let first_ending = actions
+            .iter()
+            .position(|action| matches!(action, Action::Close | Action::Cancel));
+        let buttons = actions.into_iter().enumerate().map(|(index, action)| {
+            let is_on = action == Action::Watch && self.is_following;
+            let label = match action {
+                _ if busy_action == Some(action) => action.busy_text(),
+                Action::Watch if is_on => "Following",
+                _ => action.label(),
+            };
+            let is_primary = Some(action) == primary && !is_on;
+            let is_danger = action == Action::Cancel;
+            let (background, foreground) = if is_primary {
+                (theme.accent, theme.on_accent)
+            } else if is_on {
+                (theme.accent_soft, theme.accent)
+            } else if is_danger {
+                (theme.fill, theme.red)
+            } else {
+                (theme.fill, theme.text)
+            };
+            let key_chip = kbd(&key_label(action), theme).when(is_primary, |this| {
+                this.bg(gpui::rgba(0xffffff38)).text_color(theme.on_accent)
             });
+            div()
+                .id(action.label())
+                .flex()
+                .items_center()
+                .gap(px(7.))
+                .h(px(26.))
+                .pl(px(10.))
+                .pr(px(6.))
+                .rounded(px(7.))
+                .bg(background)
+                .text_color(foreground)
+                .font_weight(if is_primary {
+                    FontWeight::SEMIBOLD
+                } else {
+                    FontWeight::MEDIUM
+                })
+                .when(Some(index) == first_ending, |this| this.ml_auto())
+                .when(busy_action.is_some(), |this| this.opacity(0.55))
+                .when(busy_action.is_none(), |this| {
+                    this.hover(|style| style.opacity(0.9))
+                })
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.request(action, cx)))
+                .child(label)
+                .child(key_chip)
+        });
         div()
             .flex_1()
             .min_w_0()
@@ -2299,7 +2277,7 @@ impl BoardView {
                     .child(done_label)
                     .child(kbd("A", theme)),
             )
-            .when(has_closable, |this| {
+            .when(has_closable && self.tab == Column::Review, |this| {
                 this.child(
                     Self::footer_button("close-finished", theme)
                         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
@@ -2313,7 +2291,7 @@ impl BoardView {
             .child(
                 Self::footer_button("palette", theme)
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.palette = Some(Palette::default());
+                        this.set_palette(Some(Palette::default()), cx);
                         cx.notify();
                     }))
                     .child("Actions")
@@ -2322,7 +2300,7 @@ impl BoardView {
             .child(
                 Self::footer_button("help", theme)
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.is_showing_help = true;
+                        this.set_help(true, cx);
                         cx.notify();
                     }))
                     .child("Keys")
@@ -2414,7 +2392,7 @@ impl BoardView {
                 )
             }
             (action, Some(row)) => {
-                let name = board::task_display_name(&self.snapshot.tasks, &row.task_id);
+                let name = board::row_title(row);
                 let body = match action {
                     Action::Close => "It moves to Done.",
                     Action::Cancel if row.status == Status::Running => {
@@ -2489,49 +2467,7 @@ impl BoardView {
     }
 
     fn render_help(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let sections: [(&str, &[(&str, &str)]); 3] = [
-            (
-                "Move",
-                &[
-                    ("\u{2191} \u{2193} J K", "select task"),
-                    ("\u{2190} \u{2192} H L", "switch group"),
-                    ("1-4", "jump to group"),
-                    ("G \u{21e7}G", "first, last"),
-                    ("N", "next needing you"),
-                    ("\u{23ce}", "details"),
-                    ("esc", "back"),
-                    ("space \u{2303}D \u{2303}U", "scroll"),
-                ],
-            ),
-            (
-                "Task",
-                &[
-                    ("\u{2318}K", "all actions"),
-                    ("P", "pick up"),
-                    ("W", "follow log"),
-                    ("O", "open PR"),
-                    ("R", "retry or recheck"),
-                    ("C", "close"),
-                    ("X", "cancel"),
-                    ("Y", "copy ID"),
-                    ("I", "session"),
-                    ("T", "activity level"),
-                ],
-            ),
-            (
-                "Board",
-                &[
-                    ("/", "filter"),
-                    ("\u{21e7}C", "close finished"),
-                    ("A", "show Done"),
-                    ("?", "shortcuts"),
-                    ("Q \u{2318}W", "close panel"),
-                    ("\u{2303}\u{2325}G", "open panel"),
-                    ("\u{2318}Q", "quit"),
-                ],
-            ),
-        ];
-        let columns = sections.into_iter().map(|(title, entries)| {
+        let section = |title: &str, entries: &[(&str, &str)]| {
             let rows = entries.iter().map(|(keys, text)| {
                 div()
                     .flex()
@@ -2541,16 +2477,15 @@ impl BoardView {
                     .text_size(px(12.))
                     .child(
                         div()
-                            .w(px(104.))
+                            .w(px(72.))
                             .flex_none()
                             .flex()
                             .gap(px(2.))
                             .children(keys.split(' ').map(|key| kbd(key, theme))),
                     )
-                    .child(text.to_string())
+                    .child(div().truncate().child(text.to_string()))
             });
             div()
-                .flex_1()
                 .flex()
                 .flex_col()
                 .child(
@@ -2563,7 +2498,55 @@ impl BoardView {
                         .child(title.to_uppercase()),
                 )
                 .children(rows)
-        });
+        };
+        let move_keys = section(
+            "Move",
+            &[
+                ("\u{2191}\u{2193} J K", "select"),
+                ("\u{2190}\u{2192} H L", "switch group"),
+                ("1-4", "jump to group"),
+                ("G \u{21e7}G", "first, last"),
+                ("N", "next needing you"),
+                ("\u{23ce}", "details"),
+                ("esc", "back"),
+                ("\u{2303}D \u{2303}U", "scroll"),
+            ],
+        );
+        let board_keys = section(
+            "Board",
+            &[
+                ("/", "filter"),
+                ("A", "show Done"),
+                ("\u{21e7}C", "close finished"),
+                ("\u{2318}K", "all actions"),
+                ("Q \u{2318}W", "close panel"),
+                ("\u{2303}\u{2325}G", "open panel"),
+            ],
+        );
+        let task_keys = section(
+            "Task",
+            &[
+                ("P", "pick up"),
+                ("W", "follow log"),
+                ("O", "open PR"),
+                ("R", "retry, recheck"),
+                ("C", "close"),
+                ("X", "cancel"),
+                ("Y", "copy ID"),
+                ("I", "session"),
+                ("T", "activity level"),
+            ],
+        );
+        let columns = [
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .child(move_keys)
+                .child(board_keys),
+            div().flex_1().min_w_0().flex().flex_col().child(task_keys),
+        ];
         let statuses = [
             Status::Scheduled,
             Status::Waiting,
@@ -2598,20 +2581,26 @@ impl BoardView {
                             .font_weight(FontWeight::BOLD)
                             .child("Keyboard shortcuts"),
                     )
-                    .child(div().flex().flex_wrap().gap(px(22.)).children(columns))
                     .child(
                         div()
-                            .flex()
-                            .flex_wrap()
-                            .gap(px(10.))
-                            .mt(px(12.))
-                            .children(legend),
+                            .id("help-body")
+                            .max_h(px(PANEL_HEIGHT as f32 - 150.))
+                            .overflow_y_scroll()
+                            .child(div().flex().gap(px(18.)).children(columns))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_wrap()
+                                    .gap(px(10.))
+                                    .mt(px(12.))
+                                    .children(legend),
+                            ),
                     )
                     .child(
                         div().flex().mt(px(14.)).child(
                             Self::sheet_button("help-ok", "OK".to_string(), "esc", false, theme)
                                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                    this.is_showing_help = false;
+                                    this.set_help(false, cx);
                                     cx.notify();
                                 })),
                         ),
@@ -2723,7 +2712,7 @@ impl BoardView {
             .occlude()
             .pt(px(62.))
             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                this.palette = None;
+                this.set_palette(None, cx);
                 cx.notify();
             }))
             .child(
@@ -2755,8 +2744,8 @@ impl BoardView {
             .into_any_element()
     }
 
-    fn render_toast(&self, text: &SharedString, theme: &Theme) -> AnyElement {
-        let bottom = if self.is_expanded { px(98.) } else { px(46.) };
+    fn render_toast(&self, toast: &Toast, theme: &Theme) -> AnyElement {
+        let bottom = if self.is_expanded { px(64.) } else { px(46.) };
         div()
             .absolute()
             .bottom(bottom)
@@ -2770,12 +2759,16 @@ impl BoardView {
                     .px(px(12.))
                     .py(px(6.))
                     .rounded(px(9.))
-                    .bg(theme.text)
-                    .text_color(theme.panel)
                     .text_size(px(12.))
                     .font_weight(FontWeight::MEDIUM)
-                    .truncate()
-                    .child(text.clone()),
+                    .map(|this| {
+                        if toast.is_error {
+                            this.bg(theme.red).text_color(theme.on_accent).line_clamp(3)
+                        } else {
+                            this.bg(theme.text).text_color(theme.panel).truncate()
+                        }
+                    })
+                    .child(toast.text.clone()),
             )
             .into_any_element()
     }
@@ -2823,8 +2816,8 @@ impl Render for BoardView {
             .child(self.render_header(&theme, cx))
             .child(body)
             .child(self.render_footer(&theme, cx));
-        if let Some((text, _)) = &self.toast {
-            root = root.child(self.render_toast(text, &theme));
+        if let Some(toast) = &self.toast {
+            root = root.child(self.render_toast(toast, &theme));
         }
         if self.palette.is_some() {
             root = root.child(self.render_palette(&theme, cx));

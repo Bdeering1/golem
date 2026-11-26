@@ -194,6 +194,18 @@ impl Action {
         )
     }
 
+    /// What a card says while this action's `golem` run is in flight.
+    pub fn busy_text(self) -> &'static str {
+        match self {
+            Action::Pickup => "Opening session\u{2026}",
+            Action::Retry => "Retrying\u{2026}",
+            Action::RerunGate => "Rechecking the gate\u{2026}",
+            Action::Close | Action::CloseAll => "Closing\u{2026}",
+            Action::Cancel => "Cancelling\u{2026}",
+            Action::Watch | Action::OpenPullRequest | Action::Copy => "",
+        }
+    }
+
     pub fn unavailable_text(self) -> &'static str {
         match self {
             Action::Pickup => "This task can't be picked up",
@@ -947,10 +959,7 @@ fn short_reason_text(row: &Row, reason: &str, snapshot: &Snapshot) -> String {
 }
 
 /// The second line of a card: live activity for running tasks, otherwise why the task is here.
-pub fn card_snippet(row: &Row, snapshot: &Snapshot, is_checking_gate: bool) -> String {
-    if is_checking_gate {
-        return "rechecking the gate\u{2026}".to_string();
-    }
+pub fn card_snippet(row: &Row, snapshot: &Snapshot) -> String {
     let task = &snapshot.tasks[&row.task_id];
     if row.status == Status::Running {
         return snapshot
