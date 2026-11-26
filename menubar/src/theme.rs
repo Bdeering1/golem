@@ -147,8 +147,6 @@ impl Theme {
     }
 }
 
-pub const ICON_LOGO: &str = "icons/logo.svg";
-pub const ICON_REVIEW: &str = "icons/review.svg";
 pub const ICON_SEARCH: &str = "icons/search.svg";
 pub const ICON_CHEVRON: &str = "icons/chevron.svg";
 pub const ICON_FOLD: &str = "icons/fold.svg";
@@ -181,12 +179,6 @@ fn icon_body(path: &str) -> Option<&'static str> {
         "icons/failed.svg" => r#"<path d="M4.2 4.2l7.6 7.6M11.8 4.2l-7.6 7.6"/>"#,
         "icons/finished.svg" => r#"<path d="M3.2 8.6l3.1 3.1 6.5-7.4"/>"#,
         "icons/cancelled.svg" => r#"<circle cx="8" cy="8" r="6.1"/><path d="M4 12L12 4"/>"#,
-        ICON_REVIEW => {
-            r#"<path d="M3.8 3.2h8.4L14 9v3.6a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V9z"/><path d="M2 9h3.4l1 1.8h3.2l1-1.8H14"/>"#
-        }
-        ICON_LOGO => {
-            r#"<rect x="2.2" y="3.2" width="11.6" height="9.8" rx="3"/><circle cx="6" cy="8" r="1.1" fill="black" stroke="none"/><circle cx="10" cy="8" r="1.1" fill="black" stroke="none"/><path d="M8 1.2v2"/>"#
-        }
         ICON_SEARCH => r#"<circle cx="7" cy="7" r="4.4"/><path d="M10.4 10.4L14 14"/>"#,
         ICON_CHEVRON => r#"<path d="M6 3.2L10.8 8 6 12.8"/>"#,
         ICON_FOLD => {

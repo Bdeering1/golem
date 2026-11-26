@@ -1449,7 +1449,12 @@ impl BoardView {
             return;
         };
         let closable_ids = board::closable_task_ids(&self.snapshot);
-        task_ids.retain(|task_id| closable_ids.contains(task_id));
+        task_ids.retain(|task_id| {
+            closable_ids.contains(task_id) && !self.busy_actions.contains_key(task_id)
+        });
+        if task_ids.is_empty() {
+            return;
+        }
         let busy = task_ids
             .iter()
             .map(|task_id| (task_id.clone(), Action::Close))
@@ -2239,7 +2244,6 @@ fn pull_request_repository(url: &str) -> String {
     }
 }
 
-/// Whether text is long enough to clamp to `line_limit` lines in the details pane.
 fn sentence_case(text: &str) -> String {
     let mut chars = text.chars();
     chars.next().map_or_else(String::new, |first| {
@@ -2436,7 +2440,9 @@ impl BoardView {
     }
 
     fn render_header(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let is_filtering = self.input == Input::Filter;
+        // The palette's input shares the filter's selection anchor, so the filter shows no
+        // caret or selection while the palette is open.
+        let is_filtering = self.input == Input::Filter && self.palette.is_none();
         let filter_text: AnyElement = if self.query.is_empty() && !is_filtering {
             div()
                 .text_color(theme.text_3)
@@ -3253,7 +3259,6 @@ impl BoardView {
         )
     }
 
-    /// Long text clamped to `line_limit` lines with its own Show more control; E expands all.
     /// How many lines `text` takes in the details pane, wrapped as rendered; blank lines
     /// render as paragraph gaps, so they don't count. Before the first frame, source lines.
     fn wrapped_line_count(&self, section: &str, text: &str) -> usize {
@@ -3296,6 +3301,7 @@ impl BoardView {
         )
     }
 
+    /// Long text clamped to `line_limit` lines with its own Show more control; E expands all.
     fn clamped_text(
         &self,
         section: &'static str,
@@ -4721,7 +4727,6 @@ impl BoardView {
             .into_any_element()
     }
 
-    /// Toasts sit over the footer so they never cover a card.
     /// An error's row above the footer, which the panel grows for so it never hides a card.
     fn render_toast(&self, toast: &Toast, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         div()
