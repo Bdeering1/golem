@@ -38,7 +38,7 @@ const CARD_GAP: f32 = 2.0;
 /// The footer and the details action bar share a height so their top edges line up.
 const BOTTOM_BAR_HEIGHT: f32 = 37.0;
 /// The shortcuts sheet's height plus the footer below it; the palette uses it too.
-const HELP_PANEL_HEIGHT: f64 = 568.0;
+const HELP_PANEL_HEIGHT: f64 = 500.0;
 const SMALL_SHEET_MAX_WIDTH: f32 = 440.0;
 const LOAD_ERROR_TITLE: &str = "Can't read the ledger";
 const ERROR_TEXT_MAX_HEIGHT: f32 = 220.0;
@@ -2085,7 +2085,7 @@ impl BoardView {
             .border_1()
             .map(|this| match (is_selected, is_changed) {
                 (true, _) => this
-                    .bg(theme.accent_soft)
+                    .bg(theme.selection)
                     .border_color(gpui::transparent_black()),
                 (false, true) => this
                     .bg(theme.changed)
@@ -2121,11 +2121,7 @@ impl BoardView {
                             .min_w_0()
                             .truncate()
                             .text_size(px(13.5))
-                            .font_weight(if self.needs_you(row) {
-                                FontWeight::SEMIBOLD
-                            } else {
-                                FontWeight::MEDIUM
-                            })
+                            .font_weight(FontWeight::MEDIUM)
                             .child(board::row_title(row).to_string()),
                     )
                     .when(!row.step.is_empty(), |this| {
@@ -3262,18 +3258,12 @@ impl BoardView {
             }])
     }
 
-    /// Confirmations and errors rise from the bottom edge, so the task stays visible above.
+    /// Confirmations and errors sit at the bottom, so the task stays visible above; inset on
+    /// every side, since a flush sheet in the 900 pt expanded panel would span it.
     fn bottom_sheet(&self, theme: &Theme) -> Div {
         Self::sheet(theme, self.sheet_width(SMALL_SHEET_MAX_WIDTH))
-            .rounded_b(px(0.))
-            .rounded_t(px(12.))
-            .shadow(vec![BoxShadow {
-                color: gpui::rgba(0x00000059).into(),
-                offset: point(px(0.), px(-8.)),
-                blur_radius: px(30.),
-                spread_radius: px(0.),
-                inset: false,
-            }])
+            .mb(px(12.))
+            .rounded(px(12.))
     }
 
     fn render_confirm(
@@ -3503,7 +3493,6 @@ impl BoardView {
             &[
                 ("\u{2191}\u{2193} J K", "Select"),
                 ("\u{2190}\u{2192} H L", "Switch group"),
-                ("\u{2303}N \u{2303}P", "Select in search"),
                 (jump_keys.as_str(), "Jump to group"),
                 ("G \u{21e7}G", "First, last"),
                 ("N", "Next needing you"),
@@ -3520,9 +3509,7 @@ impl BoardView {
                 ("A", "Show Done"),
                 ("\u{21e7}C", "Close finished"),
                 ("\u{2318}K", "All actions"),
-                ("Q \u{2318}W", "Close panel"),
                 ("\u{2303}\u{2325}G", "Open panel"),
-                ("D", "Error details"),
             ],
         );
         let task_keys = section(
