@@ -142,6 +142,8 @@ enum Command {
     CopyField(&'static str),
     CopyError,
     CopyResult,
+    /// Lists the copy commands that an empty search folds into one row.
+    ShowCopies,
     Quit,
 }
 
@@ -719,8 +721,8 @@ impl BoardView {
 
     /// Fits the palette's unfiltered list, so the panel doesn't resize while searching.
     fn palette_panel_height(&self) -> f64 {
-        let list_height =
-            palette_list_height(&self.all_palette_items(), f32::MAX).min(PALETTE_LIST_MAX_HEIGHT);
+        let list_height = palette_list_height(&self.palette_items_matching(""), f32::MAX)
+            .min(PALETTE_LIST_MAX_HEIGHT);
         let height = PALETTE_CHROME_HEIGHT + list_height + PALETTE_BOTTOM_INSET;
         (height as f64).max(MIN_PANEL_HEIGHT)
     }
@@ -1511,8 +1513,38 @@ impl BoardView {
             .as_ref()
             .map(|palette| palette.query.to_lowercase())
             .unwrap_or_default();
+        self.palette_items_matching(&query)
+    }
+
+    /// With no query, the copy commands past Copy ID fold into one "Copy…" row, so the actions
+    /// that change something stay on the first screen.
+    fn palette_items_matching(&self, query: &str) -> Vec<PaletteItem> {
         let mut items = self.all_palette_items();
-        items.retain(|item| query.is_empty() || item.label.to_lowercase().contains(&query));
+        let is_folded_copy = |item: &PaletteItem| {
+            matches!(
+                item.command,
+                Command::CopyField(_) | Command::CopyError | Command::CopyResult
+            )
+        };
+        let folded_count = items.iter().filter(|item| is_folded_copy(item)).count();
+        if query.is_empty()
+            && folded_count > 1
+            && let Some(index) = items.iter().position(is_folded_copy)
+        {
+            let group = items[index].group.clone();
+            items.retain(|item| !is_folded_copy(item));
+            items.insert(
+                index,
+                PaletteItem {
+                    group,
+                    command: Command::ShowCopies,
+                    label: "Copy\u{2026}".to_string(),
+                    key: String::new(),
+                    is_danger: false,
+                },
+            );
+        }
+        items.retain(|item| query.is_empty() || item.label.to_lowercase().contains(query));
         items
     }
 
@@ -1628,6 +1660,16 @@ impl BoardView {
     }
 
     fn run_command(&mut self, command: Command, window: &mut Window, cx: &mut Context<Self>) {
+        if command == Command::ShowCopies {
+            self.set_palette(
+                Some(Palette {
+                    query: "copy ".to_string(),
+                    ..Palette::default()
+                }),
+                cx,
+            );
+            return;
+        }
         self.set_palette(None, cx);
         match command {
             Command::Task(action) => self.request(action, cx),
@@ -1660,6 +1702,7 @@ impl BoardView {
                     self.show_toast(format!("Copied {}", title.to_lowercase()), cx);
                 }
             }
+            Command::ShowCopies => {}
             Command::Quit => cx.quit(),
         }
         self.focus_handle.focus(window, cx);
@@ -2569,10 +2612,28 @@ impl BoardView {
             ),
             (None, None) => (board::card_snippet(row, &self.snapshot), theme.text_2),
         };
-        let is_code = snippet.starts_with(board::SHELL_PROMPT)
-            || (busy_action.is_none()
-                && action_error.is_none()
-                && board::is_tool_snippet(row, &self.snapshot));
+        let excerpt = (!self.query.is_empty() && busy_action.is_none() && action_error.is_none())
+            .then(|| board::match_excerpt(row, &self.snapshot, &self.query))
+            .flatten();
+        let is_code = excerpt.is_none()
+            && (snippet.starts_with(board::SHELL_PROMPT)
+                || (busy_action.is_none()
+                    && action_error.is_none()
+                    && board::is_tool_snippet(row, &self.snapshot)));
+        let snippet: AnyElement = match excerpt {
+            Some((text, range)) => {
+                let highlight = HighlightStyle {
+                    color: Some(theme.text),
+                    background_color: Some(theme.accent_soft),
+                    ..HighlightStyle::default()
+                };
+                let highlights = (!range.is_empty()).then_some((range, highlight));
+                StyledText::new(text)
+                    .with_highlights(highlights)
+                    .into_any_element()
+            }
+            None => snippet.into_any_element(),
+        };
         let is_covered = self.palette.is_some() || self.is_sheet_open();
         let quick_action =
             (!self.is_expanded && !is_covered && busy_action.is_none() && self.tab != Column::Done)
@@ -4106,10 +4167,11 @@ impl BoardView {
         } else {
             "\u{23ce}".to_string()
         };
+        // "Cancel" names the action that stops a task, so other sheets decline with "Back".
         let decline = if pending.action == Action::Cancel {
             "Keep"
         } else {
-            "Cancel"
+            "Back"
         };
         self.scrim(theme)
             .id("confirm")

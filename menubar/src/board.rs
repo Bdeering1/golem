@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::io::{Read, Seek, SeekFrom};
+use std::ops::Range;
 use std::sync::LazyLock;
 
 use chrono::{DateTime, Local, NaiveDate};
@@ -737,37 +738,85 @@ pub fn board_snapshot(tasks: Tasks, now: DateTime<Local>) -> Snapshot {
     }
 }
 
-/// Matches what a card or its details show: IDs, labels, prompts, results, failure reasons,
-/// PR numbers and the card's live activity line, plus the directory.
-pub fn is_matching(row: &Row, snapshot: &Snapshot, query: &str) -> bool {
-    let tasks = &snapshot.tasks;
-    let searched: Vec<String> = row
-        .chain_ids
-        .iter()
-        .map(|id| {
-            let task = &tasks[id];
-            let pull_requests: Vec<String> =
-                task.pull_requests.iter().map(pull_request_number).collect();
+/// What a card or its details show: the directory, the card's line, and each chain step's
+/// ID, label, prompt, result, failure reasons and PR numbers. Kept apart so a query can't
+/// match across two of them.
+fn searched_fields(row: &Row, snapshot: &Snapshot) -> Vec<String> {
+    let mut fields = vec![row.directory.clone(), card_snippet(row, snapshot)];
+    for id in &row.chain_ids {
+        let task = &snapshot.tasks[id];
+        let pull_requests: Vec<String> =
+            task.pull_requests.iter().map(pull_request_number).collect();
+        fields.push(id.clone());
+        fields.extend(
             [
-                Some(id.as_str()),
-                task.label.as_deref(),
-                Some(task.prompt.as_str()),
-                task.result.as_deref(),
-                task.gate_stop_reason.as_deref(),
-                task.setup_failure_reason.as_deref(),
-                Some(pull_requests.join(" ").as_str()),
+                task.label.clone(),
+                Some(task.prompt.clone()),
+                task.result.clone(),
+                task.gate_stop_reason.clone(),
+                task.setup_failure_reason.clone(),
             ]
             .into_iter()
-            .flatten()
-            .collect::<Vec<_>>()
-            .join(" ")
-        })
-        .collect();
-    let snippet = card_snippet(row, snapshot);
-    format!("{} {} {snippet}", row.directory, searched.join(" "))
-        .to_lowercase()
-        .contains(&query.to_lowercase())
+            .flatten(),
+        );
+        fields.push(pull_requests.join(" "));
+    }
+    fields
 }
+
+pub fn is_matching(row: &Row, snapshot: &Snapshot, query: &str) -> bool {
+    let query = query.to_lowercase();
+    let fields = searched_fields(row, snapshot);
+    fields
+        .iter()
+        .any(|field| field.to_lowercase().contains(&query))
+}
+
+/// For a card whose title, repo and line don't show the query, the line of a hidden field
+/// that matched, from a little before the match, with the match's range in it.
+pub fn match_excerpt(
+    row: &Row,
+    snapshot: &Snapshot,
+    query: &str,
+) -> Option<(String, Range<usize>)> {
+    let query = query.to_lowercase();
+    let visible = [
+        row_title(row).to_string(),
+        repository_name(row).to_string(),
+        card_snippet(row, snapshot),
+    ];
+    if visible
+        .iter()
+        .any(|text| text.to_lowercase().contains(&query))
+    {
+        return None;
+    }
+    let fields = searched_fields(row, snapshot);
+    let line = fields
+        .iter()
+        .flat_map(|field| field.lines())
+        .find(|line| line.to_lowercase().contains(&query))?
+        .trim();
+    let lowered = line.to_lowercase();
+    // Lowercasing can change a line's byte length, which would misplace the highlight.
+    let Some(start) = lowered.find(&query).filter(|_| lowered.len() == line.len()) else {
+        return Some((line.to_string(), 0..0));
+    };
+    let context_start = line[..start]
+        .char_indices()
+        .rev()
+        .nth(EXCERPT_CONTEXT_SIZE - 1)
+        .map_or(0, |(index, _)| index);
+    let prefix = if context_start > 0 { "\u{2026}" } else { "" };
+    let match_start = prefix.len() + start - context_start;
+    Some((
+        format!("{prefix}{}", &line[context_start..]),
+        match_start..match_start + query.len(),
+    ))
+}
+
+/// Characters of context kept before a filter match shown on a card.
+const EXCERPT_CONTEXT_SIZE: usize = 16;
 
 // ---- row facts ------------------------------------------------------------------------------
 
@@ -1521,6 +1570,10 @@ mod tests {
         }
         assert!(!is_matching(blocked_row, &snapshot, "#41 2"));
         assert!(is_matching(running_row, &snapshot, "10 runs pass"));
+        assert!(!is_matching(running_row, &snapshot, "b fix"));
+        let (excerpt, range) = match_excerpt(running_row, &snapshot, "FLAKY").unwrap();
+        assert_eq!(&excerpt[range], "flaky");
+        assert_eq!(match_excerpt(running_row, &snapshot, "10 runs"), None);
     }
 
     #[test]
