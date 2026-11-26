@@ -1732,16 +1732,7 @@ impl BoardView {
                 }
             }
             _ => {
-                let query = palette.query.clone();
                 self.edit_active_input(key, typed);
-                if let Some(palette) = self
-                    .palette
-                    .as_mut()
-                    .filter(|palette| palette.query != query)
-                {
-                    palette.index = 0;
-                    self.palette_scroll.scroll_to_item(0);
-                }
             }
         }
     }
@@ -1781,12 +1772,22 @@ impl BoardView {
     }
 
     fn clear_input(&mut self) {
-        if let Some(palette) = self.palette.as_mut() {
-            palette.query.clear();
-            palette.index = 0;
-        } else if self.input == Input::Filter {
-            self.query.clear();
+        match self.palette.as_mut() {
+            Some(palette) => palette.query.clear(),
+            None if self.input == Input::Filter => self.query.clear(),
+            None => return,
         }
+        self.after_query_change();
+    }
+
+    /// The palette selects and reveals its first match; the filter shows a group with matches.
+    fn after_query_change(&mut self) {
+        let Some(palette) = self.palette.as_mut() else {
+            self.show_matching_tab();
+            return;
+        };
+        palette.index = 0;
+        self.palette_scroll.scroll_to_item(0);
     }
 
     /// Edits the active input, the palette's search or else the filter. After ⌘A the next
@@ -1797,25 +1798,31 @@ impl BoardView {
             Some(palette) => (&mut palette.query, &mut palette.caret),
             None => (&mut self.query, &mut self.query_caret),
         };
-        if is_replacing {
-            match key {
-                KEY_BACKSPACE | "delete" => {
-                    text.clear();
-                    return true;
-                }
-                "left" | "home" => {
-                    *caret = text.len();
-                    return true;
-                }
-                "right" | "end" => {
-                    *caret = 0;
-                    return true;
-                }
-                _ if is_printable(typed) => text.clear(),
-                _ => {}
+        let before = text.clone();
+        let is_handled = match key {
+            KEY_BACKSPACE | "delete" if is_replacing => {
+                text.clear();
+                true
             }
+            "left" | "home" if is_replacing => {
+                *caret = text.len();
+                true
+            }
+            "right" | "end" if is_replacing => {
+                *caret = 0;
+                true
+            }
+            _ => {
+                if is_replacing && is_printable(typed) {
+                    text.clear();
+                }
+                edit_input(text, caret, key, typed)
+            }
+        };
+        if *text != before {
+            self.after_query_change();
         }
-        edit_input(text, caret, key, typed)
+        is_handled
     }
 
     /// Pastes the clipboard's text, on one line, into the palette search or the filter.
@@ -1831,10 +1838,6 @@ impl BoardView {
             self.input = Input::Filter;
         }
         self.edit_active_input("", &text);
-        match self.palette.as_mut() {
-            Some(palette) => palette.index = 0,
-            None => self.show_matching_tab(),
-        }
     }
 
     fn handle_board_key(&mut self, key: &str, typed: &str, cx: &mut Context<Self>) {
@@ -4250,6 +4253,9 @@ impl BoardView {
                     .rounded(px(6.))
                     .text_color(foreground)
                     .when(is_current, |this| this.bg(theme.accent_fill))
+                    .when(!is_current, |this| {
+                        this.hover(|style| style.bg(theme.hover))
+                    })
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                         this.run_command(command, window, cx)
                     }))
