@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::f32::consts::FRAC_PI_2;
+use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -217,8 +218,8 @@ pub struct BoardView {
     is_showing_done: bool,
     query: String,
     query_caret: usize,
-    /// ⌘A selected the active input's text, so the next edit replaces it.
-    is_input_selected: bool,
+    /// The other end of the active input's selection, counted like its caret.
+    input_anchor: Option<usize>,
     input: Input,
     is_expanded: bool,
     /// A stopped task with a Result shows its activity as one counts line until opened.
@@ -417,7 +418,7 @@ impl BoardView {
             is_showing_done: false,
             query: String::new(),
             query_caret: 0,
-            is_input_selected: false,
+            input_anchor: None,
             input: Input::None,
             is_expanded: false,
             is_activity_open: false,
@@ -1011,7 +1012,7 @@ impl BoardView {
 
     fn show_error_detail(&mut self, detail: ErrorDetail) {
         self.is_error_copied = false;
-        self.is_input_selected = false;
+        self.input_anchor = None;
         self.error_scroll.set_offset(point(px(0.), px(0.)));
         self.error_detail = Some(detail);
     }
@@ -1019,7 +1020,7 @@ impl BoardView {
     fn set_palette(&mut self, palette: Option<Palette>, cx: &mut Context<Self>) {
         let was_open = self.palette.is_some();
         self.palette = palette;
-        self.is_input_selected = false;
+        self.input_anchor = None;
         self.palette_scroll.scroll_to_item(0);
         if was_open != self.palette.is_some() {
             self.place(false, cx);
@@ -1669,7 +1670,7 @@ impl BoardView {
 
     fn handle_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         if self.palette.is_none() && self.input != Input::Filter {
-            self.is_input_selected = false;
+            self.input_anchor = None;
         }
         let keystroke = &event.keystroke;
         let modifiers = keystroke.modifiers;
@@ -1686,15 +1687,12 @@ impl BoardView {
                     self.set_help(false, cx);
                 }
                 "c" if self.error_detail.is_some() => self.copy_error_detail(cx),
-                "c" | "x" if self.is_input_selected => {
-                    let text = self
-                        .palette
-                        .as_ref()
-                        .map_or(&self.query, |palette| &palette.query);
-                    cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                "c" | "x" if self.selected_input_text().is_some() => {
+                    if let Some(selected) = self.selected_input_text() {
+                        cx.write_to_clipboard(ClipboardItem::new_string(selected));
+                    }
                     if key == "x" {
-                        self.clear_input();
-                        self.is_input_selected = false;
+                        self.edit_active_input(KEY_BACKSPACE, "");
                     }
                 }
                 "w" => self.hide(cx),
@@ -1702,10 +1700,17 @@ impl BoardView {
                 "v" => self.paste(cx),
                 KEY_BACKSPACE => self.clear_input(),
                 "left" | "right" if self.palette.is_some() || self.input == Input::Filter => {
-                    self.edit_active_input(if key == "left" { "home" } else { "end" }, "");
+                    let edge = if key == "left" { "home" } else { "end" };
+                    let selecting = if modifiers.shift { "select-" } else { "" };
+                    self.edit_active_input(&format!("{selecting}{edge}"), "");
                 }
                 "a" if self.palette.is_some() || self.input == Input::Filter => {
-                    self.is_input_selected = true;
+                    let text_size = self
+                        .palette
+                        .as_ref()
+                        .map_or(self.query.len(), |palette| palette.query.len());
+                    self.edit_active_input("end", "");
+                    self.input_anchor = Some(text_size);
                 }
                 _ => return,
             }
@@ -1729,6 +1734,18 @@ impl BoardView {
                 "p" | "k" => self.move_while_typing(-1, window, cx),
                 _ => return,
             }
+            cx.notify();
+            return;
+        }
+        // ⌥ moves and deletes by word and ⇧ extends the selection while typing.
+        let is_typing_key = matches!(key, "left" | "right" | "home" | "end" | KEY_BACKSPACE);
+        if (self.palette.is_some() || self.input == Input::Filter)
+            && (modifiers.alt || modifiers.shift)
+            && is_typing_key
+        {
+            let word = if modifiers.alt { "word-" } else { "" };
+            let selecting = if modifiers.shift { "select-" } else { "" };
+            self.edit_active_input(&format!("{selecting}{word}{key}"), "");
             cx.notify();
             return;
         }
@@ -1871,39 +1888,26 @@ impl BoardView {
         self.palette_scroll.scroll_to_item(0);
     }
 
-    /// Edits the active input, the palette's search or else the filter. After ⌘A the next
-    /// typed character, paste or delete replaces the whole text, and arrows go to an end.
+    /// Edits the active input, the palette's search or else the filter.
     fn edit_active_input(&mut self, key: &str, typed: &str) -> bool {
-        let is_replacing = std::mem::take(&mut self.is_input_selected);
         let (text, caret) = match self.palette.as_mut() {
             Some(palette) => (&mut palette.query, &mut palette.caret),
             None => (&mut self.query, &mut self.query_caret),
         };
         let before = text.clone();
-        let is_handled = match key {
-            KEY_BACKSPACE | "delete" if is_replacing => {
-                text.clear();
-                true
-            }
-            "left" | "home" if is_replacing => {
-                *caret = text.len();
-                true
-            }
-            "right" | "end" if is_replacing => {
-                *caret = 0;
-                true
-            }
-            _ => {
-                if is_replacing && is_printable(typed) {
-                    text.clear();
-                }
-                edit_input(text, caret, key, typed)
-            }
-        };
+        let is_handled = edit_input(text, caret, &mut self.input_anchor, key, typed);
         if *text != before {
             self.after_query_change();
         }
         is_handled
+    }
+
+    fn selected_input_text(&self) -> Option<String> {
+        let (text, caret) = match &self.palette {
+            Some(palette) => (&palette.query, palette.caret),
+            None => (&self.query, self.query_caret),
+        };
+        selection_range(text, caret, self.input_anchor).map(|range| text[range].to_string())
     }
 
     /// Pastes the clipboard's text, on one line, into the palette search or the filter.
@@ -2146,36 +2150,88 @@ fn is_printable(typed: &str) -> bool {
     !typed.is_empty() && typed.chars().all(|char| !char.is_control())
 }
 
-/// Edits a hand-rolled input at its caret, which counts bytes from the end so clearing the
-/// text elsewhere leaves it valid. Returns whether the key edited or moved anything.
-fn edit_input(text: &mut String, caret: &mut usize, key: &str, typed: &str) -> bool {
+/// Edits a hand-rolled input. Its caret and the selection's anchor count bytes from the end,
+/// so clearing the text elsewhere leaves them valid. "select-" keys extend the selection and
+/// "word-" keys move or delete by word. Returns whether the key edited or moved anything.
+fn edit_input(
+    text: &mut String,
+    caret: &mut usize,
+    anchor: &mut Option<usize>,
+    key: &str,
+    typed: &str,
+) -> bool {
     *caret = (*caret).min(text.len());
+    let (key, is_extending) = match key.strip_prefix("select-") {
+        Some(key) => (key, true),
+        None => (key, false),
+    };
+    let selection = selection_range(text, *caret, *anchor);
     let index = text.len() - *caret;
-    let previous = text[..index]
-        .char_indices()
-        .next_back()
-        .map(|(start, _)| start);
-    let next_size = text[index..].chars().next().map(char::len_utf8);
-    match key {
-        "left" => *caret = text.len() - previous.unwrap_or(index),
-        "right" => *caret -= next_size.unwrap_or(0),
-        "home" => *caret = text.len(),
-        "end" => *caret = 0,
-        KEY_BACKSPACE => {
-            if let Some(start) = previous {
-                text.remove(start);
-            }
-        }
-        "delete" => {
-            if next_size.is_some() {
-                text.remove(index);
-                *caret -= next_size.unwrap_or(0);
-            }
-        }
-        _ if is_printable(typed) => text.insert_str(index, typed),
-        _ => return false,
+    let target = match (key, selection.clone()) {
+        ("left", Some(range)) if !is_extending => Some(range.start),
+        ("right", Some(range)) if !is_extending => Some(range.end),
+        ("left", _) => Some(previous_boundary(text, index)),
+        ("right", _) => Some(next_boundary(text, index)),
+        ("word-left", _) => Some(word_start(text, index)),
+        ("word-right", _) => Some(word_end(text, index)),
+        ("home", _) => Some(0),
+        ("end", _) => Some(text.len()),
+        _ => None,
+    };
+    if let Some(target) = target {
+        *anchor = is_extending.then_some(anchor.unwrap_or(*caret));
+        *caret = text.len() - target;
+        return true;
+    }
+    let is_deleting = matches!(key, KEY_BACKSPACE | "delete" | "word-backspace");
+    if !is_deleting && !is_printable(typed) {
+        return false;
+    }
+    *anchor = None;
+    let removed = match (key, selection) {
+        (_, Some(range)) => range,
+        (KEY_BACKSPACE, None) => previous_boundary(text, index)..index,
+        ("word-backspace", None) => word_start(text, index)..index,
+        ("delete", None) => index..next_boundary(text, index),
+        _ => index..index,
+    };
+    text.replace_range(removed.clone(), "");
+    *caret = text.len() - removed.start;
+    if !is_deleting {
+        text.insert_str(removed.start, typed);
     }
     true
+}
+
+/// The selected byte range, when the anchor and caret differ.
+fn selection_range(text: &str, caret: usize, anchor: Option<usize>) -> Option<Range<usize>> {
+    let caret = caret.min(text.len());
+    let anchor = anchor?.min(text.len());
+    (anchor != caret).then(|| text.len() - caret.max(anchor)..text.len() - caret.min(anchor))
+}
+
+fn previous_boundary(text: &str, index: usize) -> usize {
+    (text[..index].char_indices().next_back()).map_or(index, |(start, _)| start)
+}
+
+fn next_boundary(text: &str, index: usize) -> usize {
+    index + text[index..].chars().next().map_or(0, char::len_utf8)
+}
+
+fn is_word_char(char: char) -> bool {
+    char.is_alphanumeric() || char == '_'
+}
+
+/// Where ⌥← lands: the start of the word before `index`, past any separators.
+fn word_start(text: &str, index: usize) -> usize {
+    let before = text[..index].trim_end_matches(|char: char| !is_word_char(char));
+    before.trim_end_matches(is_word_char).len()
+}
+
+/// Where ⌥→ lands: the end of the word after `index`, past any separators.
+fn word_end(text: &str, index: usize) -> usize {
+    let after = text[index..].trim_start_matches(|char: char| !is_word_char(char));
+    text.len() - after.trim_start_matches(is_word_char).len()
 }
 
 // ---- rendering ------------------------------------------------------------------------------
@@ -2193,15 +2249,32 @@ impl BoardView {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let caret_height = font_size + 2.;
-        let (before, after) = text.split_at(text.len() - caret.min(text.len()));
-        self.input_scroll.scroll_to_item(1);
-        let is_selected = self.is_input_selected && !text.is_empty();
-        let run = |text: &str| {
+        let caret_index = text.len() - caret.min(text.len());
+        let selection = selection_range(text, caret, self.input_anchor);
+        let is_selected = selection.is_some();
+        let (start, end) =
+            selection.map_or((caret_index, caret_index), |range| (range.start, range.end));
+        // The caret sits at one edge of the selection; it scrolls into view and hides while
+        // there is a selection.
+        let is_caret_first = caret_index == start;
+        self.input_scroll
+            .scroll_to_item(if is_caret_first { 1 } else { 2 });
+        let run = |text: &str, is_selected: bool| {
             div()
                 .flex_none()
                 .whitespace_nowrap()
                 .when(is_selected, |this| this.bg(theme.accent_soft))
                 .child(text.to_string())
+        };
+        let caret_mark = div()
+            .flex_none()
+            .w(px(1.5))
+            .h(px(caret_height))
+            .when(!is_selected, |this| this.bg(theme.accent));
+        let (first, second) = if is_caret_first {
+            (caret_mark, run(&text[start..end], true))
+        } else {
+            (run(&text[start..end], true), caret_mark)
         };
         div()
             .id(id)
@@ -2217,15 +2290,10 @@ impl BoardView {
                     cx.notify();
                 }),
             )
-            .child(run(before))
-            .child(
-                div()
-                    .flex_none()
-                    .w(px(1.5))
-                    .h(px(caret_height))
-                    .when(!is_selected, |this| this.bg(theme.accent)),
-            )
-            .child(run(after))
+            .child(run(&text[..start], false))
+            .child(first)
+            .child(second)
+            .child(run(&text[end..], false))
     }
 
     /// Moves the active input's caret to the character nearest `click_x`.
@@ -2240,7 +2308,7 @@ impl BoardView {
             .text_system()
             .shape_line(text.clone().into(), font_size, &[run], None);
         let caret = text.len() - line.closest_index_for_x(x).min(text.len());
-        self.is_input_selected = false;
+        self.input_anchor = None;
         match self.palette.as_mut() {
             Some(palette) => palette.caret = caret,
             None => self.query_caret = caret,
@@ -2305,7 +2373,7 @@ impl BoardView {
                             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                                 if this.input != Input::Filter {
                                     this.query_caret = 0;
-                                    this.is_input_selected = false;
+                                    this.input_anchor = None;
                                 }
                                 this.input = Input::Filter;
                                 cx.notify();
@@ -4235,7 +4303,7 @@ impl BoardView {
                 ("C", "Close, dismiss"),
                 ("X", "Cancel"),
                 ("Y", "Copy ID"),
-                ("E", "Expand activity"),
+                ("E", "Expand all"),
                 ("I", "Session info"),
             ],
         );
@@ -4648,8 +4716,9 @@ mod tests {
     fn edited(keys: &[(&str, &str)]) -> (String, usize) {
         let mut text = String::new();
         let mut caret = 0;
+        let mut anchor = None;
         for (key, typed) in keys {
-            edit_input(&mut text, &mut caret, key, typed);
+            edit_input(&mut text, &mut caret, &mut anchor, key, typed);
         }
         (text, caret)
     }
@@ -4688,8 +4757,36 @@ mod tests {
     fn edit_input_keeps_a_stale_caret_valid_after_clearing() {
         let mut text = "abc".to_string();
         let mut caret = 2;
+        let mut anchor = Some(3);
         text.clear();
-        edit_input(&mut text, &mut caret, "", "x");
+        edit_input(&mut text, &mut caret, &mut anchor, "", "x");
         assert_eq!((text.as_str(), caret), ("x", 0));
+    }
+
+    #[test]
+    fn edit_input_moves_by_word_and_replaces_a_selection() {
+        let typed = |text| ("", text);
+        assert_eq!(
+            edited(&[
+                typed("api/rate_limit"),
+                ("word-left", ""),
+                ("select-word-right", ""),
+                typed("x")
+            ]),
+            ("api/x".to_string(), 0)
+        );
+        assert_eq!(
+            edited(&[typed("fix the tests"), ("word-backspace", "")]),
+            ("fix the ".to_string(), 0)
+        );
+        assert_eq!(
+            edited(&[
+                typed("abc"),
+                ("select-left", ""),
+                ("select-left", ""),
+                ("left", "")
+            ]),
+            ("abc".to_string(), 2)
+        );
     }
 }
