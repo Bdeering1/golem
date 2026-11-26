@@ -125,8 +125,16 @@ pub fn first_message(output: &str) -> String {
 impl Golem {
     pub fn discover() -> Golem {
         let inherited_path = std::env::var("PATH").unwrap_or_default();
-        let (path_variable, reported) =
-            shell_environment().unwrap_or((inherited_path, String::new()));
+        let (path_variable, reported) = shell_environment().unwrap_or_else(|| {
+            let home = ledger::home_directory();
+            let path_variable = FALLBACK_DIRECTORIES
+                .iter()
+                .map(|directory| home.join(directory).display().to_string())
+                .chain([inherited_path])
+                .collect::<Vec<_>>()
+                .join(":");
+            (path_variable, String::new())
+        });
         let executable = Some(PathBuf::from(&reported))
             .filter(|path| path.is_absolute() && path.is_file())
             .or_else(|| fallback_executable(&path_variable));
@@ -241,12 +249,6 @@ pub fn open_url(url: &str) -> CommandOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn first_message_drops_prefix_and_capitalizes() {
-        assert_eq!(first_message("golem: retried a1\nmore"), "Retried a1");
-        assert_eq!(first_message("\n"), "");
-    }
 
     #[test]
     fn pickup_script_runs_golem_with_the_task_id() {

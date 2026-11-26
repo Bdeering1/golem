@@ -11,7 +11,7 @@ const ICON_SIZE: u32 = 36;
 const ICON_SUPERSAMPLING: u32 = 4;
 const PANEL_GAP: f64 = 4.0;
 const SCREEN_MARGIN: f64 = 10.0;
-/// How far past the item's center the panel's right edge may sit, as in the prototype.
+/// How far past the item's center the panel's right edge may sit.
 const PANEL_RIGHT_OVERHANG: f64 = 220.0;
 
 /// Signed distance from a point to the golem logo: a rounded head, two eyes and an antenna.

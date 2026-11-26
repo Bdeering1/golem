@@ -35,6 +35,7 @@ const CHANGE_HIGHLIGHT_DURATION: Duration = Duration::from_secs(10);
 const REOPEN_GUARD: Duration = Duration::from_millis(300);
 const SCROLL_STEP: f32 = 240.0;
 const NOTHING_NEEDS_YOU_TEXT: &str = "Nothing needs you right now";
+const GOLEM_MISSING_TEXT: &str = "Still looking for golem";
 const TERMINAL_BACKENDS: [&str; 2] = ["claude", "codex"];
 const KEY_ESCAPE: &str = "escape";
 const KEY_ENTER: &str = "enter";
@@ -70,7 +71,7 @@ struct PaletteItem {
     group: String,
     command: Command,
     label: String,
-    key: &'static str,
+    key: String,
     is_danger: bool,
 }
 
@@ -122,7 +123,7 @@ pub struct BoardView {
 }
 
 fn ledger_watcher(
-    sender: futures::channel::mpsc::UnboundedSender<()>,
+    sender: futures::channel::mpsc::UnboundedSender<bool>,
 ) -> Option<notify::RecommendedWatcher> {
     let state_directory = ledger::state_directory();
     let progress_directory = state_directory.join(ledger::PROGRESS_DIRECTORY_NAME);
@@ -131,18 +132,19 @@ fn ledger_watcher(
         let Ok(event) = result else {
             return;
         };
-        let is_relevant = event.paths.iter().any(|path| {
-            let is_ledger = path
-                .file_name()
-                .is_some_and(|name| name == ledger::LEDGER_FILE_NAME);
-            let is_progress = path
-                .parent()
+        let is_ledger = |path: &std::path::PathBuf| {
+            path.file_name()
+                .is_some_and(|name| name == ledger::LEDGER_FILE_NAME)
+        };
+        let is_progress = |path: &std::path::PathBuf| {
+            path.parent()
                 .and_then(|parent| parent.file_name())
-                .is_some_and(|name| name == ledger::PROGRESS_DIRECTORY_NAME);
-            is_ledger || is_progress
-        });
-        if is_relevant {
-            let _ = sender.unbounded_send(());
+                .is_some_and(|name| name == ledger::PROGRESS_DIRECTORY_NAME)
+        };
+        if event.paths.iter().any(is_ledger) {
+            let _ = sender.unbounded_send(true);
+        } else if event.paths.iter().any(is_progress) {
+            let _ = sender.unbounded_send(false);
         }
     })
     .ok()?;
@@ -180,16 +182,12 @@ fn icon(path: &'static str, size: f32, color: Hsla) -> gpui::Svg {
         .text_color(color)
 }
 
-fn key_label(action: Action) -> &'static str {
-    match action {
-        Action::CloseAll => "\u{21e7}C",
-        Action::Pickup => "P",
-        Action::Watch => "W",
-        Action::OpenPullRequest => "O",
-        Action::Retry | Action::RerunGate => "R",
-        Action::Close => "C",
-        Action::Cancel => "X",
-        Action::Copy => "Y",
+fn key_label(action: Action) -> String {
+    let key = action.key();
+    if key.chars().all(char::is_uppercase) {
+        format!("\u{21e7}{key}")
+    } else {
+        key.to_uppercase()
     }
 }
 
@@ -200,7 +198,7 @@ impl BoardView {
         toggle_receiver: UnboundedReceiver<()>,
         hotkey_manager: Option<global_hotkey::GlobalHotKeyManager>,
     ) -> Self {
-        let (reload_sender, reload_receiver) = futures::channel::mpsc::unbounded::<()>();
+        let (reload_sender, reload_receiver) = futures::channel::mpsc::unbounded::<bool>();
         let watcher = ledger_watcher(reload_sender);
         let subscriptions = vec![
             cx.observe_window_activation(window, |this, window, cx| {
@@ -219,10 +217,19 @@ impl BoardView {
             }),
             cx.spawn(async move |this, cx| {
                 let mut reload_receiver = reload_receiver;
-                while reload_receiver.next().await.is_some() {
+                while let Some(is_ledger) = reload_receiver.next().await {
                     cx.background_executor().timer(RELOAD_DEBOUNCE).await;
-                    while reload_receiver.try_recv().is_ok() {}
-                    if this.update(cx, |this, cx| this.reload(cx)).is_err() {
+                    let mut is_ledger_changed = is_ledger;
+                    while let Ok(is_ledger) = reload_receiver.try_recv() {
+                        is_ledger_changed |= is_ledger;
+                    }
+                    // Progress logs change constantly while a task runs; only the open panel shows them.
+                    let reloaded = this.update(cx, |this, cx| {
+                        if is_ledger_changed || this.is_visible() {
+                            this.reload(cx);
+                        }
+                    });
+                    if reloaded.is_err() {
                         break;
                     }
                 }
@@ -797,14 +804,15 @@ impl BoardView {
                 );
             }
             Action::RerunGate => {
+                let Some(golem) = self.golem.clone() else {
+                    self.show_toast(GOLEM_MISSING_TEXT, cx);
+                    return;
+                };
                 if !self.checking_gates.insert(task_id.clone()) {
                     self.show_toast(format!("Already rechecking {name}"), cx);
                     return;
                 }
                 self.show_toast(format!("Rechecking the gate for {name}"), cx);
-                let Some(golem) = self.golem.clone() else {
-                    return;
-                };
                 let job = cx
                     .background_executor()
                     .spawn(async move { golem.run(action.command(), &task_id) });
@@ -826,7 +834,7 @@ impl BoardView {
             }
             _ => {
                 let Some(golem) = self.golem.clone() else {
-                    self.show_toast("Still looking for golem", cx);
+                    self.show_toast(GOLEM_MISSING_TEXT, cx);
                     return;
                 };
                 let backend = self.snapshot.tasks[&row.task_id].backend.clone();
@@ -859,6 +867,7 @@ impl BoardView {
 
     fn close_finished(&mut self, cx: &mut Context<Self>) {
         let Some(golem) = self.golem.clone() else {
+            self.show_toast(GOLEM_MISSING_TEXT, cx);
             return;
         };
         let task_ids = board::closable_task_ids(&self.snapshot);
@@ -944,7 +953,7 @@ impl BoardView {
                 group: "Board".to_string(),
                 command,
                 label,
-                key,
+                key: key.to_string(),
                 is_danger: false,
             });
         }
@@ -999,8 +1008,9 @@ impl BoardView {
             match key {
                 "d" => self.scroll_by(SCROLL_STEP),
                 "u" => self.scroll_by(-SCROLL_STEP),
-                _ => {}
+                _ => return,
             }
+            cx.notify();
             return;
         }
         if modifiers.alt {
@@ -1029,6 +1039,8 @@ impl BoardView {
             if matches!(key, KEY_ESCAPE | KEY_ENTER) || matches!(typed.as_str(), "?" | "q") {
                 self.is_showing_help = false;
             }
+        } else if key == "tab" && modifiers.shift {
+            self.move_tab(-1, cx);
         } else {
             self.handle_board_key(key, &typed, cx);
         }
@@ -2175,7 +2187,7 @@ impl BoardView {
                 } else {
                     (theme.fill, theme.text)
                 };
-                let key_chip = kbd(key_label(action), theme).when(is_primary, |this| {
+                let key_chip = kbd(&key_label(action), theme).when(is_primary, |this| {
                     this.bg(gpui::rgba(0xffffff38)).text_color(theme.on_accent)
                 });
                 div()
@@ -2678,7 +2690,7 @@ impl BoardView {
                             .truncate()
                             .child(item.label.clone()),
                     )
-                    .child(kbd(item.key, theme).when(is_current, |this| {
+                    .child(kbd(&item.key, theme).when(is_current, |this| {
                         this.bg(gpui::rgba(0xffffff38)).text_color(theme.on_accent)
                     })),
             );

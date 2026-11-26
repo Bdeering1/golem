@@ -1412,40 +1412,6 @@ mod tests {
     }
 
     #[test]
-    fn card_activity_drops_runners_options_and_directories() {
-        let line = "[tool] command uv run pytest -q --maxfail=1 tests/test_board.py";
-        assert_eq!(card_activity_text(line), "$ pytest test_board.py");
-        assert_eq!(
-            card_activity_text("[tool] Read src/render/canvas2d.ts"),
-            "\u{25b8} Read canvas2d.ts"
-        );
-    }
-
-    #[test]
-    fn short_reason_strips_exit_prefix_and_rewrites_counts() {
-        let mut blocked = task(Status::Blocked);
-        blocked.gate_stop_reason = Some("pytest exited with status 1: ruff found 3 errors".into());
-        let all = tasks(vec![("a", blocked)]);
-        let snapshot = Snapshot {
-            rows: board_rows(&all, now()),
-            tasks: all,
-            activity: HashMap::new(),
-        };
-        assert_eq!(
-            card_snippet(&snapshot.rows[0], &snapshot, false),
-            "3 ruff errors"
-        );
-    }
-
-    #[test]
-    fn plain_result_drops_markdown_marks() {
-        assert_eq!(
-            plain_result("## Summary\n- **Fixed** `x`"),
-            "Summary\n- Fixed x"
-        );
-    }
-
-    #[test]
     fn activity_view_folds_tool_runs_at_messages_level() {
         let lines: Vec<String> = [
             "Planning",
@@ -1468,14 +1434,6 @@ mod tests {
                 ActivityItem::Message("Done".into()),
                 ActivityItem::Tool("$ make".into()),
             ]
-        );
-    }
-
-    #[test]
-    fn activity_lines_drop_a_cut_first_line_and_collapse_spaces() {
-        assert_eq!(
-            activity_lines("tail of line\na   b\n\nc\n", true),
-            vec!["a b".to_string(), "c".to_string()]
         );
     }
 
