@@ -134,6 +134,7 @@ struct PaletteItem {
 #[derive(Default)]
 struct Palette {
     query: String,
+    caret: usize,
     index: usize,
 }
 
@@ -184,6 +185,7 @@ pub struct BoardView {
     selected_roots: HashMap<Column, String>,
     is_showing_done: bool,
     query: String,
+    query_caret: usize,
     input: Input,
     is_expanded: bool,
     /// A stopped task with a Result shows its activity as one counts line until opened.
@@ -378,6 +380,7 @@ impl BoardView {
             selected_roots: HashMap::new(),
             is_showing_done: false,
             query: String::new(),
+            query_caret: 0,
             input: Input::None,
             is_expanded: false,
             is_activity_open: false,
@@ -1484,6 +1487,18 @@ impl BoardView {
                 "q" => cx.quit(),
                 "v" => self.paste(cx),
                 KEY_BACKSPACE => self.clear_input(),
+                "left" | "right" => {
+                    let edge = if key == "left" { "home" } else { "end" };
+                    match self.palette.as_mut() {
+                        Some(palette) => {
+                            edit_input(&mut palette.query, &mut palette.caret, edge, "");
+                        }
+                        None if self.input == Input::Filter => {
+                            edit_input(&mut self.query, &mut self.query_caret, edge, "");
+                        }
+                        None => return,
+                    }
+                }
                 _ => return,
             }
             cx.notify();
@@ -1583,17 +1598,14 @@ impl BoardView {
                     self.run_command(item.command, window, cx);
                 }
             }
-            KEY_BACKSPACE => {
-                palette.query.pop();
-                palette.index = 0;
-                self.palette_scroll.scroll_to_item(0);
+            _ => {
+                let query_size = palette.query.len();
+                edit_input(&mut palette.query, &mut palette.caret, key, typed);
+                if palette.query.len() != query_size {
+                    palette.index = 0;
+                    self.palette_scroll.scroll_to_item(0);
+                }
             }
-            _ if is_printable(typed) => {
-                palette.query.push_str(typed);
-                palette.index = 0;
-                self.palette_scroll.scroll_to_item(0);
-            }
-            _ => {}
         }
     }
 
@@ -1610,10 +1622,7 @@ impl BoardView {
                 self.handle_board_key(key, typed, cx);
                 return;
             }
-            KEY_BACKSPACE => {
-                self.query.pop();
-            }
-            _ if is_printable(typed) => self.query.push_str(typed),
+            _ if edit_input(&mut self.query, &mut self.query_caret, key, typed) => {}
             _ => return,
         }
         self.show_matching_tab();
@@ -1650,7 +1659,7 @@ impl BoardView {
         };
         let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
         if let Some(palette) = self.palette.as_mut() {
-            palette.query.push_str(&text);
+            edit_input(&mut palette.query, &mut palette.caret, "", &text);
             palette.index = 0;
             return;
         }
@@ -1658,7 +1667,7 @@ impl BoardView {
             return;
         }
         self.input = Input::Filter;
-        self.query.push_str(&text);
+        edit_input(&mut self.query, &mut self.query_caret, "", &text);
         self.show_matching_tab();
     }
 
@@ -1882,19 +1891,58 @@ fn is_printable(typed: &str) -> bool {
     !typed.is_empty() && typed.chars().all(|char| !char.is_control())
 }
 
+/// Edits a hand-rolled input at its caret, which counts bytes from the end so clearing the
+/// text elsewhere leaves it valid. Returns whether the key edited or moved anything.
+fn edit_input(text: &mut String, caret: &mut usize, key: &str, typed: &str) -> bool {
+    *caret = (*caret).min(text.len());
+    let index = text.len() - *caret;
+    let previous = text[..index]
+        .char_indices()
+        .next_back()
+        .map(|(start, _)| start);
+    let next_size = text[index..].chars().next().map(char::len_utf8);
+    match key {
+        "left" => *caret = text.len() - previous.unwrap_or(index),
+        "right" => *caret -= next_size.unwrap_or(0),
+        "home" => *caret = text.len(),
+        "end" => *caret = 0,
+        KEY_BACKSPACE => {
+            if let Some(start) = previous {
+                text.remove(start);
+            }
+        }
+        "delete" => {
+            if next_size.is_some() {
+                text.remove(index);
+                *caret -= next_size.unwrap_or(0);
+            }
+        }
+        _ if is_printable(typed) => text.insert_str(index, typed),
+        _ => return false,
+    }
+    true
+}
+
 // ---- rendering ------------------------------------------------------------------------------
 
 impl BoardView {
-    /// Text being typed, scrolled to its end so the caret and the last characters stay in view.
+    /// Text being typed with its caret, scrolled just enough to keep the caret in view.
     fn editing_text(
         &self,
         id: &'static str,
-        text: String,
+        text: &str,
+        caret: usize,
         caret_height: f32,
         theme: &Theme,
     ) -> Stateful<Div> {
-        // Layout clamps the offset to the overflow, so this pins the end without measuring.
-        self.input_scroll.set_offset(point(px(-1e6), px(0.)));
+        let (before, after) = text.split_at(text.len() - caret.min(text.len()));
+        self.input_scroll.scroll_to_item(1);
+        let run = |text: &str| {
+            div()
+                .flex_none()
+                .whitespace_nowrap()
+                .child(text.to_string())
+        };
         div()
             .id(id)
             .min_w_0()
@@ -1902,7 +1950,7 @@ impl BoardView {
             .items_center()
             .overflow_x_scroll()
             .track_scroll(&self.input_scroll)
-            .child(div().flex_none().whitespace_nowrap().child(text))
+            .child(run(before))
             .child(
                 div()
                     .flex_none()
@@ -1910,6 +1958,7 @@ impl BoardView {
                     .h(px(caret_height))
                     .bg(theme.accent),
             )
+            .child(run(after))
     }
 
     fn render_header(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
@@ -1920,7 +1969,7 @@ impl BoardView {
                 .child("Filter")
                 .into_any_element()
         } else if is_filtering {
-            self.editing_text("query", self.query.clone(), 15., theme)
+            self.editing_text("query", &self.query, self.query_caret, 15., theme)
                 .into_any_element()
         } else {
             div()
@@ -2407,8 +2456,14 @@ impl BoardView {
             let command = task
                 .gate_stop_reason
                 .as_ref()
-                .and(task.gate.as_ref())
-                .map(|gate| format!("$ {gate}"));
+                .and(task.gate.clone())
+                .map(|gate| {
+                    let text = div()
+                        .font_family(MONO_FONT)
+                        .text_size(px(12.))
+                        .child(format!("$ {gate}"));
+                    Self::copyable("gate-command".into(), gate, text, theme, cx)
+                });
             let color = if row.status == Status::Blocked {
                 theme.orange
             } else {
@@ -2417,7 +2472,7 @@ impl BoardView {
             let mono = |text: Div| text.font_family(MONO_FONT).text_size(px(12.));
             body.push(
                 Self::callout(label, color, theme)
-                    .children(command.map(|command| mono(div()).child(command)))
+                    .children(command)
                     .child(self.clamped_text(
                         SECTION_STOP_REASON,
                         &stop_reason,
@@ -2477,7 +2532,7 @@ impl BoardView {
         let activity = self.render_activity(row, theme, cx);
         let session = self
             .is_showing_fields
-            .then(|| self.render_session(row, now, theme));
+            .then(|| self.render_session(row, now, theme, cx));
         let sections = if self.is_following {
             vec![Some(activity)]
         } else if row.status == Status::Running {
@@ -2691,7 +2746,45 @@ impl BoardView {
             })
     }
 
-    fn render_session(&self, row: &Row, now: DateTime<Local>, theme: &Theme) -> AnyElement {
+    /// A value with a Copy link that shows on hover, for paths, branches and commands.
+    fn copyable(
+        id: SharedString,
+        value: String,
+        content: Div,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        div()
+            .id(id.clone())
+            .group(id.clone())
+            .flex()
+            .items_baseline()
+            .gap(px(8.))
+            .child(content.min_w_0())
+            .child(
+                div()
+                    .id(SharedString::from(format!("{id}-copy")))
+                    .flex_none()
+                    .invisible()
+                    .group_hover(id, |style| style.visible())
+                    .text_size(px(11.5))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.accent)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(value.clone()));
+                        this.show_toast("Copied", cx);
+                    }))
+                    .child("Copy"),
+            )
+    }
+
+    fn render_session(
+        &self,
+        row: &Row,
+        now: DateTime<Local>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let mut grid = div().flex().flex_col().gap(px(4.)).text_size(px(12.5));
         let task = &self.snapshot.tasks[&row.task_id];
         let is_gate_in_callout = task.gate_stop_reason.is_some();
@@ -2714,15 +2807,17 @@ impl BoardView {
                             .text_color(theme.text_2)
                             .child(label),
                     )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .when(is_code, |this| {
-                                this.font_family(MONO_FONT).text_size(px(12.))
-                            })
-                            .child(value),
-                    ),
+                    .map(|this| {
+                        if !is_code {
+                            return this.child(div().flex_1().min_w_0().child(value));
+                        }
+                        let text = div()
+                            .font_family(MONO_FONT)
+                            .text_size(px(12.))
+                            .child(value.clone());
+                        let id = SharedString::from(format!("session-{label}"));
+                        this.child(Self::copyable(id, value, text, theme, cx).flex_1())
+                    }),
             );
         }
         Self::section("Session", theme)
@@ -3744,6 +3839,7 @@ impl BoardView {
         let query = palette
             .map(|palette| palette.query.clone())
             .unwrap_or_default();
+        let caret = palette.map_or(0, |palette| palette.caret);
         let current = palette.map_or(0, |palette| {
             palette.index.min(items.len().saturating_sub(1))
         });
@@ -3837,7 +3933,7 @@ impl BoardView {
                 .child("Search actions")
                 .into_any_element()
         } else {
-            self.editing_text("palette-query", query, 16., theme)
+            self.editing_text("palette-query", &query, caret, 16., theme)
                 .into_any_element()
         };
         self.scrim(theme)
@@ -4021,5 +4117,58 @@ impl Render for BoardView {
             root = root.child(self.render_error_detail(detail, &theme, cx));
         }
         root
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn edited(keys: &[(&str, &str)]) -> (String, usize) {
+        let mut text = String::new();
+        let mut caret = 0;
+        for (key, typed) in keys {
+            edit_input(&mut text, &mut caret, key, typed);
+        }
+        (text, caret)
+    }
+
+    #[test]
+    fn edit_input_edits_at_the_caret() {
+        let typed = |text| ("", text);
+        assert_eq!(
+            edited(&[typed("api"), ("left", ""), typed("X")]),
+            ("apXi".to_string(), 1)
+        );
+        assert_eq!(
+            edited(&[
+                typed("é1"),
+                ("left", ""),
+                ("left", ""),
+                ("delete", ""),
+                ("end", ""),
+                (KEY_BACKSPACE, "")
+            ]),
+            (String::new(), 0)
+        );
+        assert_eq!(
+            edited(&[
+                typed("abc"),
+                ("home", ""),
+                ("right", ""),
+                (KEY_BACKSPACE, ""),
+                typed("Z")
+            ]),
+            ("Zbc".to_string(), 2)
+        );
+    }
+
+    #[test]
+    fn edit_input_keeps_a_stale_caret_valid_after_clearing() {
+        let mut text = "abc".to_string();
+        let mut caret = 2;
+        text.clear();
+        edit_input(&mut text, &mut caret, "", "x");
+        assert_eq!((text.as_str(), caret), ("x", 0));
     }
 }
