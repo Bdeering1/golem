@@ -30,6 +30,7 @@ WAITING_FOR_ANSWER_REASON = "waiting for an answer in T3 Code"
 TERMINAL_ITEM_STATUSES = {"completed", "failed", "cancelled", "interrupted"}
 TERMINAL_RUN_STATUSES = {*TERMINAL_ITEM_STATUSES, "rolled_back"}
 COMPLETED_STATUS = "completed"
+CANCELLED_STATUS = "cancelled"
 SUBAGENT_ITEM_TYPE = "subagent"
 SESSION_ENDED_STATUSES = {"stopped", "error"}
 SESSION_STOPPED_REASON = "T3 Code stopped the session before its subagents finished"
@@ -380,6 +381,16 @@ def send_outcome(
     )
 
 
+def latest_kept_run(projection: ledger.JsonObject) -> ledger.JsonObject | None:
+    # T3 Code can cancel a queued run before it starts while an earlier run is still active.
+    runs = [
+        run
+        for run in json_objects(projection.get("runs"))
+        if run.get("status") != CANCELLED_STATUS or run.get("startedAt") is not None
+    ]
+    return max(runs, key=lambda run: cast("int", run["ordinal"]), default=None)
+
+
 def has_active_run(run: ledger.JsonObject | None) -> bool:
     return run is not None and run.get("status") not in TERMINAL_RUN_STATUSES
 
@@ -455,7 +466,7 @@ def wait_for_quiet_thread(
     # T3 Code runs a subagent's follow-up in a new run, which `thread send --wait` doesn't follow.
     while True:
         if projection is not None:
-            run = t3_code.latest_run(projection)
+            run = latest_kept_run(projection)
             if is_request_pending(projection):
                 return waiting_outcome(last_reply(projection, run))
             is_active = has_active_run(run)

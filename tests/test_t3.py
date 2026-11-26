@@ -54,6 +54,7 @@ FIRST_RUN_ENDED = {
 }
 LATER_RUN = {"id": LATER_RUN_ID, "ordinal": 2, "startedAt": SUBAGENT_ENDED_AT}
 LATER_RUN_ENDED = {**LATER_RUN, "status": "completed", "completedAt": LATER_RUN_ENDED_AT}
+CANCELLED_QUEUED_RUN = {"id": "queued-run", "ordinal": 3, "status": "cancelled"}
 RUNNING_SUBAGENT = {
     "id": "subagent",
     "runId": FIRST_RUN_ID,
@@ -454,10 +455,16 @@ def test_background_subagent_keeps_task_running_until_the_later_run_ends(
         projection(ENDED_SUBAGENT, runs=[FIRST_RUN_ENDED], sessions=[READY_SESSION]),
         # A session list without a live session doesn't end the wait while a run is active.
         projection(ENDED_SUBAGENT, runs=[FIRST_RUN_ENDED, {**LATER_RUN, "status": "running"}]),
+        # A queued run cancelled before it started doesn't end the wait or stand in for the result.
+        projection(
+            ENDED_SUBAGENT,
+            runs=[FIRST_RUN_ENDED, {**LATER_RUN, "status": "running"}, CANCELLED_QUEUED_RUN],
+            sessions=[READY_SESSION],
+        ),
         projection(
             ENDED_SUBAGENT,
             later_run_message(LATER_REPLY),
-            runs=[FIRST_RUN_ENDED, LATER_RUN_ENDED],
+            runs=[FIRST_RUN_ENDED, LATER_RUN_ENDED, CANCELLED_QUEUED_RUN],
             sessions=[READY_SESSION],
         ),
     ]
