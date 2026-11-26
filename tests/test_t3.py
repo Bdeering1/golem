@@ -54,7 +54,7 @@ FIRST_RUN_ENDED = {
 }
 LATER_RUN = {"id": LATER_RUN_ID, "ordinal": 2, "startedAt": SUBAGENT_ENDED_AT}
 LATER_RUN_ENDED = {**LATER_RUN, "status": "completed", "completedAt": LATER_RUN_ENDED_AT}
-CANCELLED_QUEUED_RUN = {"id": "queued-run", "ordinal": 3, "status": "cancelled"}
+CANCELLED_QUEUED_RUN = {"id": "queued-run", "ordinal": 3, "status": "cancelled", "startedAt": None}
 RUNNING_SUBAGENT = {
     "id": "subagent",
     "runId": FIRST_RUN_ID,
