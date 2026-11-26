@@ -177,6 +177,7 @@ pub struct BoardView {
     error_scroll: ScrollHandle,
     detail_scroll: ScrollHandle,
     palette_scroll: ScrollHandle,
+    input_scroll: ScrollHandle,
     tab: Column,
     selected_roots: HashMap<Column, String>,
     is_showing_done: bool,
@@ -198,6 +199,7 @@ pub struct BoardView {
     expanded_folds: HashSet<usize>,
     /// The task the details last showed; any other selection resets the per-task view.
     shown_root_id: Option<String>,
+    shown_task_id: Option<String>,
     is_error_copied: bool,
     /// The panel size render last asked AppKit for, so content changes resize it once.
     placed_size: Option<(f64, f64)>,
@@ -369,6 +371,7 @@ impl BoardView {
             error_scroll: ScrollHandle::new(),
             detail_scroll: ScrollHandle::new(),
             palette_scroll: ScrollHandle::new(),
+            input_scroll: ScrollHandle::new(),
             tab: Column::Review,
             selected_roots: HashMap::new(),
             is_showing_done: false,
@@ -384,6 +387,7 @@ impl BoardView {
             expanded_sections: HashSet::new(),
             expanded_folds: HashSet::new(),
             shown_root_id: None,
+            shown_task_id: None,
             is_error_copied: false,
             placed_size: None,
             pending: None,
@@ -766,22 +770,32 @@ impl BoardView {
         }
     }
 
-    /// Clears the view's per-task state only when another task is selected, so an extra
-    /// J at the end of the list or a repeated click keeps folds, Follow and scroll.
+    /// Clears the view's per-task state only when the shown task changes, so an extra J at
+    /// the end of the list or a repeated click keeps folds, Follow and scroll. A chain moving
+    /// to its next step keeps Follow but drops the old step's paused lines and folds.
     fn reset_view_if_task_changed(&mut self) {
-        let selected_root_id = self.selected_row().map(|row| row.root_id.clone());
-        if selected_root_id == self.shown_root_id {
+        let selected = self.selected_row();
+        let selected_root_id = selected.map(|row| row.root_id.clone());
+        let selected_task_id = selected.map(|row| row.task_id.clone());
+        if selected_task_id == self.shown_task_id {
             return;
         }
+        if selected_root_id != self.shown_root_id {
+            self.is_following = false;
+        }
         self.shown_root_id = selected_root_id;
-        self.is_following = false;
+        self.shown_task_id = selected_task_id;
         self.is_follow_paused = false;
         self.paused_lines.clear();
         self.expanded_sections.clear();
         self.expanded_folds.clear();
         self.is_activity_open = false;
         self.is_showing_earlier = false;
-        self.detail_scroll.set_offset(point(px(0.), px(0.)));
+        if self.is_following {
+            self.detail_scroll.scroll_to_bottom();
+        } else {
+            self.detail_scroll.set_offset(point(px(0.), px(0.)));
+        }
     }
 
     fn open_activity(&mut self) {
@@ -1848,6 +1862,33 @@ fn is_printable(typed: &str) -> bool {
 // ---- rendering ------------------------------------------------------------------------------
 
 impl BoardView {
+    /// Text being typed, scrolled to its end so the caret and the last characters stay in view.
+    fn editing_text(
+        &self,
+        id: &'static str,
+        text: String,
+        caret_height: f32,
+        theme: &Theme,
+    ) -> Stateful<Div> {
+        // Layout clamps the offset to the overflow, so this pins the end without measuring.
+        self.input_scroll.set_offset(point(px(-1e6), px(0.)));
+        div()
+            .id(id)
+            .min_w_0()
+            .flex()
+            .items_center()
+            .overflow_x_scroll()
+            .track_scroll(&self.input_scroll)
+            .child(div().flex_none().whitespace_nowrap().child(text))
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(1.5))
+                    .h(px(caret_height))
+                    .bg(theme.accent),
+            )
+    }
+
     fn render_header(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let is_filtering = self.input == Input::Filter;
         let filter_text: AnyElement = if self.query.is_empty() && !is_filtering {
@@ -1855,15 +1896,14 @@ impl BoardView {
                 .text_color(theme.text_3)
                 .child("Filter")
                 .into_any_element()
+        } else if is_filtering {
+            self.editing_text("query", self.query.clone(), 15., theme)
+                .into_any_element()
         } else {
             div()
-                .flex()
-                .items_center()
                 .min_w_0()
-                .child(div().truncate().child(self.query.clone()))
-                .when(is_filtering, |this| {
-                    this.child(div().w(px(1.5)).h(px(15.)).bg(theme.accent))
-                })
+                .truncate()
+                .child(self.query.clone())
                 .into_any_element()
         };
         let needing_count = self
@@ -3772,11 +3812,7 @@ impl BoardView {
                 .child("Search actions")
                 .into_any_element()
         } else {
-            div()
-                .flex()
-                .items_center()
-                .child(query)
-                .child(div().w(px(1.5)).h(px(16.)).bg(theme.accent))
+            self.editing_text("palette-query", query, 16., theme)
                 .into_any_element()
         };
         self.scrim(theme)
