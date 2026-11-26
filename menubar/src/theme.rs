@@ -23,7 +23,8 @@ pub struct Theme {
     pub fill: Hsla,
     pub accent: Hsla,
     pub accent_soft: Hsla,
-    /// The selected card; near-neutral so its filled quick action is the only strong blue.
+    /// The selected card; a muted blue, so it differs from hover's grey but its filled quick
+    /// action stays the only strong blue.
     pub selection: Hsla,
     /// Darker accent and red for filled controls, so white labels on them stay readable.
     pub accent_fill: Hsla,
@@ -65,7 +66,7 @@ impl Theme {
             fill: rgba(0x00000011).into(),
             accent: rgba(0x0a66e4ff).into(),
             accent_soft: rgba(0x0a66e41f).into(),
-            selection: rgba(0x3c4a641f).into(),
+            selection: rgba(0x2a5bb524).into(),
             accent_fill: rgba(0x0a66e4ff).into(),
             red_fill: rgba(0xd92d20ff).into(),
             changed: rgba(0x0a66e40f).into(),
@@ -159,7 +160,9 @@ pub fn status_icon(status: Status) -> &'static str {
 fn icon_body(path: &str) -> Option<&'static str> {
     Some(match path {
         "icons/scheduled.svg" => r#"<circle cx="8" cy="8" r="6.1"/><path d="M8 4.6V8l2.4 1.6"/>"#,
-        "icons/waiting.svg" => r#"<circle cx="8" cy="8" r="6.1" stroke-dasharray="2.4 2.4"/>"#,
+        "icons/waiting.svg" => {
+            r#"<circle cx="8" cy="8" r="6.1"/><path d="M6.6 5.9v4.2M9.4 5.9v4.2"/>"#
+        }
         "icons/running.svg" => {
             r#"<circle cx="8" cy="8" r="6.1"/><path d="M6.7 5.6v4.8L10.5 8z" fill="black"/>"#
         }

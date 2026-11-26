@@ -506,12 +506,7 @@ impl BoardView {
                 .count()
         };
         // The menu bar shows what Next counts, so it drops to zero once nothing needs you.
-        let needing_count = self
-            .snapshot
-            .rows
-            .iter()
-            .filter(|row| row.column != Column::Done && self.needs_you(row))
-            .count();
+        let needing_count = self.needing_count();
         let title = (needing_count > 0).then(|| format!(" {needing_count}"));
         self.tray_icon.set_title(title);
         let tooltip = format!(
@@ -626,6 +621,12 @@ impl BoardView {
         board::needs_you(&self.snapshot.tasks, row, Local::now())
     }
 
+    fn needing_count(&self) -> usize {
+        let rows = self.snapshot.rows.iter();
+        rows.filter(|row| row.column != Column::Done && self.needs_you(row))
+            .count()
+    }
+
     fn selected_activity(&mut self) -> Vec<String> {
         let Some(row) = self.selected_row().cloned() else {
             return Vec::new();
@@ -732,14 +733,18 @@ impl BoardView {
         {
             return;
         }
-        // A glance after a break should show the whole board, not a filter typed long ago.
-        if self
+        // A glance after a break should land on what needs you, not a filter typed long ago.
+        let is_after_break = self
             .hidden_at
-            .is_some_and(|hidden_at| hidden_at.elapsed() > FILTER_RESET_AFTER)
-        {
+            .is_some_and(|hidden_at| hidden_at.elapsed() > FILTER_RESET_AFTER);
+        if is_after_break {
             self.query.clear();
         }
         self.reload(cx);
+        let is_selection_idle = !self.selected_row().is_some_and(|row| self.needs_you(row));
+        if is_after_break && is_selection_idle && self.needing_count() > 0 {
+            self.next_attention(cx);
+        }
         let until = Instant::now() + CHANGE_HIGHLIGHT_DURATION;
         self.changed_until
             .values_mut()
@@ -1151,7 +1156,12 @@ impl BoardView {
             self.toggle_follow(cx);
             return;
         }
-        if action.is_confirmed() {
+        // Dismiss only confirms when it also cancels waiting steps, so C acts at once like Close.
+        let is_dismissing_alone = action == Action::Dismiss
+            && row.as_ref().is_some_and(|row| {
+                board::waiting_dependent_names(&self.snapshot.tasks, &row.task_id).is_empty()
+            });
+        if action.is_confirmed() && !is_dismissing_alone {
             let task_id = if action == Action::CloseAll {
                 None
             } else {
@@ -2389,7 +2399,10 @@ impl BoardView {
         let (snippet, snippet_color) = match (busy_action, action_error) {
             (Some(action), _) => (action.busy_text().to_string(), theme.text_2),
             (None, Some(error)) => (error.action.failed_text().to_string(), theme.red),
-            (None, None) if is_handled => (board::card_snippet(row, &self.snapshot), theme.text_3),
+            (None, None) if is_handled => (
+                format!("Picked up · {}", board::card_snippet(row, &self.snapshot)),
+                theme.text_3,
+            ),
             (None, None) => (board::card_snippet(row, &self.snapshot), theme.text_2),
         };
         let is_code = snippet.starts_with(board::SHELL_PROMPT)
@@ -2518,6 +2531,13 @@ impl BoardView {
                             .truncate()
                             .text_color(theme.text_3)
                             .child(board::repository_name(row).to_string()),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .mx(px(-2.5))
+                            .text_color(theme.text_3)
+                            .child("·"),
                     )
                     .child(
                         div()
