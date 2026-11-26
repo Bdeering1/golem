@@ -141,6 +141,8 @@ struct Toast {
     is_error: bool,
     /// The failed task a click on the toast opens.
     task_id: Option<String>,
+    /// The action whose failure the toast reports, which titles its error sheet.
+    action: Option<Action>,
 }
 
 /// The result of a background `golem` run: the toast text and whether it reports a failure.
@@ -427,14 +429,24 @@ impl BoardView {
         cx.notify();
     }
 
-    /// Highlights count down only while the panel shows, so changes made while it was closed
-    /// are still tinted when it opens.
+    /// Highlights count down only on screen: while the panel shows and in the current tab, so
+    /// another tab's changes keep its dot until it is opened.
     fn tick(&mut self, cx: &mut Context<Self>) {
         if !self.is_visible() {
             return;
         }
         let now = Instant::now();
-        self.changed_until.retain(|_, until| *until > now);
+        let unseen_until = now + CHANGE_HIGHLIGHT_DURATION;
+        let shown: HashSet<String> = (self.column_rows(self.tab).into_iter())
+            .map(|row| row.root_id.clone())
+            .collect();
+        let rows = &self.snapshot.rows;
+        self.changed_until.retain(|root_id, until| {
+            if !shown.contains(root_id) {
+                *until = unseen_until;
+            }
+            *until > now && rows.iter().any(|row| &row.root_id == root_id)
+        });
         cx.notify();
     }
 
@@ -690,7 +702,7 @@ impl BoardView {
     }
 
     fn show_toast(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
-        self.show_message(text, false, None, cx);
+        self.show_message(text, false, None, None, cx);
     }
 
     /// An error with no task to open stays until dismissed, since it's the only place to read it.
@@ -699,6 +711,7 @@ impl BoardView {
         text: impl Into<SharedString>,
         is_error: bool,
         task_id: Option<String>,
+        action: Option<Action>,
         cx: &mut Context<Self>,
     ) {
         let text = text.into();
@@ -716,6 +729,7 @@ impl BoardView {
             id: toast_id,
             is_error,
             task_id: task_id.clone(),
+            action,
         });
         let duration = match (is_error, &task_id) {
             (true, None) => return cx.notify(),
@@ -861,7 +875,11 @@ impl BoardView {
         match toast.task_id {
             Some(task_id) => self.open_task(&task_id, cx),
             None if toast.is_error => self.show_error_detail(ErrorDetail {
-                title: "Action failed",
+                title: toast
+                    .action
+                    .map(Action::failed_text)
+                    .filter(|title| !title.is_empty())
+                    .unwrap_or("Action failed"),
                 text: toast.text,
             }),
             None => {}
@@ -1148,7 +1166,10 @@ impl BoardView {
                         let name = row.map_or(task_id.as_str(), board::row_title).to_string();
                         this.show_toast(format!("{name}: {}", outcome.message), cx)
                     }
-                    _ => this.show_message(outcome.message, outcome.is_error, None, cx),
+                    _ => {
+                        let action = busy.first().map(|(_, action)| *action);
+                        this.show_message(outcome.message, outcome.is_error, None, action, cx)
+                    }
                 }
                 this.reload(cx);
             });
@@ -1172,6 +1193,7 @@ impl BoardView {
                 format!("{} for {name}", action.failed_text()),
                 true,
                 Some(task_id.to_string()),
+                Some(action),
                 cx,
             );
         }
@@ -1289,7 +1311,7 @@ impl BoardView {
                 match failures.first() {
                     Some(failure) => Outcome {
                         message: format!(
-                            "Close failed for {}: {failure}",
+                            "Couldn't close {}: {failure}",
                             board::counted_text(failures.len(), "task")
                         ),
                         is_error: true,
@@ -1986,7 +2008,9 @@ impl BoardView {
         let tabs = self.tabs().into_iter().map(|column| {
             let rows = self.column_rows(column);
             let is_current = column == self.tab;
-            let has_attention = rows.iter().any(|row| self.needs_you(row));
+            let has_news = rows
+                .iter()
+                .any(|row| self.changed_until.contains_key(&row.root_id));
             div()
                 .id(column.title())
                 .flex_1()
@@ -2024,7 +2048,7 @@ impl BoardView {
                         .text_color(theme.text_3)
                         .child(rows.len().to_string()),
                 )
-                .when(has_attention && !is_current, |this| {
+                .when(has_news && !is_current, |this| {
                     this.child(div().size(px(6.)).rounded_full().bg(theme.accent))
                 })
         });
@@ -2070,13 +2094,15 @@ impl BoardView {
             || (busy_action.is_none()
                 && action_error.is_none()
                 && board::is_tool_snippet(row, &self.snapshot));
-        let quick_action = (!self.is_expanded && busy_action.is_none() && self.tab != Column::Done)
-            .then(|| {
-                let actions = board::available_actions(&self.snapshot, Some(row));
-                board::primary_action(&self.snapshot, row, &actions)
-            })
-            .flatten()
-            .filter(|action| *action != Action::Watch);
+        let is_covered = self.palette.is_some() || self.is_sheet_open();
+        let quick_action =
+            (!self.is_expanded && !is_covered && busy_action.is_none() && self.tab != Column::Done)
+                .then(|| {
+                    let actions = board::available_actions(&self.snapshot, Some(row));
+                    board::primary_action(&self.snapshot, row, &actions)
+                })
+                .flatten()
+                .filter(|action| *action != Action::Watch);
         let root_id = row.root_id.clone();
         let card_id = SharedString::from(format!("card-{}", row.root_id));
         // Unselected rows reveal their action on hover, over the snippet, so no row loses width.
