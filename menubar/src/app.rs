@@ -40,6 +40,10 @@ const BOTTOM_BAR_HEIGHT: f32 = 37.0;
 const HELP_PANEL_HEIGHT: f64 = 545.0;
 const SMALL_SHEET_MAX_WIDTH: f32 = 440.0;
 const LOAD_ERROR_TITLE: &str = "Can't read the ledger";
+const ERROR_TEXT_MAX_HEIGHT: f32 = 220.0;
+const ERROR_LINE_STEP: f32 = 21.0;
+/// A page of the error text less two lines, so paging never skips a line.
+const ERROR_PAGE_STEP: f32 = ERROR_TEXT_MAX_HEIGHT - 2. * ERROR_LINE_STEP;
 const REPOSITORY_MAX_WIDTH: f32 = 120.0;
 const CARD_PITCH: f64 = 63.0;
 const EMPTY_LIST_HEIGHT: f64 = 90.0;
@@ -184,6 +188,8 @@ pub struct BoardView {
     expanded_sections: HashSet<&'static str>,
     /// Activity items, by index, whose folded tool calls were opened in place.
     expanded_folds: HashSet<usize>,
+    /// The task the details last showed; any other selection resets the per-task view.
+    shown_root_id: Option<String>,
     /// Set by E so the next render scrolls to the first section it expanded.
     is_revealing_full_text: bool,
     pending: Option<Pending>,
@@ -367,6 +373,7 @@ impl BoardView {
             is_showing_fields: false,
             expanded_sections: HashSet::new(),
             expanded_folds: HashSet::new(),
+            shown_root_id: None,
             is_revealing_full_text: false,
             pending: None,
             is_showing_help: false,
@@ -722,6 +729,16 @@ impl BoardView {
         }
     }
 
+    /// Follow, opened text and scroll belong to one task, so a new selection starts fresh.
+    fn reset_task_view(&mut self) {
+        self.is_following = false;
+        self.is_follow_paused = false;
+        self.paused_lines.clear();
+        self.expanded_sections.clear();
+        self.expanded_folds.clear();
+        self.detail_scroll.set_offset(point(px(0.), px(0.)));
+    }
+
     fn select(&mut self, root_id: String, cx: &mut Context<Self>) {
         self.selected_roots.insert(self.tab, root_id);
         self.expanded_sections.clear();
@@ -802,12 +819,10 @@ impl BoardView {
         };
         match toast.task_id {
             Some(task_id) => self.open_task(&task_id, cx),
-            None if toast.is_error => {
-                self.error_detail = Some(ErrorDetail {
-                    title: "Action failed",
-                    text: toast.text,
-                });
-            }
+            None if toast.is_error => self.show_error_detail(ErrorDetail {
+                title: "Action failed",
+                text: toast.text,
+            }),
             None => {}
         }
     }
@@ -816,10 +831,15 @@ impl BoardView {
         let Some(error) = self.load_error.clone() else {
             return;
         };
-        self.error_detail = Some(ErrorDetail {
+        self.show_error_detail(ErrorDetail {
             title: LOAD_ERROR_TITLE,
             text: error.into(),
         });
+    }
+
+    fn show_error_detail(&mut self, detail: ErrorDetail) {
+        self.error_scroll.set_offset(point(px(0.), px(0.)));
+        self.error_detail = Some(detail);
     }
 
     fn set_palette(&mut self, palette: Option<Palette>, cx: &mut Context<Self>) {
@@ -855,11 +875,13 @@ impl BoardView {
     }
 
     fn toggle_done(&mut self, cx: &mut Context<Self>) {
-        self.is_showing_done = !self.is_showing_done;
-        if self.is_showing_done {
-            self.tab = Column::Done;
-        } else if self.tab == Column::Done {
-            self.tab = Column::Review;
+        if !self.is_showing_done {
+            self.set_tab(Column::Done, cx);
+        } else {
+            self.is_showing_done = false;
+            if self.tab == Column::Done {
+                self.set_tab(Column::Review, cx);
+            }
         }
         self.place(false, cx);
         cx.notify();
@@ -1354,9 +1376,9 @@ impl BoardView {
             match key {
                 "d" | "u" if self.error_detail.is_some() => {
                     let delta = if key == "d" {
-                        SCROLL_STEP
+                        ERROR_PAGE_STEP
                     } else {
-                        -SCROLL_STEP
+                        -ERROR_PAGE_STEP
                     };
                     scroll_handle_by(&self.error_scroll, delta);
                 }
@@ -1397,12 +1419,12 @@ impl BoardView {
         } else if let Some(text) = self.error_detail.as_ref().map(|detail| detail.text.clone()) {
             match (key, typed.as_str()) {
                 (KEY_ESCAPE | KEY_ENTER, _) => self.error_detail = None,
-                (KEY_DOWN | "pagedown" | "space", _) | (_, "j") => {
-                    scroll_handle_by(&self.error_scroll, SCROLL_STEP);
+                (KEY_DOWN, _) | (_, "j") => scroll_handle_by(&self.error_scroll, ERROR_LINE_STEP),
+                (KEY_UP, _) | (_, "k") => scroll_handle_by(&self.error_scroll, -ERROR_LINE_STEP),
+                ("pagedown" | "space", _) => {
+                    scroll_handle_by(&self.error_scroll, ERROR_PAGE_STEP);
                 }
-                (KEY_UP | "pageup", _) | (_, "k") => {
-                    scroll_handle_by(&self.error_scroll, -SCROLL_STEP);
-                }
+                ("pageup", _) => scroll_handle_by(&self.error_scroll, -ERROR_PAGE_STEP),
                 (_, "c") => {
                     cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
                     self.error_detail = None;
@@ -3330,7 +3352,7 @@ impl BoardView {
                         div()
                             .id("error-text")
                             .mt(px(8.))
-                            .max_h(px(220.))
+                            .max_h(px(ERROR_TEXT_MAX_HEIGHT))
                             .overflow_y_scroll()
                             .track_scroll(&self.error_scroll)
                             .text_color(theme.text_2)
@@ -3801,6 +3823,11 @@ impl Render for BoardView {
         let theme = Theme::for_appearance(window.appearance());
         if !self.tabs().contains(&self.tab) {
             self.tab = Column::Review;
+        }
+        let selected_root_id = self.selected_row().map(|row| row.root_id.clone());
+        if selected_root_id != self.shown_root_id {
+            self.shown_root_id = selected_root_id;
+            self.reset_task_view();
         }
         let side = div()
             .flex()
