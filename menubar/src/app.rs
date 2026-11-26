@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::f32::consts::FRAC_PI_2;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -8,8 +9,8 @@ use futures::channel::mpsc::UnboundedReceiver;
 use gpui::{
     Animation, AnimationExt, AnyElement, BoxShadow, ClickEvent, ClipboardItem, Context, Div,
     ElementId, FocusHandle, FontWeight, Hsla, KeyDownEvent, ScrollEvent, ScrollHandle,
-    SharedString, Stateful, Subscription, Task, Window, div, linear_color_stop, linear_gradient,
-    point, prelude::*, pulsating_between, px, relative, svg,
+    SharedString, Stateful, Subscription, Task, Transformation, Window, div, linear_color_stop,
+    linear_gradient, point, prelude::*, pulsating_between, px, radians, relative, svg,
 };
 use notify::Watcher;
 use objc2::rc::Retained;
@@ -30,12 +31,14 @@ const PANEL_HEIGHT: f64 = 640.0;
 const MIN_PANEL_HEIGHT: f64 = 320.0;
 /// Collapsed-panel layout heights used to fit the panel to its longest group.
 const PANEL_CHROME_HEIGHT: f64 = 140.0;
+const LOAD_ERROR_HEIGHT: f64 = 25.0;
 const CARD_GAP: f32 = 2.0;
 /// The footer and the details action bar share a height so their top edges line up.
 const BOTTOM_BAR_HEIGHT: f32 = 37.0;
 /// The shortcuts sheet's height plus the footer below it; the palette uses it too.
 const HELP_PANEL_HEIGHT: f64 = 545.0;
 const SMALL_SHEET_MAX_WIDTH: f32 = 440.0;
+const LOAD_ERROR_TITLE: &str = "Can't read the ledger";
 const REPOSITORY_MAX_WIDTH: f32 = 120.0;
 const CARD_PITCH: f64 = 63.0;
 const EMPTY_LIST_HEIGHT: f64 = 90.0;
@@ -105,6 +108,11 @@ enum Command {
     Quit,
 }
 
+struct ErrorDetail {
+    title: &'static str,
+    text: SharedString,
+}
+
 struct PaletteItem {
     group: String,
     command: Command,
@@ -148,7 +156,7 @@ pub struct BoardView {
     snapshot: Snapshot,
     load_error: Option<String>,
     /// The full text of an error toast that has no task to open, shown in its own sheet.
-    error_detail: Option<SharedString>,
+    error_detail: Option<ErrorDetail>,
     /// Whether any ledger read has succeeded, so an empty list can mean "nothing" rather than "unknown".
     has_loaded: bool,
     golem: Option<Arc<Golem>>,
@@ -586,7 +594,12 @@ impl BoardView {
         } else {
             MIN_PANEL_HEIGHT
         };
-        (PANEL_CHROME_HEIGHT + list_height).clamp(minimum_height, PANEL_HEIGHT)
+        let load_error_height = if self.load_error.is_some() {
+            LOAD_ERROR_HEIGHT
+        } else {
+            0.
+        };
+        (PANEL_CHROME_HEIGHT + load_error_height + list_height).clamp(minimum_height, PANEL_HEIGHT)
     }
 
     /// Moves the panel under the menu bar item, then shows it if asked. AppKit applies the
@@ -781,7 +794,6 @@ impl BoardView {
         cx.notify();
     }
 
-    /// Dismisses the toast and opens the task it reports on, if any.
     /// Dismisses the toast and opens its task, or its full text when there's no task.
     fn open_toast_details(&mut self, cx: &mut Context<Self>) {
         let Some(toast) = self.toast.take() else {
@@ -789,9 +801,24 @@ impl BoardView {
         };
         match toast.task_id {
             Some(task_id) => self.open_task(&task_id, cx),
-            None if toast.is_error => self.error_detail = Some(toast.text),
+            None if toast.is_error => {
+                self.error_detail = Some(ErrorDetail {
+                    title: "Action failed",
+                    text: toast.text,
+                });
+            }
             None => {}
         }
+    }
+
+    fn show_load_error(&mut self) {
+        let Some(error) = self.load_error.clone() else {
+            return;
+        };
+        self.error_detail = Some(ErrorDetail {
+            title: LOAD_ERROR_TITLE,
+            text: error.into(),
+        });
     }
 
     fn set_palette(&mut self, palette: Option<Palette>, cx: &mut Context<Self>) {
@@ -879,28 +906,27 @@ impl BoardView {
         if self.is_following {
             return ActivityLevel::All;
         }
-        let has_result = self.snapshot.tasks[&row.task_id]
-            .result
-            .as_deref()
-            .is_some_and(|result| !result.trim().is_empty());
         match self.activity_level {
-            ActivityLevel::Messages if row.status != Status::Running && has_result => {
-                ActivityLevel::Summary
-            }
+            ActivityLevel::Messages if self.is_summarised(row) => ActivityLevel::Summary,
             level => level,
         }
     }
 
-    /// T moves on from the level shown, so a summarised task goes straight to All.
+    fn is_summarised(&self, row: &Row) -> bool {
+        let has_result = self.snapshot.tasks[&row.task_id]
+            .result
+            .as_deref()
+            .is_some_and(|result| !result.trim().is_empty());
+        row.status != Status::Running && has_result
+    }
+
+    /// T moves on from the level shown, skipping Messages where it would show as Summary.
     fn next_activity_level(&self) -> ActivityLevel {
         let Some(row) = self.selected_row() else {
             return self.activity_level.next();
         };
-        let shown_level = self.shown_activity_level(row);
-        let is_summarised =
-            shown_level == ActivityLevel::Summary && self.activity_level == ActivityLevel::Messages;
-        match shown_level {
-            ActivityLevel::Summary if is_summarised => ActivityLevel::All,
+        match self.shown_activity_level(row) {
+            ActivityLevel::Summary if self.is_summarised(row) => ActivityLevel::All,
             level => level.next(),
         }
     }
@@ -1367,7 +1393,7 @@ impl BoardView {
             if matches!(key, KEY_ESCAPE | KEY_ENTER) || matches!(typed.as_str(), "?" | "q") {
                 self.set_help(false, cx);
             }
-        } else if let Some(text) = self.error_detail.clone() {
+        } else if let Some(text) = self.error_detail.as_ref().map(|detail| detail.text.clone()) {
             match (key, typed.as_str()) {
                 (KEY_ESCAPE | KEY_ENTER, _) => self.error_detail = None,
                 (KEY_DOWN | "pagedown" | "space", _) | (_, "j") => {
@@ -1552,6 +1578,7 @@ impl BoardView {
             {
                 self.open_toast_details(cx);
             }
+            (_, "d") if self.load_error.is_some() => self.show_load_error(),
             (_, "q") => self.hide(cx),
             _ => {
                 self.request_key(typed, cx);
@@ -1804,17 +1831,39 @@ impl BoardView {
                             }),
                     ),
             )
-            .when_some(self.load_error.clone(), |this, error| {
+            .when(self.load_error.is_some(), |this| {
                 this.child(
                     div()
-                        .line_clamp(2)
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
                         .text_size(px(11.5))
-                        .text_color(theme.orange)
-                        .child(if self.has_loaded {
-                            format!("Can't read the ledger, showing the last good state: {error}")
-                        } else {
-                            format!("Can't read the ledger: {error}")
-                        }),
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(theme.orange)
+                                .child(if self.has_loaded {
+                                    "Can't read the ledger, showing the last good state"
+                                } else {
+                                    LOAD_ERROR_TITLE
+                                }),
+                        )
+                        .child(
+                            div()
+                                .id("load-error-details")
+                                .flex()
+                                .items_center()
+                                .gap(px(5.))
+                                .text_color(theme.accent)
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.show_load_error();
+                                    cx.notify();
+                                }))
+                                .child("Details")
+                                .child(kbd("D", theme)),
+                        ),
                 )
             })
             .into_any_element()
@@ -2606,20 +2655,27 @@ impl BoardView {
                     );
                 }
                 ActivityItem::Tool(text) => log = log.child(tool_line(text, theme)),
-                ActivityItem::Fold(tools) if self.expanded_folds.contains(&index) => {
-                    log = log.children(tools.into_iter().map(|text| tool_line(text, theme)));
-                }
                 ActivityItem::Fold(tools) => {
+                    let is_open = self.expanded_folds.contains(&index);
+                    let chevron = icon(theme::ICON_CHEVRON, 8., theme.text_3)
+                        .when(is_open, |this| {
+                            this.with_transformation(Transformation::rotate(radians(FRAC_PI_2)))
+                        });
                     log = log.child(
                         fold_row(("activity-fold", index), theme)
                             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                this.expanded_folds.insert(index);
+                                if !this.expanded_folds.remove(&index) {
+                                    this.expanded_folds.insert(index);
+                                }
                                 cx.notify();
                             }))
                             .items_center()
                             .child(board::counted_text(tools.len(), "tool call"))
-                            .child(icon(theme::ICON_CHEVRON, 8., theme.text_3)),
+                            .child(chevron),
                     );
+                    if is_open {
+                        log = log.children(tools.into_iter().map(|text| tool_line(text, theme)));
+                    }
                 }
                 ActivityItem::Summary(text) => {
                     log = log.child(
@@ -3162,11 +3218,11 @@ impl BoardView {
     /// The full text of an error that has no task, which the one-line toast cuts short.
     fn render_error_detail(
         &self,
-        text: &SharedString,
+        detail: &ErrorDetail,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let copied_text = text.to_string();
+        let copied_text = detail.text.to_string();
         self.scrim(theme)
             .id("error-detail")
             .occlude()
@@ -3186,7 +3242,7 @@ impl BoardView {
                             .text_size(px(14.))
                             .font_weight(FontWeight::BOLD)
                             .child(icon(theme::status_icon(Status::Failed), 13., theme.red))
-                            .child("Action failed"),
+                            .child(detail.title),
                     )
                     .child(
                         div()
@@ -3196,7 +3252,7 @@ impl BoardView {
                             .overflow_y_scroll()
                             .track_scroll(&self.error_scroll)
                             .text_color(theme.text_2)
-                            .child(text.clone()),
+                            .child(detail.text.clone()),
                     )
                     .child(
                         div()
@@ -3713,8 +3769,8 @@ impl Render for BoardView {
             root = root.child(self.render_confirm(pending, &theme, cx));
         } else if self.is_showing_help {
             root = root.child(self.render_help(&theme, cx));
-        } else if let Some(text) = &self.error_detail {
-            root = root.child(self.render_error_detail(text, &theme, cx));
+        } else if let Some(detail) = &self.error_detail {
+            root = root.child(self.render_error_detail(detail, &theme, cx));
         }
         root
     }
