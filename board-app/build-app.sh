@@ -6,13 +6,13 @@ cargo build --release
 app="target/release/Golem Board.app"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS"
-cp target/release/golem-menubar "$app/Contents/MacOS/golem-menubar"
+cp target/release/golem-board-app "$app/Contents/MacOS/golem-board-app"
 cat > "$app/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleExecutable</key><string>golem-menubar</string>
+  <key>CFBundleExecutable</key><string>golem-board-app</string>
   <key>CFBundleIdentifier</key><string>golem.board</string>
   <key>CFBundleName</key><string>Golem Board</string>
   <key>CFBundlePackageType</key><string>APPL</string>
