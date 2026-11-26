@@ -1614,6 +1614,8 @@ impl BoardView {
                 } else {
                     (HashSet::new(), HashSet::new())
                 };
+                self.is_activity_open = is_expanding;
+                self.is_showing_earlier = is_expanding;
                 self.is_revealing_full_text = is_expanding;
                 self.is_following = false;
                 if !self.is_expanded {
@@ -2549,11 +2551,13 @@ impl BoardView {
         let is_expanded = self.expanded_sections.contains(section);
         let is_long = is_long_text(text, line_limit);
         let is_clamped = is_long && !is_expanded;
-        // line_clamp limits each paragraph separately, so a clamped preview joins them.
-        let shown_text = if is_clamped {
-            text.split_whitespace().collect::<Vec<_>>().join(" ")
-        } else {
-            text.to_string()
+        // Diagnostics keep their lines, each cut to one; prose joins its paragraphs, because
+        // line_clamp limits each paragraph separately.
+        let is_diagnostic = matches!(section, SECTION_STOP_REASON | SECTION_ACTION_ERROR);
+        let shown_text = match (is_clamped, is_diagnostic) {
+            (false, _) => text.to_string(),
+            (true, true) => text.lines().take(line_limit).collect::<Vec<_>>().join("\n"),
+            (true, false) => text.split_whitespace().collect::<Vec<_>>().join(" "),
         };
         div()
             .flex()
@@ -2561,7 +2565,8 @@ impl BoardView {
             .gap(px(3.))
             .child(
                 style(div())
-                    .when(is_clamped, |this| {
+                    .when(is_clamped && is_diagnostic, |this| this.truncate())
+                    .when(is_clamped && !is_diagnostic, |this| {
                         this.line_clamp(line_limit).text_ellipsis()
                     })
                     .child(code_marked_text(&shown_text)),

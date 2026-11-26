@@ -63,13 +63,13 @@ impl Theme {
             toast: rgba(0xffffffff).into(),
             on_accent: rgba(0xffffffff).into(),
             scrim: rgba(0x00000038).into(),
-            red: rgba(0xd92d20ff).into(),
-            orange: rgba(0xc26a00ff).into(),
-            cyan: rgba(0x0e7c99ff).into(),
+            red: rgba(0xc4271bff).into(),
+            orange: rgba(0x9e5600ff).into(),
+            cyan: rgba(0x0b6c86ff).into(),
             purple: rgba(0x8b46c9ff).into(),
-            green: rgba(0x1b8f3fff).into(),
-            gray: rgba(0x7c7c82ff).into(),
-            indigo: rgba(0x6b6fb0ff).into(),
+            green: rgba(0x177a36ff).into(),
+            gray: rgba(0x6b6b71ff).into(),
+            indigo: rgba(0x5a5ea3ff).into(),
         }
     }
 
