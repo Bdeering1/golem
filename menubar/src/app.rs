@@ -136,6 +136,7 @@ enum Command {
     ToggleSession,
     /// Copies the selected task's Session field with this label.
     CopyField(&'static str),
+    CopyError,
     Quit,
 }
 
@@ -212,6 +213,8 @@ pub struct BoardView {
     is_showing_done: bool,
     query: String,
     query_caret: usize,
+    /// ⌘A selected the active input's text, so the next edit replaces it.
+    is_input_selected: bool,
     input: Input,
     is_expanded: bool,
     /// A stopped task with a Result shows its activity as one counts line until opened.
@@ -410,6 +413,7 @@ impl BoardView {
             is_showing_done: false,
             query: String::new(),
             query_caret: 0,
+            is_input_selected: false,
             input: Input::None,
             is_expanded: false,
             is_activity_open: false,
@@ -971,6 +975,7 @@ impl BoardView {
     fn set_palette(&mut self, palette: Option<Palette>, cx: &mut Context<Self>) {
         let was_open = self.palette.is_some();
         self.palette = palette;
+        self.is_input_selected = false;
         self.palette_scroll.scroll_to_item(0);
         if was_open != self.palette.is_some() {
             self.place(false, cx);
@@ -1413,6 +1418,20 @@ impl BoardView {
             .map(|(_, value)| value)
     }
 
+    /// The selected task's full failure message: its last action's error, else why its
+    /// gate or setup stopped it.
+    fn selected_error(&self) -> Option<String> {
+        let row = self.selected_row()?;
+        if let Some(error) = self.action_errors.get(&row.task_id) {
+            return Some(error.message.clone());
+        }
+        let task = &self.snapshot.tasks[&row.task_id];
+        task.gate_stop_reason
+            .clone()
+            .or(task.setup_failure_reason.clone())
+            .filter(|reason| !reason.is_empty())
+    }
+
     fn palette_items(&self) -> Vec<PaletteItem> {
         let mut items = Vec::new();
         if let Some(row) = self.selected_row() {
@@ -1445,10 +1464,15 @@ impl BoardView {
                 "Show session info"
             };
             let details_key = if self.is_expanded { "esc" } else { "\u{23ce}" };
-            let copy_items = COPYABLE_FIELDS
-                .into_iter()
-                .filter(|(field, _)| self.selected_field(field).is_some())
-                .map(|(field, text)| (Command::CopyField(field), text.to_string(), ""));
+            let copy_error = self
+                .selected_error()
+                .map(|_| (Command::CopyError, "Copy error".to_string(), ""));
+            let copy_items = copy_error.into_iter().chain(
+                COPYABLE_FIELDS
+                    .into_iter()
+                    .filter(|(field, _)| self.selected_field(field).is_some())
+                    .map(|(field, text)| (Command::CopyField(field), text.to_string(), "")),
+            );
             let view_items = [
                 (
                     Command::ToggleDetails,
@@ -1521,6 +1545,12 @@ impl BoardView {
                     self.show_toast("Copied", cx);
                 }
             }
+            Command::CopyError => {
+                if let Some(message) = self.selected_error() {
+                    cx.write_to_clipboard(ClipboardItem::new_string(message));
+                    self.show_toast("Copied", cx);
+                }
+            }
             Command::Quit => cx.quit(),
         }
         self.focus_handle.focus(window, cx);
@@ -1530,6 +1560,9 @@ impl BoardView {
     // ---- keyboard ---------------------------------------------------------------------------
 
     fn handle_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.is_none() && self.input != Input::Filter {
+            self.is_input_selected = false;
+        }
         let keystroke = &event.keystroke;
         let modifiers = keystroke.modifiers;
         let key = keystroke.key.as_str();
@@ -1549,17 +1582,11 @@ impl BoardView {
                 "q" => cx.quit(),
                 "v" => self.paste(cx),
                 KEY_BACKSPACE => self.clear_input(),
-                "left" | "right" => {
-                    let edge = if key == "left" { "home" } else { "end" };
-                    match self.palette.as_mut() {
-                        Some(palette) => {
-                            edit_input(&mut palette.query, &mut palette.caret, edge, "");
-                        }
-                        None if self.input == Input::Filter => {
-                            edit_input(&mut self.query, &mut self.query_caret, edge, "");
-                        }
-                        None => return,
-                    }
+                "left" | "right" if self.palette.is_some() || self.input == Input::Filter => {
+                    self.edit_active_input(if key == "left" { "home" } else { "end" }, "");
+                }
+                "a" if self.palette.is_some() || self.input == Input::Filter => {
+                    self.is_input_selected = true;
                 }
                 _ => return,
             }
@@ -1661,9 +1688,13 @@ impl BoardView {
                 }
             }
             _ => {
-                let query_size = palette.query.len();
-                edit_input(&mut palette.query, &mut palette.caret, key, typed);
-                if palette.query.len() != query_size {
+                let query = palette.query.clone();
+                self.edit_active_input(key, typed);
+                if let Some(palette) = self
+                    .palette
+                    .as_mut()
+                    .filter(|palette| palette.query != query)
+                {
                     palette.index = 0;
                     self.palette_scroll.scroll_to_item(0);
                 }
@@ -1684,7 +1715,7 @@ impl BoardView {
                 self.handle_board_key(key, typed, cx);
                 return;
             }
-            _ if edit_input(&mut self.query, &mut self.query_caret, key, typed) => {}
+            _ if self.edit_active_input(key, typed) => {}
             _ => return,
         }
         self.show_matching_tab();
@@ -1714,23 +1745,52 @@ impl BoardView {
         }
     }
 
+    /// Edits the active input, the palette's search or else the filter. After ⌘A the next
+    /// typed character, paste or delete replaces the whole text, and arrows go to an end.
+    fn edit_active_input(&mut self, key: &str, typed: &str) -> bool {
+        let is_replacing = std::mem::take(&mut self.is_input_selected);
+        let (text, caret) = match self.palette.as_mut() {
+            Some(palette) => (&mut palette.query, &mut palette.caret),
+            None => (&mut self.query, &mut self.query_caret),
+        };
+        if is_replacing {
+            match key {
+                KEY_BACKSPACE | "delete" => {
+                    text.clear();
+                    return true;
+                }
+                "left" | "home" => {
+                    *caret = text.len();
+                    return true;
+                }
+                "right" | "end" => {
+                    *caret = 0;
+                    return true;
+                }
+                _ if is_printable(typed) => text.clear(),
+                _ => {}
+            }
+        }
+        edit_input(text, caret, key, typed)
+    }
+
     /// Pastes the clipboard's text, on one line, into the palette search or the filter.
     fn paste(&mut self, cx: &mut Context<Self>) {
         let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
             return;
         };
         let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
-        if let Some(palette) = self.palette.as_mut() {
-            edit_input(&mut palette.query, &mut palette.caret, "", &text);
-            palette.index = 0;
+        if self.palette.is_none() && self.is_sheet_open() {
             return;
         }
-        if self.is_sheet_open() {
-            return;
+        if self.palette.is_none() {
+            self.input = Input::Filter;
         }
-        self.input = Input::Filter;
-        edit_input(&mut self.query, &mut self.query_caret, "", &text);
-        self.show_matching_tab();
+        self.edit_active_input("", &text);
+        match self.palette.as_mut() {
+            Some(palette) => palette.index = 0,
+            None => self.show_matching_tab(),
+        }
     }
 
     fn handle_board_key(&mut self, key: &str, typed: &str, cx: &mut Context<Self>) {
@@ -1997,10 +2057,12 @@ impl BoardView {
         let caret_height = font_size + 2.;
         let (before, after) = text.split_at(text.len() - caret.min(text.len()));
         self.input_scroll.scroll_to_item(1);
+        let is_selected = self.is_input_selected && !text.is_empty();
         let run = |text: &str| {
             div()
                 .flex_none()
                 .whitespace_nowrap()
+                .when(is_selected, |this| this.bg(theme.accent_soft))
                 .child(text.to_string())
         };
         div()
@@ -2023,7 +2085,7 @@ impl BoardView {
                     .flex_none()
                     .w(px(1.5))
                     .h(px(caret_height))
-                    .bg(theme.accent),
+                    .when(!is_selected, |this| this.bg(theme.accent)),
             )
             .child(run(after))
     }
@@ -2040,6 +2102,7 @@ impl BoardView {
             .text_system()
             .shape_line(text.clone().into(), font_size, &[run], None);
         let caret = text.len() - line.closest_index_for_x(x).min(text.len());
+        self.is_input_selected = false;
         match self.palette.as_mut() {
             Some(palette) => palette.caret = caret,
             None => self.query_caret = caret,
@@ -2104,6 +2167,7 @@ impl BoardView {
                             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                                 if this.input != Input::Filter {
                                     this.query_caret = 0;
+                                    this.is_input_selected = false;
                                 }
                                 this.input = Input::Filter;
                                 cx.notify();
@@ -2576,36 +2640,48 @@ impl BoardView {
             };
             let mono = |text: Div| text.font_family(MONO_FONT).text_size(px(12.));
             body.push(
-                Self::callout(label, color, theme)
-                    .children(command)
-                    .child(self.clamped_text(
-                        SECTION_STOP_REASON,
-                        &stop_reason,
-                        CALLOUT_LINE_LIMIT,
-                        mono,
-                        theme,
-                        cx,
-                    ))
-                    .into_any_element(),
+                self.callout(
+                    label,
+                    color,
+                    Some(("stop-reason", stop_reason.clone())),
+                    theme,
+                    cx,
+                )
+                .children(command)
+                .child(self.clamped_text(
+                    SECTION_STOP_REASON,
+                    &stop_reason,
+                    CALLOUT_LINE_LIMIT,
+                    mono,
+                    theme,
+                    cx,
+                ))
+                .into_any_element(),
             );
         }
         if let Some(error) = self.action_errors.get(&row.task_id) {
             body.push(
-                Self::callout(error.action.failed_text(), theme.red, theme)
-                    .child(self.clamped_text(
-                        SECTION_ACTION_ERROR,
-                        &sentence_case(&error.message),
-                        CALLOUT_LINE_LIMIT,
-                        |text| text,
-                        theme,
-                        cx,
-                    ))
-                    .into_any_element(),
+                self.callout(
+                    error.action.failed_text(),
+                    theme.red,
+                    Some(("action-error", error.message.clone())),
+                    theme,
+                    cx,
+                )
+                .child(self.clamped_text(
+                    SECTION_ACTION_ERROR,
+                    &sentence_case(&error.message),
+                    CALLOUT_LINE_LIMIT,
+                    |text| text,
+                    theme,
+                    cx,
+                ))
+                .into_any_element(),
             );
         }
         if board::is_stuck(row, &task, now) {
             body.push(
-                Self::callout("Stuck", theme.orange, theme)
+                self.callout("Stuck", theme.orange, None, theme, cx)
                     .child(board::waiting_reason_text(row, &self.snapshot))
                     .into_any_element(),
             );
@@ -2902,7 +2978,6 @@ impl BoardView {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        let is_copied = self.copied_id.as_ref() == Some(&id);
         div()
             .id(id.clone())
             .group(id.clone())
@@ -2910,23 +2985,33 @@ impl BoardView {
             .items_baseline()
             .gap(px(8.))
             .child(content.min_w_0())
-            .child(
-                div()
-                    .id(SharedString::from(format!("{id}-copy")))
-                    .flex_none()
-                    .when(!is_copied, |this| {
-                        this.invisible()
-                            .group_hover(id.clone(), |style| style.visible())
-                    })
-                    .text_size(px(11.5))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme.accent)
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        cx.write_to_clipboard(ClipboardItem::new_string(value.clone()));
-                        this.mark_copied(id.clone(), cx);
-                    }))
-                    .child(if is_copied { "Copied" } else { "Copy" }),
-            )
+            .child(self.copy_link(id, value, theme, cx))
+    }
+
+    /// A Copy link that shows while its `group` is hovered, and reads Copied once clicked.
+    fn copy_link(
+        &self,
+        group: SharedString,
+        value: String,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let is_copied = self.copied_id.as_ref() == Some(&group);
+        div()
+            .id(SharedString::from(format!("{group}-copy")))
+            .flex_none()
+            .when(!is_copied, |this| {
+                this.invisible()
+                    .group_hover(group.clone(), |style| style.visible())
+            })
+            .text_size(px(11.5))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(theme.accent)
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(value.clone()));
+                this.mark_copied(group.clone(), cx);
+            }))
+            .child(if is_copied { "Copied" } else { "Copy" })
     }
 
     /// Shows "Copied" on the link that was clicked, briefly, where the eye already is.
@@ -3170,8 +3255,19 @@ impl BoardView {
     }
 
     /// A boxed notice with a coloured edge and an uppercase label; callers add the body.
-    fn callout(label: &str, color: Hsla, theme: &Theme) -> Div {
+    /// `copy` puts a Copy link for the full message, with an id, beside the label.
+    fn callout(
+        &self,
+        label: &str,
+        color: Hsla,
+        copy: Option<(&'static str, String)>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let group = copy.as_ref().map(|(id, _)| SharedString::from(*id));
+        let copy_link = copy.map(|(id, message)| self.copy_link(id.into(), message, theme, cx));
         div()
+            .when_some(group, |this, group| this.group(group))
             .flex()
             .flex_col()
             .gap(px(3.))
@@ -3184,10 +3280,17 @@ impl BoardView {
             .border_color(color)
             .child(
                 div()
-                    .text_size(px(10.5))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.text_2)
-                    .child(label.to_uppercase()),
+                    .flex()
+                    .justify_between()
+                    .items_baseline()
+                    .child(
+                        div()
+                            .text_size(px(10.5))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.text_2)
+                            .child(label.to_uppercase()),
+                    )
+                    .children(copy_link),
             )
     }
 
