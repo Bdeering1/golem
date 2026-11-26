@@ -453,7 +453,8 @@ impl BoardView {
         let _ = self.tray_icon.set_tooltip(Some(tooltip));
     }
 
-    /// Flashes status changes and keeps the selected task in view when it moves to another group.
+    /// Tints changed cards and keeps the selected task in view when it moves to another group;
+    /// other tasks' changes show only as the tint, the tab dot and the Next count.
     fn note_changes(&mut self, previous: &Snapshot, cx: &mut Context<Self>) {
         if previous.tasks.is_empty() {
             return;
@@ -464,7 +465,6 @@ impl BoardView {
             .map(|row| (row.root_id.as_str(), (row.column, row.status)))
             .collect();
         let until = Instant::now() + CHANGE_HIGHLIGHT_DURATION;
-        let mut changes = Vec::new();
         for row in &self.snapshot.rows {
             let position = (row.column, row.status);
             let earlier = before.get(row.root_id.as_str());
@@ -473,8 +473,6 @@ impl BoardView {
             }
             if earlier.is_some_and(|(_, status)| *status != row.status) {
                 self.action_errors.remove(&row.task_id);
-                let name = board::task_display_name(&self.snapshot.tasks, &row.task_id);
-                changes.push(format!("{name} {}", row.status.name()));
             }
         }
         let selected = self.selected_roots.get(&self.tab).cloned();
@@ -496,10 +494,6 @@ impl BoardView {
                 ),
                 cx,
             );
-            return;
-        }
-        if !changes.is_empty() {
-            self.show_toast(changes.join(", "), cx);
         }
     }
 
@@ -615,7 +609,7 @@ impl BoardView {
         } else {
             0.
         };
-        let toast_height = if self.toast.is_some() {
+        let toast_height = if self.toast.as_ref().is_some_and(|toast| toast.is_error) {
             TOAST_ROW_HEIGHT
         } else {
             0.
@@ -1585,25 +1579,6 @@ impl BoardView {
             (_, "n") => self.next_attention(cx),
             (_, "a") => self.toggle_done(cx),
             (_, "?") => self.set_help(true, cx),
-            (_, "t") => {
-                self.is_following = false;
-                let fold_indexes = self.fold_indexes();
-                let is_summary_shown = !self.is_activity_open
-                    && self
-                        .selected_row()
-                        .is_some_and(|row| self.is_summarised(row));
-                if is_summary_shown {
-                    self.open_activity();
-                    self.expanded_folds = fold_indexes;
-                } else if self.expanded_folds == fold_indexes {
-                    self.expanded_folds.clear();
-                } else {
-                    self.expanded_folds = fold_indexes;
-                }
-                if !self.is_expanded {
-                    self.set_expanded(true, cx);
-                }
-            }
             (_, "e") => {
                 let fold_indexes = self.fold_indexes();
                 let is_expanding = self.is_following
@@ -3128,12 +3103,31 @@ impl BoardView {
             .px(px(7.))
             .border_t_1()
             .border_color(theme.line)
-            .child(
-                Self::footer_button("toggle-done", theme)
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_done(cx)))
-                    .child(done_label),
+            .map(
+                |this| match self.toast.as_ref().filter(|toast| !toast.is_error) {
+                    // A passing message borrows the footer's left side, so the panel keeps its size.
+                    Some(toast) => this.child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .pl(px(7.))
+                            .truncate()
+                            .text_size(px(12.))
+                            .text_color(theme.text)
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(toast.text.clone()),
+                    ),
+                    None => this
+                        .child(
+                            Self::footer_button("toggle-done", theme)
+                                .on_click(
+                                    cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_done(cx)),
+                                )
+                                .child(done_label),
+                        )
+                        .child(div().flex_1()),
+                },
             )
-            .child(div().flex_1())
             .child(
                 Self::footer_button("palette", theme)
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
@@ -3291,11 +3285,22 @@ impl BoardView {
         } else {
             "Cancel"
         };
+        // Anchored at the bottom, by the button that asked, so the task stays visible above.
         self.scrim(theme)
             .id("confirm")
             .occlude()
+            .items_end()
             .child(
                 Self::sheet(theme, self.sheet_width(SMALL_SHEET_MAX_WIDTH))
+                    .rounded_b(px(0.))
+                    .rounded_t(px(12.))
+                    .shadow(vec![BoxShadow {
+                        color: gpui::rgba(0x00000059).into(),
+                        offset: point(px(0.), px(-8.)),
+                        blur_radius: px(30.),
+                        spread_radius: px(0.),
+                        inset: false,
+                    }])
                     .child(
                         div()
                             .text_size(px(14.))
@@ -3483,7 +3488,6 @@ impl BoardView {
                 ("Y", "Copy ID"),
                 ("E", "Expand all"),
                 ("I", "Session info"),
-                ("T", "Tool calls"),
             ],
         );
         let columns = [
@@ -3763,7 +3767,7 @@ impl BoardView {
     }
 
     /// Toasts sit over the footer so they never cover a card.
-    /// A row above the footer that the list shrinks for, so the toast never hides a card.
+    /// An error's row above the footer, which the panel grows for so it never hides a card.
     fn render_toast(&self, toast: &Toast, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         div()
             .flex_none()
@@ -3850,9 +3854,10 @@ impl Render for BoardView {
             .child(self.render_header(&theme, cx))
             .child(self.render_tabs(&theme, cx))
             .child(self.render_list(&theme, cx))
-            .when_some(self.toast.as_ref(), |this, toast| {
-                this.child(self.render_toast(toast, &theme, cx))
-            })
+            .when_some(
+                self.toast.as_ref().filter(|toast| toast.is_error),
+                |this, toast| this.child(self.render_toast(toast, &theme, cx)),
+            )
             .child(self.render_footer(&theme, cx));
         // Details open to the left so the list stays where it was under the pointer.
         let mut body = div().flex_1().min_h_0().flex();
