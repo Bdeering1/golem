@@ -986,6 +986,7 @@ impl BoardView {
 
     fn show_error_detail(&mut self, detail: ErrorDetail) {
         self.is_error_copied = false;
+        self.is_input_selected = false;
         self.error_scroll.set_offset(point(px(0.), px(0.)));
         self.error_detail = Some(detail);
     }
@@ -1605,6 +1606,7 @@ impl BoardView {
                     self.set_palette(palette, cx);
                     self.set_help(false, cx);
                 }
+                "c" if self.error_detail.is_some() => self.copy_error_detail(cx),
                 "c" | "x" if self.is_input_selected => {
                     let text = self
                         .palette
@@ -1616,7 +1618,6 @@ impl BoardView {
                         self.is_input_selected = false;
                     }
                 }
-                "c" if self.error_detail.is_some() => self.copy_error_detail(cx),
                 "w" => self.hide(cx),
                 "q" => cx.quit(),
                 "v" => self.paste(cx),
@@ -1742,6 +1743,7 @@ impl BoardView {
             KEY_ESCAPE => {
                 self.query.clear();
                 self.input = Input::None;
+                self.after_query_change();
             }
             // Leaving the filter also does what the key does, so one press moves or opens.
             KEY_ENTER | KEY_DOWN | KEY_UP => {
@@ -1753,7 +1755,6 @@ impl BoardView {
             _ if self.edit_active_input(key, typed) => {}
             _ => return,
         }
-        self.show_matching_tab();
         cx.notify();
     }
 
@@ -1780,10 +1781,12 @@ impl BoardView {
         self.after_query_change();
     }
 
-    /// The palette selects and reveals its first match; the filter shows a group with matches.
+    /// The palette selects and reveals its first match; the filter shows a group with matches
+    /// and scrolls its selection into view, so keys never act on a card offscreen.
     fn after_query_change(&mut self) {
         let Some(palette) = self.palette.as_mut() else {
             self.show_matching_tab();
+            self.reveal_selected();
             return;
         };
         palette.index = 0;
@@ -2241,6 +2244,7 @@ impl BoardView {
                                             cx.stop_propagation();
                                             this.query.clear();
                                             this.input = Input::None;
+                                            this.after_query_change();
                                             cx.notify();
                                         }))
                                         .child("\u{d7}"),
