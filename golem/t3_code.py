@@ -236,7 +236,11 @@ def latest_run(projection: ledger.JsonObject) -> ledger.JsonObject | None:
 
 
 def is_cancelled_before_start(run: ledger.JsonObject) -> bool:
-    return run.get("status") == CANCELLED_RUN_STATUS and run.get("startedAt") is None
+    return (
+        run.get("status") == CANCELLED_RUN_STATUS
+        and run.get("startedAt") is None
+        and run.get("restartContinuationOfRunId") is None
+    )
 
 
 def latest_run_not_cancelled_before_start(
