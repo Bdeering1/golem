@@ -31,6 +31,8 @@ const MIN_PANEL_HEIGHT: f64 = 320.0;
 /// Collapsed-panel layout heights used to fit the panel to its longest group.
 const PANEL_CHROME_HEIGHT: f64 = 140.0;
 const CARD_GAP: f32 = 2.0;
+/// The footer and the details action bar share a height so their top edges line up.
+const BOTTOM_BAR_HEIGHT: f32 = 37.0;
 /// The shortcuts sheet's height plus the footer below it; the palette uses it too.
 const HELP_PANEL_HEIGHT: f64 = 545.0;
 const REPOSITORY_MAX_WIDTH: f32 = 120.0;
@@ -146,6 +148,8 @@ struct Pending {
 pub struct BoardView {
     snapshot: Snapshot,
     load_error: Option<String>,
+    /// The full text of an error toast that has no task to open, shown in its own sheet.
+    error_detail: Option<SharedString>,
     /// Whether any ledger read has succeeded, so an empty list can mean "nothing" rather than "unknown".
     has_loaded: bool,
     golem: Option<Arc<Golem>>,
@@ -164,8 +168,8 @@ pub struct BoardView {
     activity_level: ActivityLevel,
     is_following: bool,
     is_follow_paused: bool,
-    /// How many activity lines existed when Follow paused, to count what arrived since.
-    paused_line_count: usize,
+    /// The activity shown when Follow paused; it stays put while new lines arrive.
+    paused_lines: Vec<String>,
     is_showing_fields: bool,
     /// Clamped sections the user expanded, by toggle id; E expands or collapses all of them.
     expanded_sections: HashSet<&'static str>,
@@ -329,6 +333,7 @@ impl BoardView {
         let mut view = BoardView {
             snapshot: Snapshot::default(),
             load_error: None,
+            error_detail: None,
             has_loaded: false,
             golem: None,
             tray_icon: macos::create_tray_icon(),
@@ -346,7 +351,7 @@ impl BoardView {
             activity_level: ActivityLevel::Messages,
             is_following: false,
             is_follow_paused: false,
-            paused_line_count: 0,
+            paused_lines: Vec::new(),
             is_showing_fields: false,
             expanded_sections: HashSet::new(),
             is_revealing_full_text: false,
@@ -771,10 +776,15 @@ impl BoardView {
     }
 
     /// Dismisses the toast and opens the task it reports on, if any.
-    fn open_toast_task(&mut self, cx: &mut Context<Self>) {
-        let toast = self.toast.take();
-        if let Some(task_id) = toast.and_then(|toast| toast.task_id) {
-            self.open_task(&task_id, cx);
+    /// Dismisses the toast and opens its task, or its full text when there's no task.
+    fn open_toast_details(&mut self, cx: &mut Context<Self>) {
+        let Some(toast) = self.toast.take() else {
+            return;
+        };
+        match toast.task_id {
+            Some(task_id) => self.open_task(&task_id, cx),
+            None if toast.is_error => self.error_detail = Some(toast.text),
+            None => {}
         }
     }
 
@@ -857,12 +867,45 @@ impl BoardView {
         self.select(target.root_id, cx);
     }
 
+    /// Follow shows everything; at the default level a stopped task with a Result shows only a
+    /// summary, since its messages mostly restate the Result.
+    fn shown_activity_level(&self, row: &Row) -> ActivityLevel {
+        if self.is_following {
+            return ActivityLevel::All;
+        }
+        let has_result = self.snapshot.tasks[&row.task_id]
+            .result
+            .as_deref()
+            .is_some_and(|result| !result.trim().is_empty());
+        match self.activity_level {
+            ActivityLevel::Messages if row.status != Status::Running && has_result => {
+                ActivityLevel::Summary
+            }
+            level => level,
+        }
+    }
+
+    /// T moves on from the level shown, so a summarised task goes straight to All.
+    fn next_activity_level(&self) -> ActivityLevel {
+        let Some(row) = self.selected_row() else {
+            return self.activity_level.next();
+        };
+        let shown_level = self.shown_activity_level(row);
+        let is_summarised =
+            shown_level == ActivityLevel::Summary && self.activity_level == ActivityLevel::Messages;
+        match shown_level {
+            ActivityLevel::Summary if is_summarised => ActivityLevel::All,
+            level => level.next(),
+        }
+    }
+
     fn pause_follow(&mut self) {
-        if !self.is_following || self.is_follow_paused {
+        let can_scroll = self.detail_scroll.max_offset().y > px(0.);
+        if !self.is_following || self.is_follow_paused || !can_scroll {
             return;
         }
         self.is_follow_paused = true;
-        self.paused_line_count = self.selected_activity().len();
+        self.paused_lines = self.selected_activity();
     }
 
     fn scroll_by(&mut self, delta: f32) {
@@ -1276,7 +1319,10 @@ impl BoardView {
         if modifiers.control {
             match key {
                 "d" | "u"
-                    if self.palette.is_some() || self.pending.is_some() || self.is_showing_help =>
+                    if self.palette.is_some()
+                        || self.pending.is_some()
+                        || self.is_showing_help
+                        || self.error_detail.is_some() =>
                 {
                     return;
                 }
@@ -1312,6 +1358,16 @@ impl BoardView {
         } else if self.is_showing_help {
             if matches!(key, KEY_ESCAPE | KEY_ENTER) || matches!(typed.as_str(), "?" | "q") {
                 self.set_help(false, cx);
+            }
+        } else if let Some(text) = self.error_detail.clone() {
+            match (key, typed.as_str()) {
+                (KEY_ESCAPE | KEY_ENTER, _) => self.error_detail = None,
+                (_, "c") => {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
+                    self.error_detail = None;
+                    self.show_toast("Copied the error", cx);
+                }
+                _ => {}
             }
         } else if self.input == Input::Filter {
             self.handle_filter_key(key, &typed, cx);
@@ -1453,7 +1509,7 @@ impl BoardView {
             (_, "a") => self.toggle_done(cx),
             (_, "?") => self.set_help(true, cx),
             (_, "t") => {
-                self.activity_level = self.activity_level.next();
+                self.activity_level = self.next_activity_level();
                 self.is_following = false;
                 if !self.is_expanded {
                     self.set_expanded(true, cx);
@@ -1478,9 +1534,9 @@ impl BoardView {
                 if self
                     .toast
                     .as_ref()
-                    .is_some_and(|toast| toast.task_id.is_some()) =>
+                    .is_some_and(|toast| toast.task_id.is_some() || toast.is_error) =>
             {
-                self.open_toast_task(cx);
+                self.open_toast_details(cx);
             }
             (_, "q") => self.hide(cx),
             _ => {
@@ -1506,6 +1562,19 @@ fn outcome_or(outcome: golem_cli::CommandOutcome, done_text: String) -> Outcome 
             is_error: false,
         },
     }
+}
+
+/// The lines that arrived since Follow paused, or None once the paused tail has left the
+/// bounded history and the new lines can't be told apart.
+fn lines_since_pause<'a>(
+    paused_lines: &[String],
+    current_lines: &'a [String],
+) -> Option<&'a [String]> {
+    let Some(paused_tail) = paused_lines.last() else {
+        return Some(current_lines);
+    };
+    let index = current_lines.iter().rposition(|line| line == paused_tail)?;
+    Some(&current_lines[index + 1..])
 }
 
 /// The palette list's child position for an item, counting the group headings rendered before it.
@@ -1686,8 +1755,7 @@ impl BoardView {
                                         .text_color(theme.accent)
                                         .child(needing_count.to_string()),
                                 )
-                            })
-                            .child(kbd("N", theme)),
+                            }),
                     ),
             )
             .when_some(self.load_error.clone(), |this, error| {
@@ -1814,10 +1882,9 @@ impl BoardView {
             .rounded(px(8.))
             .border_1()
             .map(|this| match (is_selected, is_changed) {
-                (true, _) if quick_action.is_some() => this
+                (true, _) => this
                     .bg(theme.accent_soft)
                     .border_color(gpui::transparent_black()),
-                (true, _) => this.bg(theme.accent_soft).border_color(theme.accent),
                 (false, true) => this
                     .bg(theme.changed)
                     .border_color(gpui::transparent_black()),
@@ -2356,7 +2423,25 @@ impl BoardView {
     }
 
     fn render_activity(&mut self, row: &Row, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let lines = self.selected_activity();
+        let current_lines = self.selected_activity();
+        let is_paused = self.is_following && self.is_follow_paused;
+        let new_lines = lines_since_pause(&self.paused_lines, &current_lines);
+        // Paused, the log keeps what was read and adds new lines under a divider.
+        let (lines, new_start) = match (is_paused, new_lines) {
+            (false, _) => (current_lines.clone(), None),
+            (true, Some(new_lines)) => {
+                let start = self.paused_lines.len();
+                let shown = [self.paused_lines.as_slice(), new_lines].concat();
+                (shown, (!new_lines.is_empty()).then_some(start))
+            }
+            (true, None) => (self.paused_lines.clone(), None),
+        };
+        let new_activity = match new_lines {
+            Some([]) => None,
+            Some(new_lines) => Some(format!("{} new", new_lines.len())),
+            None => Some("new activity".to_string()),
+        };
+        let shown_level = self.shown_activity_level(row);
         let level_button = div()
             .id("activity-level")
             .flex()
@@ -2368,17 +2453,16 @@ impl BoardView {
             .text_color(theme.text_3)
             .hover(|style| style.bg(theme.hover))
             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                this.activity_level = this.activity_level.next();
+                this.activity_level = this.next_activity_level();
                 cx.notify();
             }))
-            .child(self.activity_level.label())
-            .child(kbd("T", theme));
-        let new_line_count = lines.len().saturating_sub(self.paused_line_count);
+            .child(shown_level.label());
         let live = self.is_following.then(|| {
             let (color, label) = match (self.is_follow_paused, row.status) {
-                (true, _) if new_line_count > 0 => {
-                    (theme.text_2, format!("Paused \u{b7} {new_line_count} new"))
-                }
+                (true, _) if new_activity.is_some() => (
+                    theme.text_2,
+                    format!("Paused \u{b7} {}", new_activity.clone().unwrap_or_default()),
+                ),
                 (true, _) => (theme.text_2, "Paused".to_string()),
                 (false, Status::Running) => (theme.accent, "Live".to_string()),
                 (false, _) => (theme.accent, "Full log".to_string()),
@@ -2422,11 +2506,7 @@ impl BoardView {
             };
             log = log.child(div().text_color(theme.text_3).child(text));
         }
-        let level = if self.is_following {
-            ActivityLevel::All
-        } else {
-            self.activity_level
-        };
+        let level = shown_level;
         let items = board::activity_view(&lines, level);
         let earlier_count = match level {
             ActivityLevel::Messages if row.status == Status::Running || self.is_following => {
@@ -2438,13 +2518,32 @@ impl BoardView {
         if earlier_count > 0 {
             log = log.child(
                 div()
+                    .id("show-earlier")
                     .py(px(2.))
-                    .text_color(theme.text_3)
-                    .child(format!("{earlier_count} earlier, shown in All")),
+                    .text_color(theme.accent)
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.activity_level = ActivityLevel::All;
+                        cx.notify();
+                    }))
+                    .child(format!("Show {earlier_count} earlier")),
             );
         }
         let is_history = row.status != Status::Running && !self.is_following;
-        for item in items.into_iter().skip(earlier_count) {
+        for (index, item) in items.into_iter().enumerate().skip(earlier_count) {
+            if Some(index) == new_start {
+                log = log.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .my(px(4.))
+                        .text_size(px(11.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.accent)
+                        .child("New")
+                        .child(div().flex_1().h(px(1.)).bg(theme.accent_soft)),
+                );
+            }
             log = log.child(match item {
                 ActivityItem::Message(text) => div()
                     .py(px(2.))
@@ -2650,7 +2749,7 @@ impl BoardView {
                 .gap(px(7.))
                 .h(px(26.))
                 .pl(px(10.))
-                .pr(px(6.))
+                .pr(px(if is_primary { 6. } else { 10. }))
                 .rounded(px(7.))
                 .bg(background)
                 .text_color(foreground)
@@ -2669,7 +2768,7 @@ impl BoardView {
                 })
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.request(action, cx)))
                 .child(label)
-                .child(key_chip)
+                .when(is_primary, |this| this.child(key_chip))
         });
         div()
             .flex_1()
@@ -2728,9 +2827,8 @@ impl BoardView {
                     .gap(px(6.))
                     .pl(px(18.))
                     .pr(px(12.))
-                    .pt(px(9.))
-                    .pb(px(10.))
-                    .min_h(px(47.))
+                    .py(px(5.))
+                    .min_h(px(BOTTOM_BAR_HEIGHT))
                     .border_t_1()
                     .border_color(theme.line)
                     .children(buttons),
@@ -2770,15 +2868,14 @@ impl BoardView {
             .flex()
             .items_center()
             .gap(px(2.))
-            .h(px(36.))
+            .h(px(BOTTOM_BAR_HEIGHT))
             .px(px(7.))
             .border_t_1()
             .border_color(theme.line)
             .child(
                 Self::footer_button("toggle-done", theme)
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_done(cx)))
-                    .child(done_label)
-                    .child(kbd("A", theme)),
+                    .child(done_label),
             )
             .child(div().flex_1())
             .child(
@@ -2986,7 +3083,91 @@ impl BoardView {
             .into_any_element()
     }
 
+    /// The full text of an error that has no task, which the one-line toast cuts short.
+    fn render_error_detail(
+        &self,
+        text: &SharedString,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let copied_text = text.to_string();
+        self.scrim(theme)
+            .id("error-detail")
+            .occlude()
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.error_detail = None;
+                cx.notify();
+            }))
+            .child(
+                Self::sheet(theme, 380.)
+                    .id("error-sheet")
+                    .on_click(|_, _, cx| cx.stop_propagation())
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(7.))
+                            .text_size(px(14.))
+                            .font_weight(FontWeight::BOLD)
+                            .child(icon(theme::status_icon(Status::Failed), 13., theme.red))
+                            .child("Action failed"),
+                    )
+                    .child(
+                        div()
+                            .id("error-text")
+                            .mt(px(8.))
+                            .max_h(px(220.))
+                            .overflow_y_scroll()
+                            .text_color(theme.text_2)
+                            .child(text.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(8.))
+                            .mt(px(14.))
+                            .child(
+                                Self::sheet_button(
+                                    "error-close",
+                                    "Close".to_string(),
+                                    "esc",
+                                    false,
+                                    false,
+                                    theme,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _: &ClickEvent, _, cx| {
+                                        this.error_detail = None;
+                                        cx.notify();
+                                    },
+                                )),
+                            )
+                            .child(
+                                Self::sheet_button(
+                                    "error-copy",
+                                    "Copy".to_string(),
+                                    "C",
+                                    true,
+                                    false,
+                                    theme,
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _: &ClickEvent, _, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            copied_text.clone(),
+                                        ));
+                                        this.error_detail = None;
+                                        this.show_toast("Copied the error", cx);
+                                    },
+                                )),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn render_help(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let jump_keys = format!("1-{}", self.tabs().len());
         let section = |title: &str, key_width: f32, entries: &[(&str, &str)]| {
             let rows = entries.iter().map(|(keys, text)| {
                 div()
@@ -3027,7 +3208,7 @@ impl BoardView {
                 ("\u{2190}\u{2192} H L", "switch group"),
                 ("tab \u{21e7}tab", "next group"),
                 ("\u{2303}N \u{2303}P", "select in search"),
-                ("1-4", "jump to group"),
+                (jump_keys.as_str(), "jump to group"),
                 ("G \u{21e7}G", "first, last"),
                 ("N", "next needing you"),
                 ("\u{23ce}", "details"),
@@ -3370,7 +3551,7 @@ impl BoardView {
                     .text_size(px(12.))
                     .font_weight(FontWeight::MEDIUM)
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.open_toast_task(cx);
+                        this.open_toast_details(cx);
                         cx.notify();
                     }))
                     .when(toast.is_error, |this| {
@@ -3384,13 +3565,10 @@ impl BoardView {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .map(|this| match toast.task_id {
-                                Some(_) => this.truncate(),
-                                None => this.line_clamp(3),
-                            })
+                            .truncate()
                             .child(toast.text.clone()),
                     )
-                    .when(toast.task_id.is_some(), |this| {
+                    .when(toast.task_id.is_some() || toast.is_error, |this| {
                         this.child(
                             div()
                                 .flex_none()
@@ -3423,9 +3601,14 @@ impl Render for BoardView {
                     .border_color(theme.line)
             })
             .when(!self.is_expanded, |this| this.flex_1())
+            .relative()
             .child(self.render_header(&theme, cx))
             .child(self.render_tabs(&theme, cx))
-            .child(self.render_list(&theme, cx));
+            .child(self.render_list(&theme, cx))
+            .child(self.render_footer(&theme, cx))
+            .when_some(self.toast.as_ref(), |this, toast| {
+                this.child(self.render_toast(toast, &theme, cx))
+            });
         // Details open to the left so the list stays where it was under the pointer.
         let mut body = div().flex_1().min_h_0().flex();
         if self.is_expanded {
@@ -3447,11 +3630,7 @@ impl Render for BoardView {
             .bg(theme.panel)
             .text_color(theme.text)
             .text_size(px(13.))
-            .child(body)
-            .child(self.render_footer(&theme, cx));
-        if let Some(toast) = &self.toast {
-            root = root.child(self.render_toast(toast, &theme, cx));
-        }
+            .child(body);
         if self.palette.is_some() {
             root = root.child(self.render_palette(&theme, cx));
         }
@@ -3459,6 +3638,8 @@ impl Render for BoardView {
             root = root.child(self.render_confirm(pending, &theme, cx));
         } else if self.is_showing_help {
             root = root.child(self.render_help(&theme, cx));
+        } else if let Some(text) = &self.error_detail {
+            root = root.child(self.render_error_detail(text, &theme, cx));
         }
         root
     }
