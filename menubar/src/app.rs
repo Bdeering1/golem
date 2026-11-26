@@ -25,18 +25,17 @@ use crate::macos;
 use crate::theme::{self, MONO_FONT, Theme};
 
 const PANEL_WIDTH: f64 = 440.0;
-const EXPANDED_PANEL_WIDTH: f64 = 860.0;
+const EXPANDED_PANEL_WIDTH: f64 = 900.0;
 const PANEL_HEIGHT: f64 = 640.0;
 const MIN_PANEL_HEIGHT: f64 = 320.0;
 /// Collapsed-panel layout heights used to fit the panel to its longest group.
 const PANEL_CHROME_HEIGHT: f64 = 140.0;
 const CARD_GAP: f32 = 2.0;
-/// The shortcuts sheet's height plus the footer below it.
+/// The shortcuts sheet's height plus the footer below it; the palette uses it too.
 const HELP_PANEL_HEIGHT: f64 = 545.0;
 const REPOSITORY_MAX_WIDTH: f32 = 120.0;
 const CARD_PITCH: f64 = 63.0;
 const EMPTY_LIST_HEIGHT: f64 = 90.0;
-const SIDE_WIDTH: f32 = 340.0;
 const TICK_INTERVAL: Duration = Duration::from_secs(1);
 const RELOAD_DEBOUNCE: Duration = Duration::from_millis(80);
 const TOAST_DURATION: Duration = Duration::from_secs(3);
@@ -62,6 +61,7 @@ const EXPANDABLE_SECTIONS: [&str; 4] = [
     SECTION_ACTION_ERROR,
 ];
 const MESSAGE_ITEM_LIMIT: usize = 12;
+const STOPPED_MESSAGE_ITEM_LIMIT: usize = 3;
 /// The palette's top offset, search row and margin, subtracted from the panel height for its list.
 const PALETTE_CHROME_HEIGHT: f32 = 112.0;
 const PALETTE_ROW_HEIGHT: f32 = 28.0;
@@ -146,6 +146,8 @@ struct Pending {
 pub struct BoardView {
     snapshot: Snapshot,
     load_error: Option<String>,
+    /// Whether any ledger read has succeeded, so an empty list can mean "nothing" rather than "unknown".
+    has_loaded: bool,
     golem: Option<Arc<Golem>>,
     tray_icon: TrayIcon,
     panel: Option<Retained<NSWindow>>,
@@ -162,6 +164,8 @@ pub struct BoardView {
     activity_level: ActivityLevel,
     is_following: bool,
     is_follow_paused: bool,
+    /// How many activity lines existed when Follow paused, to count what arrived since.
+    paused_line_count: usize,
     is_showing_fields: bool,
     /// Clamped sections the user expanded, by toggle id; E expands or collapses all of them.
     expanded_sections: HashSet<&'static str>,
@@ -325,6 +329,7 @@ impl BoardView {
         let mut view = BoardView {
             snapshot: Snapshot::default(),
             load_error: None,
+            has_loaded: false,
             golem: None,
             tray_icon: macos::create_tray_icon(),
             panel: macos::native_window(window),
@@ -341,6 +346,7 @@ impl BoardView {
             activity_level: ActivityLevel::Messages,
             is_following: false,
             is_follow_paused: false,
+            paused_line_count: 0,
             is_showing_fields: false,
             expanded_sections: HashSet::new(),
             is_revealing_full_text: false,
@@ -375,6 +381,7 @@ impl BoardView {
                 self.note_changes(&previous, cx);
                 self.keep_selection_position(selected_index);
                 self.load_error = None;
+                self.has_loaded = true;
             }
             Err(error) => self.load_error = Some(error),
         }
@@ -565,7 +572,7 @@ impl BoardView {
             .max()
             .unwrap_or(0);
         let list_height = (longest as f64 * CARD_PITCH).max(EMPTY_LIST_HEIGHT);
-        let minimum_height = if self.is_showing_help {
+        let minimum_height = if self.is_showing_help || self.palette.is_some() {
             HELP_PANEL_HEIGHT
         } else {
             MIN_PANEL_HEIGHT
@@ -772,8 +779,12 @@ impl BoardView {
     }
 
     fn set_palette(&mut self, palette: Option<Palette>, cx: &mut Context<Self>) {
+        let was_open = self.palette.is_some();
         self.palette = palette;
         self.palette_scroll.scroll_to_item(0);
+        if was_open != self.palette.is_some() {
+            self.place(false, cx);
+        }
         cx.notify();
     }
 
@@ -846,9 +857,17 @@ impl BoardView {
         self.select(target.root_id, cx);
     }
 
+    fn pause_follow(&mut self) {
+        if !self.is_following || self.is_follow_paused {
+            return;
+        }
+        self.is_follow_paused = true;
+        self.paused_line_count = self.selected_activity().len();
+    }
+
     fn scroll_by(&mut self, delta: f32) {
         if delta < 0. {
-            self.is_follow_paused = true;
+            self.pause_follow();
         }
         let handle = if self.is_expanded {
             &self.detail_scroll
@@ -1677,9 +1696,11 @@ impl BoardView {
                         .line_clamp(2)
                         .text_size(px(11.5))
                         .text_color(theme.orange)
-                        .child(format!(
-                            "Can't read the ledger, showing the last good state: {error}"
-                        )),
+                        .child(if self.has_loaded {
+                            format!("Can't read the ledger, showing the last good state: {error}")
+                        } else {
+                            format!("Can't read the ledger: {error}")
+                        }),
                 )
             })
             .into_any_element()
@@ -1765,7 +1786,7 @@ impl BoardView {
         };
         let when = board::card_when_text(row, task, now);
         let (snippet, snippet_color) = match (busy_action, action_error) {
-            (Some(action), _) => (action.busy_text().to_string(), theme.accent),
+            (Some(action), _) => (action.busy_text().to_string(), theme.text_2),
             (None, Some(error)) => (error.action.failed_text().to_string(), theme.red),
             (None, None) => (board::card_snippet(row, &self.snapshot), theme.text_2),
         };
@@ -1793,6 +1814,9 @@ impl BoardView {
             .rounded(px(8.))
             .border_1()
             .map(|this| match (is_selected, is_changed) {
+                (true, _) if quick_action.is_some() => this
+                    .bg(theme.accent_soft)
+                    .border_color(gpui::transparent_black()),
                 (true, _) => this.bg(theme.accent_soft).border_color(theme.accent),
                 (false, true) => this
                     .bg(theme.changed)
@@ -1877,7 +1901,6 @@ impl BoardView {
                             .text_color(theme.text_3)
                             .child(board::repository_name(row).to_string()),
                     )
-                    .child(div().flex_none().text_color(theme.text_3).child("\u{b7}"))
                     .child(
                         div()
                             .flex_1()
@@ -1942,7 +1965,9 @@ impl BoardView {
             .flex_col()
             .gap(px(CARD_GAP));
         if rows.is_empty() {
-            let text = if self.query.is_empty() {
+            let text = if !self.has_loaded && self.load_error.is_some() {
+                "Tasks unavailable"
+            } else if self.query.is_empty() {
                 self.tab.empty_text()
             } else {
                 "No matches"
@@ -2285,8 +2310,7 @@ impl BoardView {
                             "Show less"
                         } else {
                             "Show more"
-                        })
-                        .child(kbd("E", theme)),
+                        }),
                 )
             })
     }
@@ -2349,13 +2373,21 @@ impl BoardView {
             }))
             .child(self.activity_level.label())
             .child(kbd("T", theme));
+        let new_line_count = lines.len().saturating_sub(self.paused_line_count);
         let live = self.is_following.then(|| {
             let (color, label) = match (self.is_follow_paused, row.status) {
-                (true, _) => (theme.text_2, "Paused"),
-                (false, Status::Running) => (theme.accent, "Live"),
-                (false, _) => (theme.accent, "Full log"),
+                (true, _) if new_line_count > 0 => {
+                    (theme.text_2, format!("Paused \u{b7} {new_line_count} new"))
+                }
+                (true, _) => (theme.text_2, "Paused".to_string()),
+                (false, Status::Running) => (theme.accent, "Live".to_string()),
+                (false, _) => (theme.accent, "Full log".to_string()),
             };
             div()
+                .id("follow-state")
+                .when(self.is_follow_paused, |this| {
+                    this.on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_follow(cx)))
+                })
                 .flex()
                 .items_center()
                 .gap(px(5.))
@@ -2397,7 +2429,10 @@ impl BoardView {
         };
         let items = board::activity_view(&lines, level);
         let earlier_count = match level {
-            ActivityLevel::Messages => items.len().saturating_sub(MESSAGE_ITEM_LIMIT),
+            ActivityLevel::Messages if row.status == Status::Running || self.is_following => {
+                items.len().saturating_sub(MESSAGE_ITEM_LIMIT)
+            }
+            ActivityLevel::Messages => items.len().saturating_sub(STOPPED_MESSAGE_ITEM_LIMIT),
             _ => 0,
         };
         if earlier_count > 0 {
@@ -2561,7 +2596,6 @@ impl BoardView {
                     div()
                         .flex_1()
                         .min_w_0()
-                        .truncate()
                         .text_size(px(19.))
                         .font_weight(FontWeight::BOLD)
                         .child(board::row_title(&row).to_string()),
@@ -2659,8 +2693,8 @@ impl BoardView {
                             .track_scroll(&self.detail_scroll)
                             .on_scroll(cx.listener(|this, event: &ScrollEvent, _, cx| {
                                 let is_scrolling_up = event.delta.pixel_delta(px(16.)).y > px(0.);
-                                if this.is_following && !this.is_follow_paused && is_scrolling_up {
-                                    this.is_follow_paused = true;
+                                if is_scrolling_up {
+                                    this.pause_follow();
                                     cx.notify();
                                 }
                             }))
@@ -3383,19 +3417,21 @@ impl Render for BoardView {
             .min_h_0()
             .min_w_0()
             .when(self.is_expanded, |this| {
-                this.w(px(SIDE_WIDTH))
+                this.w(px(PANEL_WIDTH as f32))
                     .flex_none()
-                    .border_r_1()
+                    .border_l_1()
                     .border_color(theme.line)
             })
             .when(!self.is_expanded, |this| this.flex_1())
             .child(self.render_header(&theme, cx))
             .child(self.render_tabs(&theme, cx))
             .child(self.render_list(&theme, cx));
-        let mut body = div().flex_1().min_h_0().flex().child(side);
+        // Details open to the left so the list stays where it was under the pointer.
+        let mut body = div().flex_1().min_h_0().flex();
         if self.is_expanded {
             body = body.child(self.render_detail(&theme, cx));
         }
+        body = body.child(side);
         let mut root = div()
             .id("board")
             .track_focus(&self.focus_handle)
