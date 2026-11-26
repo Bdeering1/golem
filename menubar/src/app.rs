@@ -1470,8 +1470,10 @@ impl BoardView {
     fn all_palette_items(&self) -> Vec<PaletteItem> {
         let mut items = Vec::new();
         if let Some(row) = self.selected_row() {
-            for action in board::available_actions(&self.snapshot, Some(row)) {
-                if action == Action::CloseAll {
+            let actions = board::available_actions(&self.snapshot, Some(row));
+            for action in actions.iter().copied() {
+                // Copy ID joins the other copy commands after the view items.
+                if matches!(action, Action::CloseAll | Action::Copy) {
                     continue;
                 }
                 let label = match action {
@@ -1498,30 +1500,41 @@ impl BoardView {
             } else {
                 "Show session info"
             };
-            let details_key = if self.is_expanded { "esc" } else { "\u{23ce}" };
+            let copy_id = actions.contains(&Action::Copy).then(|| {
+                let label = Action::Copy.label().to_string();
+                (Command::Task(Action::Copy), label, key_label(Action::Copy))
+            });
             let copy_error = self
                 .selected_error()
-                .map(|_| (Command::CopyError, "Copy error".to_string(), ""));
-            let copy_items = copy_error.into_iter().chain(
-                COPYABLE_FIELDS
-                    .into_iter()
-                    .filter(|(field, _)| self.selected_field(field).is_some())
-                    .map(|(field, text)| (Command::CopyField(field), text.to_string(), "")),
-            );
+                .map(|_| (Command::CopyError, "Copy error".to_string(), String::new()));
+            let copy_fields = COPYABLE_FIELDS
+                .into_iter()
+                .filter(|(field, _)| self.selected_field(field).is_some())
+                .map(|(field, text)| (Command::CopyField(field), text.to_string(), String::new()));
+            // In the palette Enter runs the highlighted row, so Show details shows no ↩.
             let view_items = [
                 (
                     Command::ToggleDetails,
                     details_label.to_string(),
-                    details_key,
+                    String::new(),
                 ),
-                (Command::ToggleSession, session_label.to_string(), "I"),
+                (
+                    Command::ToggleSession,
+                    session_label.to_string(),
+                    "I".to_string(),
+                ),
             ];
-            for (command, label, key) in view_items.into_iter().chain(copy_items) {
+            let task_items = view_items
+                .into_iter()
+                .chain(copy_id)
+                .chain(copy_error)
+                .chain(copy_fields);
+            for (command, label, key) in task_items {
                 items.push(PaletteItem {
                     group: board::row_title(row).to_string(),
                     command,
                     label,
-                    key: key.to_string(),
+                    key,
                     is_danger: false,
                 });
             }
@@ -1668,13 +1681,12 @@ impl BoardView {
         if self.palette.is_some() {
             self.handle_palette_key(key, &typed, window, cx);
         } else if let Some(action) = self.pending.as_ref().map(|pending| pending.action) {
-            // Return opens and closes details all day, so it never confirms losing work.
+            // Return opens and closes details all day, so it never confirms losing work. Every
+            // confirmation also takes the key that asked for it, pressed again.
             let is_destructive = action.is_destructive();
             match (key, typed.as_str()) {
                 (KEY_ESCAPE, _) | (_, "n") => self.answer(false, cx),
-                (_, typed) if is_destructive && !event.is_held && typed == action.key() => {
-                    self.answer(true, cx)
-                }
+                (_, typed) if !event.is_held && typed == action.key() => self.answer(true, cx),
                 (KEY_ENTER, _) | (_, "y") if !is_destructive => self.answer(true, cx),
                 _ => {}
             }
@@ -3866,7 +3878,10 @@ impl BoardView {
                         board::counted_text(rows.len(), "finished task")
                     ),
                     format!("{} {verb} to Done.{unopened}", board::names_text(&names)),
-                    "Close all".to_string(),
+                    match rows.len() {
+                        1 => "Close".to_string(),
+                        count => format!("Close {count}"),
+                    },
                 )
             }
             (action, Some(row)) => {
