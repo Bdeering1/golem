@@ -69,7 +69,7 @@ impl Theme {
             text_2: rgba(0xffffff99).into(),
             text_3: rgba(0xffffff5c).into(),
             line: rgba(0xffffff1c).into(),
-            hover: rgba(0xffffff12).into(),
+            hover: rgba(0xffffff1f).into(),
             fill: rgba(0xffffff17).into(),
             accent: rgba(0x2f8cffff).into(),
             accent_soft: rgba(0x2f8cff33).into(),
