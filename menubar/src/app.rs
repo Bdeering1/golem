@@ -467,13 +467,20 @@ impl BoardView {
                 .filter(|row| row.column == column)
                 .count()
         };
-        let review_count = count(Column::Review);
-        let title = (review_count > 0).then(|| format!(" {review_count}"));
+        // The menu bar shows what Next counts, so it drops to zero once nothing needs you.
+        let needing_count = self
+            .snapshot
+            .rows
+            .iter()
+            .filter(|row| row.column != Column::Done && self.needs_you(row))
+            .count();
+        let title = (needing_count > 0).then(|| format!(" {needing_count}"));
         self.tray_icon.set_title(title);
         let tooltip = format!(
-            "golem: {} queued, {} running, {review_count} to review",
+            "golem: {needing_count} need you; {} queued, {} running, {} to review",
             count(Column::Queued),
-            count(Column::Running)
+            count(Column::Running),
+            count(Column::Review)
         );
         let _ = self.tray_icon.set_tooltip(Some(tooltip));
     }
@@ -2105,7 +2112,7 @@ impl BoardView {
                                     cx.notify();
                                 }))
                                 .child("Details")
-                                .when(!self.is_typing(), |this| this.child(kbd("D", theme))),
+                                .child(kbd("D", theme).when(self.is_typing(), Div::invisible)),
                         ),
                 )
             })
@@ -2188,8 +2195,12 @@ impl BoardView {
         let busy_action = self.busy_actions.get(&row.task_id).copied();
         let action_error = self.action_errors.get(&row.task_id);
         let is_changed = self.changed_until.contains_key(&row.root_id);
+        // A finished task already picked up no longer needs you, so it steps back.
+        let is_handled =
+            row.column == Column::Review && row.status == Status::Finished && !self.needs_you(row);
         let state_color = match busy_action {
             Some(_) => theme.text_3,
+            None if is_handled => theme.text_3,
             None => theme.status_icon_color(row.status, is_stuck),
         };
         let when = board::card_when_text(row, task, now);
@@ -2235,11 +2246,11 @@ impl BoardView {
                     linear_color_stop(backing, 1.),
                 )))
                 .child(div().h_full().flex().items_center().bg(backing).child(
-                    Self::quick_action_button(action, &row.root_id, false, theme, cx),
+                    Self::quick_action_button(action, &row.root_id, false, false, theme, cx),
                 ))
         });
         let quick_action = quick_action.filter(|_| is_selected).map(|action| {
-            Self::quick_action_button(action, &row.root_id, !self.is_typing(), theme, cx)
+            Self::quick_action_button(action, &row.root_id, true, self.is_typing(), theme, cx)
         });
         div()
             .id(card_id.clone())
@@ -2291,6 +2302,7 @@ impl BoardView {
                             .truncate()
                             .text_size(px(13.5))
                             .font_weight(FontWeight::MEDIUM)
+                            .when(is_handled, |this| this.text_color(theme.text_2))
                             .child(board::row_title(row).to_string()),
                     )
                     .child(
@@ -2345,6 +2357,7 @@ impl BoardView {
         action: Action,
         root_id: &str,
         has_key: bool,
+        is_key_hidden: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -2376,7 +2389,8 @@ impl BoardView {
                     kbd(&key_label(action), theme)
                         .h(px(14.))
                         .bg(gpui::rgba(FILLED_KEYCAP_BACKGROUND))
-                        .text_color(theme.on_accent),
+                        .text_color(theme.on_accent)
+                        .when(is_key_hidden, Div::invisible),
                 )
             })
             .into_any_element()
@@ -3188,11 +3202,13 @@ impl BoardView {
             } else {
                 (theme.fill, theme.text)
             };
-            let has_key = is_primary && !self.is_typing();
-            let key_chip = kbd(&key_label(action), theme).when(is_primary, |this| {
-                this.bg(gpui::rgba(FILLED_KEYCAP_BACKGROUND))
-                    .text_color(theme.on_accent)
-            });
+            let has_key = is_primary;
+            let key_chip = kbd(&key_label(action), theme)
+                .when(is_primary, |this| {
+                    this.bg(gpui::rgba(FILLED_KEYCAP_BACKGROUND))
+                        .text_color(theme.on_accent)
+                })
+                .when(self.is_typing(), Div::invisible);
             div()
                 .id(action.label())
                 .flex()
@@ -3389,7 +3405,7 @@ impl BoardView {
                         cx.notify();
                     }))
                     .child("Keys")
-                    .when(!self.is_typing(), |this| this.child(kbd("?", theme))),
+                    .child(kbd("?", theme).when(self.is_typing(), Div::invisible)),
             )
             .into_any_element()
     }
@@ -4043,7 +4059,7 @@ impl BoardView {
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .child("Details"),
                         )
-                        .when(!self.is_typing(), |this| this.child(kbd("D", theme)))
+                        .child(kbd("D", theme).when(self.is_typing(), Div::invisible))
                     }),
             )
             .into_any_element()
