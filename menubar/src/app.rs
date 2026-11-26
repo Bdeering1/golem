@@ -2126,12 +2126,14 @@ fn found_style(theme: &Theme) -> HighlightStyle {
 fn marked_matches(text: &str, query: &str, theme: &Theme) -> StyledText {
     let lowered = board::search_text(text);
     let query = board::search_text(query);
-    // Lowercasing can change the byte length, which would misplace the marks.
+    // Lowercasing can change a character's byte length, which would misplace the marks.
     let highlights: Vec<_> = if query.is_empty() || lowered.len() != text.len() {
         Vec::new()
     } else {
         (lowered.match_indices(&query))
-            .map(|(start, _)| (start..start + query.len(), found_style(theme)))
+            .map(|(start, _)| start..start + query.len())
+            .filter(|range| text.is_char_boundary(range.start) && text.is_char_boundary(range.end))
+            .map(|range| (range, found_style(theme)))
             .collect()
     };
     StyledText::new(text.to_string()).with_highlights(highlights)
@@ -4188,7 +4190,9 @@ impl BoardView {
             (Action::CloseAll, _) => {
                 let closable_ids = board::closable_task_ids(&self.snapshot);
                 let task_ids: Vec<&String> = (pending.closing_ids.iter())
-                    .filter(|task_id| closable_ids.contains(task_id))
+                    .filter(|task_id| {
+                        closable_ids.contains(task_id) && !self.busy_actions.contains_key(*task_id)
+                    })
                     .collect();
                 let rows: Vec<&Row> = (self.snapshot.rows.iter())
                     .filter(|row| task_ids.contains(&&row.task_id))

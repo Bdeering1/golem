@@ -826,8 +826,12 @@ pub fn match_excerpt(row: &Row, snapshot: &Snapshot, query: &str) -> Option<Matc
     // The source reads as a tag, in the details section titles' uppercase.
     let source = source.to_uppercase();
     let lowered = search_text(line);
-    // Lowercasing can change a line's byte length, which would misplace the highlight.
-    let Some(start) = lowered.find(&query).filter(|_| lowered.len() == line.len()) else {
+    // Lowercasing can change a character's byte length, which would misplace the highlight.
+    let Some(start) = lowered.find(&query).filter(|start| {
+        lowered.len() == line.len()
+            && line.is_char_boundary(*start)
+            && line.is_char_boundary(start + query.len())
+    }) else {
         return Some(MatchExcerpt {
             text: format!("{source} {line}"),
             source_size: source.len(),
