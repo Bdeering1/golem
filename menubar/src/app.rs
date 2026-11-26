@@ -59,7 +59,7 @@ const BUSY_PULSE_PERIOD: Duration = Duration::from_millis(1400);
 const BUSY_PULSE_FPS: f32 = 30.0;
 const CHARS_PER_LINE: usize = 80;
 const PROMPT_LINE_LIMIT: usize = 3;
-const RESULT_LINE_LIMIT: usize = 6;
+const RESULT_LINE_LIMIT: usize = 12;
 const CALLOUT_LINE_LIMIT: usize = 4;
 const SECTION_RESULT: &str = "result";
 const SECTION_PROMPT: &str = "prompt";
@@ -837,6 +837,14 @@ impl BoardView {
         });
     }
 
+    fn copy_error_detail(&mut self, cx: &mut Context<Self>) {
+        let Some(detail) = self.error_detail.take() else {
+            return;
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(detail.text.to_string()));
+        self.show_toast("Copied the error", cx);
+    }
+
     fn show_error_detail(&mut self, detail: ErrorDetail) {
         self.error_scroll.set_offset(point(px(0.), px(0.)));
         self.error_detail = Some(detail);
@@ -1363,6 +1371,7 @@ impl BoardView {
                     self.set_palette(palette, cx);
                     self.set_help(false, cx);
                 }
+                "c" if self.error_detail.is_some() => self.copy_error_detail(cx),
                 "w" => self.hide(cx),
                 "q" => cx.quit(),
                 "v" => self.paste(cx),
@@ -1416,7 +1425,7 @@ impl BoardView {
             if matches!(key, KEY_ESCAPE | KEY_ENTER) || matches!(typed.as_str(), "?" | "q") {
                 self.set_help(false, cx);
             }
-        } else if let Some(text) = self.error_detail.as_ref().map(|detail| detail.text.clone()) {
+        } else if self.error_detail.is_some() {
             match (key, typed.as_str()) {
                 (KEY_ESCAPE | KEY_ENTER, _) => self.error_detail = None,
                 (KEY_DOWN, _) | (_, "j") => scroll_handle_by(&self.error_scroll, ERROR_LINE_STEP),
@@ -1425,11 +1434,6 @@ impl BoardView {
                     scroll_handle_by(&self.error_scroll, ERROR_PAGE_STEP);
                 }
                 ("pageup", _) => scroll_handle_by(&self.error_scroll, -ERROR_PAGE_STEP),
-                (_, "c") => {
-                    cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
-                    self.error_detail = None;
-                    self.show_toast("Copied the error", cx);
-                }
                 _ => {}
             }
         } else if self.input == Input::Filter {
@@ -2033,18 +2037,13 @@ impl BoardView {
                     linear_color_stop(Hsla { a: 0., ..backing }, 0.),
                     linear_color_stop(backing, 1.),
                 )))
-                .child(
-                    div()
-                        .h_full()
-                        .flex()
-                        .items_center()
-                        .bg(backing)
-                        .child(Self::quick_action_button(action, &row.root_id, theme, cx)),
-                )
+                .child(div().h_full().flex().items_center().bg(backing).child(
+                    Self::quick_action_button(action, &row.root_id, false, theme, cx),
+                ))
         });
         let quick_action = quick_action
             .filter(|_| is_selected)
-            .map(|action| Self::quick_action_button(action, &row.root_id, theme, cx));
+            .map(|action| Self::quick_action_button(action, &row.root_id, true, theme, cx));
         div()
             .id(card_id.clone())
             .group(card_id)
@@ -2161,9 +2160,11 @@ impl BoardView {
     }
 
     /// A card's primary action in the collapsed panel, so it runs without opening details.
+    /// Only the selected card's button shows its key, since keys act on the selection.
     fn quick_action_button(
         action: Action,
         root_id: &str,
+        is_selected: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -2177,7 +2178,7 @@ impl BoardView {
             .h(px(20.))
             .my(px(-2.))
             .pl(px(8.))
-            .pr(px(3.))
+            .pr(px(if is_selected { 3. } else { 8. }))
             .rounded(px(5.))
             .bg(theme.accent_fill)
             .text_color(theme.on_accent)
@@ -2190,12 +2191,14 @@ impl BoardView {
                 this.request(action, cx);
             }))
             .child(action.label())
-            .child(
-                kbd(&key_label(action), theme)
-                    .h(px(14.))
-                    .bg(gpui::rgba(FILLED_KEYCAP_BACKGROUND))
-                    .text_color(theme.on_accent),
-            )
+            .when(is_selected, |this| {
+                this.child(
+                    kbd(&key_label(action), theme)
+                        .h(px(14.))
+                        .bg(gpui::rgba(FILLED_KEYCAP_BACKGROUND))
+                        .text_color(theme.on_accent),
+                )
+            })
             .into_any_element()
     }
 
@@ -2624,36 +2627,28 @@ impl BoardView {
             None => Some("new activity".to_string()),
         };
         let shown_level = self.shown_activity_level(row);
-        if shown_level == ActivityLevel::Summary && !lines.is_empty() {
-            return div()
+        let is_summary = shown_level == ActivityLevel::Summary && !lines.is_empty();
+        if is_summary {
+            let summary = div()
                 .id("activity-summary")
                 .flex()
                 .items_center()
-                .gap(px(6.))
-                .mb(px(12.))
+                .gap(px(5.))
                 .mx(px(-4.))
                 .px(px(4.))
                 .py(px(2.))
                 .rounded(px(5.))
+                .text_size(px(12.5))
+                .text_color(theme.text_2)
                 .hover(|style| style.bg(theme.hover))
                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.activity_level = this.next_activity_level();
                     cx.notify();
                 }))
-                .child(
-                    div()
-                        .text_size(px(11.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.text_2)
-                        .child("ACTIVITY"),
-                )
-                .child(
-                    div()
-                        .text_size(px(12.))
-                        .text_color(theme.text_3)
-                        .child(board::activity_counts(&lines)),
-                )
-                .child(icon(theme::ICON_CHEVRON, 8., theme.text_3))
+                .child(board::activity_counts(&lines))
+                .child(icon(theme::ICON_CHEVRON, 8., theme.text_3));
+            return Self::section("Activity", theme)
+                .child(summary)
                 .into_any_element();
         }
         let level_button = div()
@@ -3326,7 +3321,6 @@ impl BoardView {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let copied_text = detail.text.to_string();
         self.scrim(theme)
             .id("error-detail")
             .occlude()
@@ -3346,7 +3340,8 @@ impl BoardView {
                             .text_size(px(14.))
                             .font_weight(FontWeight::BOLD)
                             .child(icon(theme::status_icon(Status::Failed), 13., theme.red))
-                            .child(detail.title),
+                            .child(div().flex_1().child(detail.title))
+                            .child(kbd("esc", theme)),
                     )
                     .child(
                         div()
@@ -3359,45 +3354,25 @@ impl BoardView {
                             .child(code_marked_text(&detail.text)),
                     )
                     .child(
-                        div()
-                            .flex()
-                            .gap(px(8.))
-                            .mt(px(14.))
-                            .child(
-                                Self::sheet_button(
-                                    "error-close",
-                                    "Close".to_string(),
-                                    "esc",
-                                    false,
-                                    false,
-                                    theme,
-                                )
-                                .on_click(cx.listener(
-                                    |this, _: &ClickEvent, _, cx| {
-                                        this.error_detail = None;
-                                        cx.notify();
-                                    },
-                                )),
-                            )
-                            .child(
-                                Self::sheet_button(
-                                    "error-copy",
-                                    "Copy".to_string(),
-                                    "C",
-                                    true,
-                                    false,
-                                    theme,
-                                )
-                                .on_click(cx.listener(
-                                    move |this, _: &ClickEvent, _, cx| {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(
-                                            copied_text.clone(),
-                                        ));
-                                        this.error_detail = None;
-                                        this.show_toast("Copied the error", cx);
-                                    },
-                                )),
-                            ),
+                        div().flex().justify_end().mt(px(12.)).child(
+                            div()
+                                .id("error-copy")
+                                .flex()
+                                .items_center()
+                                .gap(px(7.))
+                                .h(px(26.))
+                                .pl(px(10.))
+                                .pr(px(5.))
+                                .rounded(px(7.))
+                                .bg(theme.fill)
+                                .font_weight(FontWeight::MEDIUM)
+                                .hover(|style| style.bg(theme.hover))
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.copy_error_detail(cx);
+                                }))
+                                .child("Copy")
+                                .child(kbd("\u{2318}C", theme)),
+                        ),
                     ),
             )
             .into_any_element()
@@ -3760,7 +3735,7 @@ impl BoardView {
     fn render_toast(&self, toast: &Toast, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         div()
             .absolute()
-            .bottom(px(5.))
+            .bottom(px(BOTTOM_BAR_HEIGHT + 6.))
             .left_0()
             .w_full()
             .px(px(8.))
