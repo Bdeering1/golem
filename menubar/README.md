@@ -3,6 +3,15 @@
 A native macOS menu bar version of `golem board`. It reads golem's ledger and progress logs
 directly and runs `golem <action> <id>` for actions, so it needs no changes to golem itself.
 
+Building needs a Rust toolchain (1.91 or newer) and Xcode. Xcode 26 ships without the Metal
+compiler that GPUI's build uses, so download it once:
+
+```sh
+xcodebuild -downloadComponent MetalToolchain
+```
+
+Then build and install the app:
+
 ```sh
 ./build-app.sh                                   # builds target/release/Golem Board.app
 cp -R "target/release/Golem Board.app" /Applications

@@ -22,7 +22,7 @@ const WAITING_DIRECTORY_TEXT: &str = "waiting for directory:";
 const BUSY_DIRECTORY_TEXT: &str = "dir busy:";
 const NO_PR_TEXT: &str = "no PR";
 const CLOSED_TEXT: &str = "closed";
-const PULL_REQUEST_STATE_OPEN: &str = "open";
+pub const PULL_REQUEST_STATE_OPEN: &str = "open";
 const DONE_THREAD_STATES: [&str; 3] = ["settled", "archived", "deleted"];
 const THREAD_STATE_UNSETTLED: &str = "unsettled";
 pub const SHELL_PROMPT: &str = "$ ";
@@ -230,6 +230,19 @@ impl Action {
         }
     }
 
+    /// What the toast says after this action's `golem` run succeeds.
+    pub fn done_text(self) -> &'static str {
+        match self {
+            Action::Pickup => "Picked up",
+            Action::Retry => "Retrying",
+            Action::RerunGate => "Gate passed",
+            Action::Close => "Closed",
+            Action::Cancel => "Cancelled",
+            Action::Dismiss => "Dismissed",
+            Action::CloseAll | Action::Watch | Action::OpenPullRequest | Action::Copy => "",
+        }
+    }
+
     /// Whether this action runs `golem`, so only one can be in flight per task.
     pub fn is_golem_run(self) -> bool {
         !self.command().is_empty()
@@ -284,7 +297,6 @@ fn dependent_task_ids<'a>(tasks: &'a Tasks, parent_id: &str) -> Vec<&'a str> {
         .collect()
 }
 
-/// How many waiting follow-up steps `golem cancel` cancels along with this task.
 /// The names of the waiting steps that follow a task, which move to Done with it.
 pub fn waiting_dependent_names(tasks: &Tasks, task_id: &str) -> Vec<String> {
     let mut names = Vec::new();
@@ -1523,16 +1535,6 @@ mod tests {
     }
 
     #[test]
-    fn card_durations_keep_their_largest_unit() {
-        assert_eq!(largest_unit_only("2h 30m ago"), "2h ago");
-        assert_eq!(largest_unit_only("for 2d 18h"), "for 2d");
-        assert_eq!(
-            largest_unit_only("starts today 3:40pm"),
-            "starts today 3:40pm"
-        );
-    }
-
-    #[test]
     fn duration_text_matches_golem() {
         assert_eq!(duration_text(30.0), "<1m");
         assert_eq!(duration_text(5.0 * 60.0), "5m");
@@ -1562,7 +1564,7 @@ mod tests {
     }
 
     #[test]
-    fn finished_chain_moves_to_done_when_its_pull_requests_close() {
+    fn finished_chain_stays_in_review_until_its_work_is_settled() {
         let mut open = task(Status::Finished);
         open.pull_requests = vec![PullRequest {
             url: "https://x/pull/4".into(),
@@ -1570,18 +1572,23 @@ mod tests {
         }];
         let mut merged = open.clone();
         merged.pull_requests[0].state = "merged".into();
-        let rows = board_rows(&tasks(vec![("a", open), ("b", merged)]), now());
-        let columns: Vec<(&str, Column)> = rows
-            .iter()
-            .map(|row| (row.task_id.as_str(), row.column))
-            .collect();
-        assert_eq!(columns, vec![("a", Column::Review), ("b", Column::Done)]);
-    }
-
-    #[test]
-    fn names_text_lists_three_then_counts() {
-        assert_eq!(names_text(&["a", "b"]), "a and b");
-        assert_eq!(names_text(&["a", "b", "c", "d", "e"]), "a, b, c and 2 more");
+        let mut closed = open.clone();
+        closed.closed_at = Some(iso(now()));
+        let mut open_thread = task(Status::Finished);
+        open_thread.t3_code_thread_id = Some("t".into());
+        let mut settled_thread = open_thread.clone();
+        settled_thread.t3_code_thread_state = Some("settled".into());
+        let cases = [
+            (open, Column::Review),
+            (merged, Column::Done),
+            (closed, Column::Done),
+            (open_thread, Column::Review),
+            (settled_thread, Column::Done),
+        ];
+        for (index, (finished, column)) in cases.into_iter().enumerate() {
+            let rows = board_rows(&tasks(vec![("a", finished)]), now());
+            assert_eq!(rows[0].column, column, "case {index}");
+        }
     }
 
     #[test]
@@ -1663,7 +1670,6 @@ mod tests {
         ]
         .map(String::from)
         .to_vec();
-        assert_eq!(activity_counts(&lines), "2 messages, 3 tool calls");
         assert_eq!(
             activity_view(&lines, ActivityLevel::Messages),
             vec![

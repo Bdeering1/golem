@@ -1400,7 +1400,7 @@ impl BoardView {
             }
             Action::OpenPullRequest => {
                 let mut pull_requests = board::row_pull_requests(&self.snapshot, row);
-                pull_requests.sort_by_key(|pr| pr.state != "open");
+                pull_requests.sort_by_key(|pr| pr.state != board::PULL_REQUEST_STATE_OPEN);
                 let presses = self.pull_request_presses.entry(task_id).or_insert(0);
                 let press = *presses % pull_requests.len().max(1);
                 *presses += 1;
@@ -1425,15 +1425,6 @@ impl BoardView {
                 let backend = self.snapshot.tasks[&row.task_id].backend.clone();
                 let is_terminal_pickup =
                     action == Action::Pickup && TERMINAL_BACKENDS.contains(&backend.as_str());
-                let done_text = match action {
-                    Action::Pickup => "Picked up",
-                    Action::Retry => "Retrying",
-                    Action::RerunGate => "Gate passed",
-                    Action::Close => "Closed",
-                    Action::Cancel => "Cancelled",
-                    Action::Dismiss => "Dismissed",
-                    _ => "",
-                };
                 let busy = vec![(task_id.clone(), action)];
                 self.run_in_background(
                     busy,
@@ -1443,7 +1434,7 @@ impl BoardView {
                         } else {
                             golem.run(action.command(), &task_id)
                         };
-                        outcome_or(outcome, done_text.to_string())
+                        outcome_or(outcome, action.done_text().to_string())
                     },
                     cx,
                 );
@@ -3139,7 +3130,7 @@ impl BoardView {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let url = pull_request.url.clone();
-        let is_open = pull_request.state == "open";
+        let is_open = pull_request.state == board::PULL_REQUEST_STATE_OPEN;
         div()
             .id(SharedString::from(format!("pr-{}", pull_request.url)))
             .flex()
