@@ -55,6 +55,7 @@ const ERROR_TOAST_DURATION: Duration = Duration::from_secs(8);
 const CHANGE_HIGHLIGHT_DURATION: Duration = Duration::from_secs(10);
 /// A menu bar click that lands this soon after the panel hid itself is the click that hid it.
 const REOPEN_GUARD: Duration = Duration::from_millis(300);
+const FILTER_RESET_AFTER: Duration = Duration::from_secs(60);
 const SCROLL_STEP: f32 = 240.0;
 const BUSY_PULSE_PERIOD: Duration = Duration::from_millis(1400);
 const BUSY_PULSE_FPS: f32 = 30.0;
@@ -426,12 +427,15 @@ impl BoardView {
         cx.notify();
     }
 
+    /// Highlights count down only while the panel shows, so changes made while it was closed
+    /// are still tinted when it opens.
     fn tick(&mut self, cx: &mut Context<Self>) {
+        if !self.is_visible() {
+            return;
+        }
         let now = Instant::now();
         self.changed_until.retain(|_, until| *until > now);
-        if self.is_visible() {
-            cx.notify();
-        }
+        cx.notify();
     }
 
     fn update_tray(&self) {
@@ -652,7 +656,18 @@ impl BoardView {
         {
             return;
         }
+        // A glance after a break should show the whole board, not a filter typed long ago.
+        if self
+            .hidden_at
+            .is_some_and(|hidden_at| hidden_at.elapsed() > FILTER_RESET_AFTER)
+        {
+            self.query.clear();
+        }
         self.reload(cx);
+        let until = Instant::now() + CHANGE_HIGHLIGHT_DURATION;
+        self.changed_until
+            .values_mut()
+            .for_each(|changed_until| *changed_until = until);
         self.place(true, cx);
         self.focus_handle.focus(window, cx);
         self.reveal_selected();
@@ -1959,7 +1974,7 @@ impl BoardView {
                 })
                 .when(is_current, |this| {
                     this.bg(theme.raised).shadow(vec![BoxShadow {
-                        color: theme.line,
+                        color: theme.segment_shadow,
                         offset: point(px(0.), px(1.)),
                         blur_radius: px(3.),
                         spread_radius: px(0.),
