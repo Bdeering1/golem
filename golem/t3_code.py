@@ -236,13 +236,16 @@ def latest_run(projection: ledger.JsonObject) -> ledger.JsonObject | None:
 
 
 def latest_run_not_cancelled_before_start(
-    projection: ledger.JsonObject,
+    projection: ledger.JsonObject, kept_run_id: str | None = None
 ) -> ledger.JsonObject | None:
     # T3 Code can cancel a queued run before it starts while an earlier run is still active.
+    # The kept run counts even then, so a send cancelled before it starts still fails its task.
     runs = [
         run
         for run in cast("list[ledger.JsonObject]", projection.get("runs", []))
-        if run.get("status") != CANCELLED_RUN_STATUS or run.get("startedAt") is not None
+        if run.get("id") == kept_run_id
+        or run.get("status") != CANCELLED_RUN_STATUS
+        or run.get("startedAt") is not None
     ]
     return max(runs, key=lambda run: cast("int", run["ordinal"]), default=None)
 

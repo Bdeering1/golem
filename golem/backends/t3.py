@@ -455,7 +455,7 @@ def wait_for_quiet_thread(
     # T3 Code runs a subagent's follow-up in a new run, which `thread send --wait` doesn't follow.
     while True:
         if projection is not None:
-            run = t3_code.latest_run_not_cancelled_before_start(projection)
+            run = t3_code.latest_run_not_cancelled_before_start(projection, watcher.run_id)
             if is_request_pending(projection):
                 return waiting_outcome(last_reply(projection, run))
             is_active = has_active_run(run)

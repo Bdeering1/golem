@@ -475,6 +475,20 @@ def test_background_subagent_keeps_task_running_until_the_later_run_ends(
     assert task["result"] == LATER_REPLY
 
 
+def test_send_cancelled_before_it_starts_fails_task(t3_server, follow_ups, ledger_path):
+    write_send_result(t3_server, 1, error="cancelled")
+    previous_run = {"id": "previous-run", "ordinal": 1, "startedAt": STARTED_AT}
+    sent_run = {**CANCELLED_QUEUED_RUN, "id": FIRST_RUN_ID, "ordinal": 2}
+    follow_ups[:] = [
+        projection(runs=[{**previous_run, "status": "running"}, sent_run]),
+        projection(runs=[{**previous_run, "status": "completed"}, sent_run]),
+    ]
+
+    task = run_t3_task(ledger_path)
+
+    assert task["status"] == ledger.STATUS_FAILED
+
+
 def test_question_in_later_run_blocks_task(t3_server, follow_ups, ledger_path):
     follow_ups[:] = [
         projection(
