@@ -4590,7 +4590,7 @@ impl BoardView {
         };
         let mut list = div()
             .id("palette-list")
-            .max_h(px(list_height))
+            .when(!items.is_empty(), |this| this.max_h(px(list_height)))
             .overflow_y_scroll()
             .track_scroll(&self.palette_scroll)
             .px(px(5.))
