@@ -6,6 +6,7 @@ from tests import support, t3_support
 PARENT_FINISHED_AT = "2030-01-01T10:00:00+00:00"
 RUN_BEFORE_FINISH = {"id": "run-1", "ordinal": 1, "startedAt": "2030-01-01T09:00:00.000Z"}
 RUN_AFTER_FINISH = {"id": "run-2", "ordinal": 2, "startedAt": "2030-01-01T11:00:00.000Z"}
+CANCELLED_QUEUED_RUN = {"id": "queued-run", "ordinal": 2, "status": "cancelled", "startedAt": None}
 SETTLE_COMMAND = {
     "type": "thread.settle",
     "threadId": t3_support.CLAUDE_THREAD_ID,
@@ -102,15 +103,26 @@ def test_finished_dependent_settles_parents_thread_once(server, ledger_path):
     assert parent_settle_state(ledger_path) == ledger.THREAD_SETTLE_DONE
 
 
-def test_picked_up_thread_without_runs_is_settled(server, ledger_path):
+@pytest.mark.parametrize(
+    ("runs", "expected_command"),
+    [
+        pytest.param(
+            [], {"type": "thread.settle", "threadId": t3_support.CLAUDE_THREAD_ID}, id="no-runs"
+        ),
+        pytest.param(
+            [RUN_BEFORE_FINISH, CANCELLED_QUEUED_RUN],
+            {**SETTLE_COMMAND, "expectedLatestRunId": CANCELLED_QUEUED_RUN["id"]},
+            id="cancelled-queued-run",
+        ),
+    ],
+)
+def test_picked_up_idle_thread_is_settled(server, ledger_path, runs, expected_command):
     write_chain(ledger_path, parent_fields=PENDING)
-    server.projections[0] = {"thread": {}, "runs": []}
+    server.projections[0] = {"thread": {}, "runs": runs}
 
     thread_settling.settle_pending_threads()
 
-    assert t3_support.sent_commands(server) == [
-        {"type": "thread.settle", "threadId": t3_support.CLAUDE_THREAD_ID}
-    ]
+    assert t3_support.sent_commands(server) == [expected_command]
 
 
 def raise_missing_thread(*_: object):
