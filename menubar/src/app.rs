@@ -1515,13 +1515,14 @@ impl BoardView {
             let copy_error = self
                 .selected_error()
                 .map(|_| (Command::CopyError, "Copy error".to_string(), String::new()));
-            let copy_result = self.selected_result().map(|_| {
-                (
-                    Command::CopyResult,
-                    "Copy result".to_string(),
-                    String::new(),
-                )
-            });
+            let result_label = if row.status == Status::Failed {
+                "Copy stop reason"
+            } else {
+                "Copy result"
+            };
+            let copy_result = self
+                .selected_result()
+                .map(|_| (Command::CopyResult, result_label.to_string(), String::new()));
             let copy_fields = COPYABLE_FIELDS
                 .into_iter()
                 .filter(|(field, _)| self.selected_field(field).is_some())
