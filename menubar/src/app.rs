@@ -829,10 +829,7 @@ impl BoardView {
             self.is_showing_done = true;
         }
         self.tab = column;
-        self.is_following = false;
-        self.expanded_sections.clear();
-        self.expanded_folds.clear();
-        self.detail_scroll.set_offset(point(px(0.), px(0.)));
+        self.reset_view_if_task_changed();
         self.reveal_selected();
         cx.notify();
     }
@@ -1176,7 +1173,6 @@ impl BoardView {
     }
 
     fn perform(&mut self, action: Action, row: &Row, cx: &mut Context<Self>) {
-        let name = board::row_title(row).to_string();
         let task_id = row.task_id.clone();
         if let Some(busy_action) = self.busy_actions.get(&task_id)
             && action.is_golem_run()
@@ -1218,13 +1214,13 @@ impl BoardView {
                 let is_terminal_pickup =
                     action == Action::Pickup && TERMINAL_BACKENDS.contains(&backend.as_str());
                 let done_text = match action {
-                    Action::Pickup => format!("Picked up {name}"),
-                    Action::Retry => format!("Retrying {name}"),
-                    Action::RerunGate => format!("Gate passed for {name}; follow-ups started"),
-                    Action::Close => format!("Closed {name}"),
-                    Action::Cancel => format!("Cancelled {name}"),
-                    Action::Dismiss => format!("Dismissed {name}"),
-                    _ => String::new(),
+                    Action::Pickup => "Picked up",
+                    Action::Retry => "Retrying",
+                    Action::RerunGate => "Gate passed",
+                    Action::Close => "Closed",
+                    Action::Cancel => "Cancelled",
+                    Action::Dismiss => "Dismissed",
+                    _ => "",
                 };
                 let busy = vec![(task_id.clone(), action)];
                 self.run_in_background(
@@ -1235,7 +1231,7 @@ impl BoardView {
                         } else {
                             golem.run(action.command(), &task_id)
                         };
-                        outcome_or(outcome, done_text)
+                        outcome_or(outcome, done_text.to_string())
                     },
                     cx,
                 );
