@@ -768,12 +768,18 @@ fn searched_fields(row: &Row, snapshot: &Snapshot) -> Vec<(&'static str, String)
     fields
 }
 
+/// Text as the filter compares it: lowercase, with dashes and underscores as spaces so
+/// "rate limit" finds rate-limit. Each swap keeps the byte length, so match ranges hold.
+pub fn search_text(text: &str) -> String {
+    text.to_lowercase().replace(['-', '_'], " ")
+}
+
 pub fn is_matching(row: &Row, snapshot: &Snapshot, query: &str) -> bool {
-    let query = query.to_lowercase();
+    let query = search_text(query);
     let fields = searched_fields(row, snapshot);
     fields
         .iter()
-        .any(|(_, field)| field.to_lowercase().contains(&query))
+        .any(|(_, field)| search_text(field).contains(&query))
 }
 
 #[derive(Debug, PartialEq)]
@@ -787,7 +793,7 @@ pub struct MatchExcerpt {
 /// For a card whose title, repo and line don't show the query, the line of a hidden field
 /// that matched, named and from a little before the match.
 pub fn match_excerpt(row: &Row, snapshot: &Snapshot, query: &str) -> Option<MatchExcerpt> {
-    let query = query.to_lowercase();
+    let query = search_text(query);
     let visible = [
         row_title(row).to_string(),
         repository_name(row).to_string(),
@@ -795,7 +801,7 @@ pub fn match_excerpt(row: &Row, snapshot: &Snapshot, query: &str) -> Option<Matc
     ];
     if visible
         .iter()
-        .any(|text| text.to_lowercase().contains(&query))
+        .any(|text| search_text(text).contains(&query))
     {
         return None;
     }
@@ -803,9 +809,11 @@ pub fn match_excerpt(row: &Row, snapshot: &Snapshot, query: &str) -> Option<Matc
     let (source, line) = fields
         .iter()
         .flat_map(|(source, field)| field.lines().map(move |line| (*source, line)))
-        .find(|(_, line)| line.to_lowercase().contains(&query))?;
+        .find(|(_, line)| search_text(line).contains(&query))?;
     let line = line.trim();
-    let lowered = line.to_lowercase();
+    // The source reads as a tag, in the details section titles' uppercase.
+    let source = source.to_uppercase();
+    let lowered = search_text(line);
     // Lowercasing can change a line's byte length, which would misplace the highlight.
     let Some(start) = lowered.find(&query).filter(|_| lowered.len() == line.len()) else {
         return Some(MatchExcerpt {
@@ -1579,6 +1587,7 @@ mod tests {
     #[test]
     fn filter_matches_what_cards_show() {
         let mut blocked = task(Status::Blocked);
+        blocked.label = Some("checkout-copy".into());
         blocked.gate_stop_reason = Some("3 tests failed in checkout.spec.ts".into());
         blocked.pull_requests = vec![PullRequest {
             url: "https://x/pull/412".into(),
@@ -1602,7 +1611,8 @@ mod tests {
         assert!(!is_matching(running_row, &snapshot, "b fix"));
         let excerpt = match_excerpt(running_row, &snapshot, "FLAKY").unwrap();
         assert_eq!(&excerpt.text[excerpt.match_range], "flaky");
-        assert_eq!(&excerpt.text[..excerpt.source_size], "Prompt");
+        assert_eq!(&excerpt.text[..excerpt.source_size], "PROMPT");
+        assert!(is_matching(blocked_row, &snapshot, "checkout copy"));
         assert_eq!(match_excerpt(running_row, &snapshot, "10 runs"), None);
     }
 

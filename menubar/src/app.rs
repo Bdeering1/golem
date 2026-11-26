@@ -2105,8 +2105,8 @@ fn found_style(theme: &Theme) -> HighlightStyle {
 
 /// `text` with each match of the filter query marked, so every card shows why it matched.
 fn marked_matches(text: &str, query: &str, theme: &Theme) -> StyledText {
-    let lowered = text.to_lowercase();
-    let query = query.to_lowercase();
+    let lowered = board::search_text(text);
+    let query = board::search_text(query);
     // Lowercasing can change the byte length, which would misplace the marks.
     let highlights: Vec<_> = if query.is_empty() || lowered.len() != text.len() {
         Vec::new()
@@ -2690,6 +2690,7 @@ impl BoardView {
             Some(excerpt) => {
                 let source = HighlightStyle {
                     color: Some(theme.text_3),
+                    font_weight: Some(FontWeight::SEMIBOLD),
                     ..HighlightStyle::default()
                 };
                 let found = (!excerpt.match_range.is_empty())
