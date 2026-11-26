@@ -1116,6 +1116,20 @@ impl BoardView {
                     (true, [(task_id, action)]) => {
                         this.note_failure(task_id, *action, outcome.message, cx)
                     }
+                    // The short outcome names its task once the selection has moved on.
+                    (false, [(task_id, _)])
+                        if this
+                            .selected_row()
+                            .is_none_or(|row| row.task_id != *task_id) =>
+                    {
+                        let row = this
+                            .snapshot
+                            .rows
+                            .iter()
+                            .find(|row| row.task_id == *task_id);
+                        let name = row.map_or(task_id.as_str(), board::row_title).to_string();
+                        this.show_toast(format!("{name}: {}", outcome.message), cx)
+                    }
                     _ => this.show_message(outcome.message, outcome.is_error, None, cx),
                 }
                 this.reload(cx);
@@ -1940,7 +1954,9 @@ impl BoardView {
                                     cx.notify();
                                 }))
                                 .child("Details")
-                                .child(kbd("D", theme)),
+                                .when(self.input != Input::Filter, |this| {
+                                    this.child(kbd("D", theme))
+                                }),
                         ),
                 )
             })
@@ -3851,7 +3867,9 @@ impl BoardView {
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .child("Details"),
                         )
-                        .child(kbd("D", theme))
+                        .when(self.input != Input::Filter, |this| {
+                            this.child(kbd("D", theme))
+                        })
                     }),
             )
             .into_any_element()
