@@ -752,7 +752,6 @@ impl BoardView {
         }
     }
 
-    /// Follow, opened text and scroll belong to one task, so a new selection starts fresh.
     /// Clears the view's per-task state only when another task is selected, so an extra
     /// J at the end of the list or a repeated click keeps folds, Follow and scroll.
     fn reset_view_if_task_changed(&mut self) {
@@ -1005,6 +1004,25 @@ impl BoardView {
         scroll_handle_by(handle, delta);
     }
 
+    /// While the filter is edited, letter keys type, so bare-letter keycaps hide.
+    fn is_typing(&self) -> bool {
+        self.input == Input::Filter
+    }
+
+    /// Whether a task's card is inside the list's visible area, as of the last layout.
+    fn is_card_on_screen(&self, task_id: &str) -> bool {
+        let rows = self.column_rows(self.tab);
+        let Some(index) = rows.iter().position(|row| row.task_id == task_id) else {
+            return false;
+        };
+        let Some(card) = self.list_scroll.bounds_for_item(index) else {
+            return false;
+        };
+        let viewport = self.list_scroll.bounds();
+        let offset = self.list_scroll.offset().y;
+        card.top() + offset < viewport.bottom() && card.bottom() + offset > viewport.top()
+    }
+
     /// Whether a sheet covers the board, so board keys and navigation must not reach it.
     fn is_sheet_open(&self) -> bool {
         self.pending.is_some() || self.is_showing_help || self.error_detail.is_some()
@@ -1139,7 +1157,7 @@ impl BoardView {
         cx.notify();
     }
 
-    /// Keeps a failed run on its card, and toasts it only when that card is out of sight.
+    /// Keeps a failed run on its card, and toasts it only when that card is off screen.
     fn note_failure(
         &mut self,
         task_id: &str,
@@ -1149,11 +1167,7 @@ impl BoardView {
     ) {
         let row = self.snapshot.rows.iter().find(|row| row.task_id == task_id);
         let name = row.map_or(task_id, board::row_title).to_string();
-        let is_in_view = self
-            .column_rows(self.tab)
-            .iter()
-            .any(|row| row.task_id == task_id);
-        if !is_in_view {
+        if !(self.is_visible() && self.is_card_on_screen(task_id)) {
             self.show_message(
                 format!("{} for {name}", action.failed_text()),
                 true,
@@ -1961,9 +1975,7 @@ impl BoardView {
                                     cx.notify();
                                 }))
                                 .child("Details")
-                                .when(self.input != Input::Filter, |this| {
-                                    this.child(kbd("D", theme))
-                                }),
+                                .when(!self.is_typing(), |this| this.child(kbd("D", theme))),
                         ),
                 )
             })
@@ -2092,9 +2104,9 @@ impl BoardView {
                     Self::quick_action_button(action, &row.root_id, false, theme, cx),
                 ))
         });
-        let quick_action = quick_action
-            .filter(|_| is_selected)
-            .map(|action| Self::quick_action_button(action, &row.root_id, true, theme, cx));
+        let quick_action = quick_action.filter(|_| is_selected).map(|action| {
+            Self::quick_action_button(action, &row.root_id, !self.is_typing(), theme, cx)
+        });
         div()
             .id(card_id.clone())
             .group(card_id)
@@ -2198,7 +2210,7 @@ impl BoardView {
     fn quick_action_button(
         action: Action,
         root_id: &str,
-        is_selected: bool,
+        has_key: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -2212,7 +2224,7 @@ impl BoardView {
             .h(px(20.))
             .my(px(-2.))
             .pl(px(8.))
-            .pr(px(if is_selected { 3. } else { 8. }))
+            .pr(px(if has_key { 3. } else { 8. }))
             .rounded(px(5.))
             .bg(theme.accent_fill)
             .text_color(theme.on_accent)
@@ -2225,7 +2237,7 @@ impl BoardView {
                 this.request(action, cx);
             }))
             .child(action.label())
-            .when(is_selected, |this| {
+            .when(has_key, |this| {
                 this.child(
                     kbd(&key_label(action), theme)
                         .h(px(14.))
@@ -2996,6 +3008,7 @@ impl BoardView {
             } else {
                 (theme.fill, theme.text)
             };
+            let has_key = is_primary && !self.is_typing();
             let key_chip = kbd(&key_label(action), theme).when(is_primary, |this| {
                 this.bg(gpui::rgba(FILLED_KEYCAP_BACKGROUND))
                     .text_color(theme.on_accent)
@@ -3007,7 +3020,7 @@ impl BoardView {
                 .gap(px(7.))
                 .h(px(26.))
                 .pl(px(10.))
-                .pr(px(if is_primary { 6. } else { 10. }))
+                .pr(px(if has_key { 6. } else { 10. }))
                 .rounded(px(7.))
                 .bg(background)
                 .text_color(foreground)
@@ -3026,7 +3039,7 @@ impl BoardView {
                 })
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.request(action, cx)))
                 .child(label)
-                .when(is_primary, |this| this.child(key_chip))
+                .when(has_key, |this| this.child(key_chip))
         });
         div()
             .flex_1()
@@ -3190,7 +3203,7 @@ impl BoardView {
                         cx.notify();
                     }))
                     .child("Keys")
-                    .child(kbd("?", theme)),
+                    .when(!self.is_typing(), |this| this.child(kbd("?", theme))),
             )
             .into_any_element()
     }
@@ -3847,9 +3860,7 @@ impl BoardView {
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .child("Details"),
                         )
-                        .when(self.input != Input::Filter, |this| {
-                            this.child(kbd("D", theme))
-                        })
+                        .when(!self.is_typing(), |this| this.child(kbd("D", theme)))
                     }),
             )
             .into_any_element()
