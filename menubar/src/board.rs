@@ -188,10 +188,7 @@ impl Action {
     }
 
     pub fn is_confirmed(self) -> bool {
-        matches!(
-            self,
-            Action::Close | Action::CloseAll | Action::Cancel | Action::Retry
-        )
+        matches!(self, Action::CloseAll | Action::Cancel | Action::Retry)
     }
 
     /// What a card says while this action's `golem` run is in flight.
@@ -204,6 +201,23 @@ impl Action {
             Action::Cancel => "Cancelling\u{2026}",
             Action::Watch | Action::OpenPullRequest | Action::Copy => "",
         }
+    }
+
+    /// How a card and the details pane name this action's failed `golem` run.
+    pub fn failed_text(self) -> &'static str {
+        match self {
+            Action::Pickup => "Pick up failed",
+            Action::Retry => "Retry failed",
+            Action::RerunGate => "Gate still failing",
+            Action::Close | Action::CloseAll => "Close failed",
+            Action::Cancel => "Cancel failed",
+            Action::Watch | Action::OpenPullRequest | Action::Copy => "",
+        }
+    }
+
+    /// Whether this action runs `golem`, so only one can be in flight per task.
+    pub fn is_golem_run(self) -> bool {
+        !self.command().is_empty()
     }
 
     pub fn unavailable_text(self) -> &'static str {
@@ -753,9 +767,10 @@ fn when_text(task: &Task, now: DateTime<Local>) -> String {
                 "due now".to_string()
             }
         }
-        Status::Running if task.started_at.is_some() => {
+        Status::Running if task.started_at.is_some() => format!(
+            "for {}",
             duration_text(seconds_since(task.started_at.as_deref().unwrap_or(""), now))
-        }
+        ),
         Status::Blocked | Status::Failed | Status::Finished if stopped_at.is_some() => {
             format!(
                 "{} ago",

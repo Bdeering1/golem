@@ -2,13 +2,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use chrono::Local;
+use chrono::{DateTime, Local};
 use futures::StreamExt;
 use futures::channel::mpsc::UnboundedReceiver;
 use gpui::{
-    AnyElement, BoxShadow, ClickEvent, ClipboardItem, Context, Div, FocusHandle, FontWeight, Hsla,
-    KeyDownEvent, ScrollHandle, SharedString, Stateful, Subscription, Task, Window, div, point,
-    prelude::*, px, svg,
+    Animation, AnimationExt, AnyElement, BoxShadow, ClickEvent, ClipboardItem, Context, Div,
+    FocusHandle, FontWeight, Hsla, KeyDownEvent, ScrollHandle, SharedString, Stateful,
+    Subscription, Task, Window, div, linear_color_stop, linear_gradient, point, prelude::*,
+    pulsating_between, px, svg,
 };
 use notify::Watcher;
 use objc2::rc::Retained;
@@ -40,7 +41,10 @@ const CHANGE_HIGHLIGHT_DURATION: Duration = Duration::from_secs(10);
 /// A menu bar click that lands this soon after the panel hid itself is the click that hid it.
 const REOPEN_GUARD: Duration = Duration::from_millis(300);
 const SCROLL_STEP: f32 = 240.0;
+const BUSY_PULSE_PERIOD: Duration = Duration::from_millis(1400);
+const BUSY_PULSE_FPS: f32 = 30.0;
 const LONG_PROMPT_CHARS: usize = 240;
+const MESSAGE_ITEM_LIMIT: usize = 12;
 const NOTHING_NEEDS_YOU_TEXT: &str = "Nothing needs you right now";
 const GOLEM_MISSING_TEXT: &str = "Still looking for golem";
 const TERMINAL_BACKENDS: [&str; 2] = ["claude", "codex"];
@@ -69,6 +73,7 @@ enum Command {
     NextAttention,
     ToggleDone,
     ToggleDetails,
+    ToggleSession,
     Filter,
     Help,
     Quit,
@@ -100,6 +105,12 @@ struct Outcome {
     is_error: bool,
 }
 
+/// A task's last failed `golem` run, shown on its card and in details until the next action.
+struct ActionError {
+    action: Action,
+    message: String,
+}
+
 struct Pending {
     action: Action,
     task_id: Option<String>,
@@ -125,14 +136,13 @@ pub struct BoardView {
     is_following: bool,
     is_showing_fields: bool,
     is_showing_prompt: bool,
-    is_showing_activity: bool,
     pending: Option<Pending>,
     is_showing_help: bool,
     palette: Option<Palette>,
     toast: Option<Toast>,
     toast_count: u64,
     busy_actions: HashMap<String, Action>,
-    action_errors: HashMap<String, String>,
+    action_errors: HashMap<String, ActionError>,
     pull_request_presses: HashMap<String, usize>,
     changed_until: HashMap<String, Instant>,
     detail_activity: Option<(String, Vec<String>)>,
@@ -201,6 +211,15 @@ fn icon(path: &'static str, size: f32, color: Hsla) -> gpui::Svg {
         .size(px(size))
         .flex_none()
         .text_color(color)
+}
+
+/// The slow fade on a busy task's icon and button, so an in-flight run doesn't look frozen.
+fn busy_pulse() -> Animation {
+    let mut animation = Animation::new(BUSY_PULSE_PERIOD)
+        .repeat()
+        .with_easing(pulsating_between(0.3, 1.0));
+    animation.max_fps = Some(BUSY_PULSE_FPS);
+    animation
 }
 
 fn key_label(action: Action) -> String {
@@ -292,7 +311,6 @@ impl BoardView {
             is_following: false,
             is_showing_fields: false,
             is_showing_prompt: false,
-            is_showing_activity: true,
             pending: None,
             is_showing_help: false,
             palette: None,
@@ -507,7 +525,10 @@ impl BoardView {
         let longest = self
             .tabs()
             .into_iter()
-            .map(|column| self.column_rows(column).len())
+            .map(|column| {
+                let rows = self.snapshot.rows.iter();
+                rows.filter(|row| row.column == column).count()
+            })
             .max()
             .unwrap_or(0);
         let list_height = (longest as f64 * CARD_PITCH).max(EMPTY_LIST_HEIGHT);
@@ -701,6 +722,16 @@ impl BoardView {
         cx.notify();
     }
 
+    fn toggle_session(&mut self, cx: &mut Context<Self>) {
+        self.is_showing_fields = !self.is_showing_fields || !self.is_expanded;
+        if !self.is_expanded {
+            self.set_expanded(true, cx);
+        }
+        if self.is_showing_fields {
+            self.detail_scroll.scroll_to_bottom();
+        }
+    }
+
     fn toggle_done(&mut self, cx: &mut Context<Self>) {
         self.is_showing_done = !self.is_showing_done;
         if self.is_showing_done {
@@ -810,7 +841,6 @@ impl BoardView {
         self.is_following = !self.is_following;
         if self.is_following {
             self.activity_level = ActivityLevel::All;
-            self.is_showing_activity = true;
             self.detail_scroll.scroll_to_bottom();
         }
         if !self.is_expanded {
@@ -860,12 +890,13 @@ impl BoardView {
             let _ = this.update(cx, |this, cx| {
                 for (task_id, _) in &busy {
                     this.busy_actions.remove(task_id);
-                    if outcome.is_error {
-                        this.action_errors
-                            .insert(task_id.clone(), outcome.message.clone());
-                    }
                 }
-                this.show_message(outcome.message, outcome.is_error, cx);
+                match (outcome.is_error, busy.as_slice()) {
+                    (true, [(task_id, action)]) => {
+                        this.note_failure(task_id, *action, outcome.message, cx)
+                    }
+                    _ => this.show_message(outcome.message, outcome.is_error, cx),
+                }
                 this.reload(cx);
             });
         })
@@ -873,10 +904,37 @@ impl BoardView {
         cx.notify();
     }
 
+    /// Keeps a failed run on its card, and toasts it only when the details pane isn't showing it.
+    fn note_failure(
+        &mut self,
+        task_id: &str,
+        action: Action,
+        message: String,
+        cx: &mut Context<Self>,
+    ) {
+        let row = self.snapshot.rows.iter().find(|row| row.task_id == task_id);
+        let name = row.map_or(task_id, board::row_title).to_string();
+        let is_in_view = self.is_expanded
+            && self
+                .selected_row()
+                .is_some_and(|row| row.task_id == task_id);
+        if !is_in_view {
+            self.show_message(
+                format!("{} for {name}: {message}", action.failed_text()),
+                true,
+                cx,
+            );
+        }
+        self.action_errors
+            .insert(task_id.to_string(), ActionError { action, message });
+    }
+
     fn perform(&mut self, action: Action, row: &Row, cx: &mut Context<Self>) {
         let name = board::row_title(row).to_string();
         let task_id = row.task_id.clone();
-        if let Some(busy_action) = self.busy_actions.get(&task_id) {
+        if let Some(busy_action) = self.busy_actions.get(&task_id)
+            && action.is_golem_run()
+        {
             self.show_toast(busy_action.busy_text(), cx);
             return;
         }
@@ -930,19 +988,7 @@ impl BoardView {
                         } else {
                             golem.run(action.command(), &task_id)
                         };
-                        let mut result = outcome_or(outcome, done_text);
-                        if action != Action::RerunGate && result.is_error {
-                            result.message = format!(
-                                "Couldn't {} {name}: {}",
-                                action.label().to_lowercase(),
-                                result.message
-                            );
-                        }
-                        if action == Action::RerunGate && result.is_error {
-                            result.message =
-                                format!("Gate still failing for {name}: {}", result.message);
-                        }
-                        result
+                        outcome_or(outcome, done_text)
                     },
                     cx,
                 );
@@ -971,7 +1017,10 @@ impl BoardView {
                     .collect();
                 match failures.first() {
                     Some(failure) => Outcome {
-                        message: failure.clone(),
+                        message: format!(
+                            "Close failed for {}: {failure}",
+                            board::counted_text(failures.len(), "task")
+                        ),
                         is_error: true,
                     },
                     None => Outcome {
@@ -1038,6 +1087,14 @@ impl BoardView {
                     if self.is_expanded { "esc" } else { "\u{23ce}" },
                 )
             }),
+            self.selected_row().map(|_| {
+                let label = if self.is_showing_fields && self.is_expanded {
+                    "Hide session info"
+                } else {
+                    "Show session info"
+                };
+                (Command::ToggleSession, label.to_string(), "I")
+            }),
             Some((Command::Filter, "Filter".to_string(), "/")),
             Some((Command::Help, "Keyboard shortcuts".to_string(), "?")),
             Some((Command::Quit, "Quit golem board".to_string(), "\u{2318}Q")),
@@ -1067,6 +1124,7 @@ impl BoardView {
             Command::NextAttention => self.next_attention(cx),
             Command::ToggleDone => self.toggle_done(cx),
             Command::ToggleDetails => self.set_expanded(!self.is_expanded, cx),
+            Command::ToggleSession => self.toggle_session(cx),
             Command::Filter => self.input = Input::Filter,
             Command::Help => self.set_help(true, cx),
             Command::Quit => cx.quit(),
@@ -1095,6 +1153,7 @@ impl BoardView {
                 "w" => self.hide(cx),
                 "q" => cx.quit(),
                 "v" => self.paste(cx),
+                KEY_BACKSPACE => self.clear_input(),
                 _ => return,
             }
             cx.notify();
@@ -1208,6 +1267,15 @@ impl BoardView {
         }
     }
 
+    fn clear_input(&mut self) {
+        if let Some(palette) = self.palette.as_mut() {
+            palette.query.clear();
+            palette.index = 0;
+        } else if self.input == Input::Filter {
+            self.query.clear();
+        }
+    }
+
     /// Pastes the clipboard's text, on one line, into the palette search or the filter.
     fn paste(&mut self, cx: &mut Context<Self>) {
         let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
@@ -1261,7 +1329,6 @@ impl BoardView {
             (_, "?") => self.set_help(true, cx),
             (_, "t") => {
                 self.activity_level = self.activity_level.next();
-                self.is_showing_activity = true;
                 self.is_following = false;
                 if !self.is_expanded {
                     self.set_expanded(true, cx);
@@ -1273,12 +1340,7 @@ impl BoardView {
                     self.set_expanded(true, cx);
                 }
             }
-            (_, "i") => {
-                self.is_showing_fields = !self.is_showing_fields;
-                if !self.is_expanded {
-                    self.set_expanded(true, cx);
-                }
-            }
+            (_, "i") => self.toggle_session(cx),
             (_, "q") => self.hide(cx),
             _ => {
                 self.request_key(typed, cx);
@@ -1336,6 +1398,12 @@ impl BoardView {
                 })
                 .into_any_element()
         };
+        let needing_count = self
+            .tabs()
+            .into_iter()
+            .flat_map(|column| self.column_rows(column))
+            .filter(|row| self.needs_you(row))
+            .count();
         let logo = div()
             .size(px(22.))
             .flex_none()
@@ -1417,13 +1485,26 @@ impl BoardView {
                             .pl(px(10.))
                             .pr(px(7.))
                             .rounded(px(8.))
-                            .bg(theme.fill)
                             .font_weight(FontWeight::MEDIUM)
-                            .hover(|style| style.bg(theme.hover))
+                            .map(|this| {
+                                if needing_count == 0 {
+                                    return this.bg(theme.fill).text_color(theme.text_3);
+                                }
+                                this.bg(theme.accent_soft)
+                                    .text_color(theme.accent)
+                                    .hover(|style| style.opacity(0.85))
+                            })
                             .on_click(
                                 cx.listener(|this, _: &ClickEvent, _, cx| this.next_attention(cx)),
                             )
                             .child("Next")
+                            .when(needing_count > 0, |this| {
+                                this.child(
+                                    div()
+                                        .font_weight(FontWeight::BOLD)
+                                        .child(needing_count.to_string()),
+                                )
+                            })
                             .child(kbd("N", theme)),
                     ),
             )
@@ -1471,7 +1552,10 @@ impl BoardView {
                         inset: false,
                     }])
                 })
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_tab(column, cx)))
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.input = Input::None;
+                    this.set_tab(column, cx)
+                }))
                 .child(column.title())
                 .child(
                     div()
@@ -1519,10 +1603,7 @@ impl BoardView {
         let when = board::card_when_text(row, task, now);
         let (snippet, snippet_color) = match (busy_action, action_error) {
             (Some(action), _) => (action.busy_text().to_string(), theme.accent),
-            (None, Some(error)) => (
-                error.replacen(&format!(" {}:", board::row_title(row)), ":", 1),
-                theme.red,
-            ),
+            (None, Some(error)) => (error.action.failed_text().to_string(), theme.red),
             (None, None) => (board::card_snippet(row, &self.snapshot), theme.text_2),
         };
         let is_code =
@@ -1556,7 +1637,17 @@ impl BoardView {
                     .items_center()
                     .gap(px(7.))
                     .min_w_0()
-                    .child(icon(theme::status_icon(row.status), 14., state_color))
+                    .child(match busy_action {
+                        Some(_) => icon(theme::status_icon(row.status), 14., state_color)
+                            .with_animation(
+                                SharedString::from(format!("busy-{}", row.task_id)),
+                                busy_pulse(),
+                                |icon, opacity| icon.opacity(opacity),
+                            )
+                            .into_any_element(),
+                        None => icon(theme::status_icon(row.status), 14., state_color)
+                            .into_any_element(),
+                    })
                     .child(
                         div()
                             .flex_1()
@@ -1673,70 +1764,6 @@ impl BoardView {
         )
     }
 
-    fn disclosure(
-        id: &'static str,
-        title: &str,
-        is_open: bool,
-        meta: String,
-        trailing: Vec<AnyElement>,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        div()
-            .border_t_1()
-            .border_color(theme.line)
-            .pt(px(7.))
-            .pb(px(2.))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .min_h(px(26.))
-                    .child(
-                        div()
-                            .id(id)
-                            .flex()
-                            .flex_none()
-                            .items_center()
-                            .gap(px(6.))
-                            .h(px(26.))
-                            .pl(px(2.))
-                            .pr(px(6.))
-                            .rounded(px(6.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .hover(|style| style.bg(theme.hover))
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                if id == "fields" {
-                                    this.is_showing_fields = !this.is_showing_fields;
-                                } else {
-                                    this.is_showing_activity = !this.is_showing_activity;
-                                }
-                                cx.notify();
-                            }))
-                            .child(icon(theme::ICON_CHEVRON, 10., theme.text_2).when(
-                                is_open,
-                                |this| {
-                                    this.with_transformation(gpui::Transformation::rotate(
-                                        gpui::percentage(0.25),
-                                    ))
-                                },
-                            ))
-                            .child(title.to_string()),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(12.))
-                            .text_color(theme.text_3)
-                            .child(meta),
-                    )
-                    .children(trailing),
-            )
-    }
-
     fn render_detail_body(
         &mut self,
         row: &Row,
@@ -1757,330 +1784,356 @@ impl BoardView {
                 (Some(_), None) => "Gate failed".to_string(),
                 _ => "Setup failed".to_string(),
             };
-            body = body.child(self.callout(
-                &label,
-                &stop_reason,
-                row.status == Status::Blocked,
-                theme,
-            ));
+            let color = if row.status == Status::Blocked {
+                theme.orange
+            } else {
+                theme.red
+            };
+            body = body.child(Self::callout(&label, &stop_reason, color, true, theme));
         }
         if let Some(error) = self.action_errors.get(&row.task_id) {
-            body = body.child(self.callout("Last action failed", error, false, theme));
-        }
-        if board::is_stuck(row, &task, now) {
-            body = body.child(self.callout(
-                "Stuck",
-                &board::waiting_reason_text(row, &self.snapshot),
-                true,
+            body = body.child(Self::callout(
+                error.action.failed_text(),
+                &error.message,
+                theme.red,
+                false,
                 theme,
             ));
         }
-        if let Some(result) = task
+        if board::is_stuck(row, &task, now) {
+            body = body.child(Self::callout(
+                "Stuck",
+                &board::waiting_reason_text(row, &self.snapshot),
+                theme.orange,
+                false,
+                theme,
+            ));
+        }
+        let result = task
             .result
             .as_deref()
             .filter(|result| !result.trim().is_empty())
-        {
-            let title = if row.status == Status::Failed {
-                "Stop reason"
-            } else {
-                "Result"
-            };
-            body = body
-                .child(Self::section(title, theme).child(div().child(board::plain_result(result))));
-        }
-        let pull_requests = board::row_pull_requests(&self.snapshot, row);
-        if !pull_requests.is_empty() {
-            let mut list = div().flex().flex_col().gap(px(3.)).text_size(px(12.5));
-            for pull_request in pull_requests {
-                let url = pull_request.url.clone();
-                let is_open = pull_request.state == "open";
-                list = list.child(
-                    div()
-                        .id(SharedString::from(format!("pr-{}", pull_request.url)))
-                        .flex()
-                        .gap(px(6.))
-                        .items_baseline()
-                        .rounded(px(5.))
-                        .hover(|style| style.bg(theme.hover))
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                            let url = url.clone();
-                            this.run_in_background(
-                                Vec::new(),
-                                move || outcome_or(golem_cli::open_url(&url), String::new()),
-                                cx,
-                            );
-                        }))
-                        .child(
-                            div()
-                                .font_weight(FontWeight::BOLD)
-                                .child(board::pull_request_number(&pull_request)),
-                        )
-                        .child(
-                            div()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(if is_open { theme.green } else { theme.gray })
-                                .child(pull_request.state.clone()),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .font_family(MONO_FONT)
-                                .text_size(px(11.5))
-                                .text_color(theme.text_3)
-                                .child(pull_request.url.trim_start_matches("https://").to_string()),
-                        ),
-                );
-            }
-            body = body.child(Self::section("Pull requests", theme).child(list));
-        }
-        if row.chain_ids.len() > 1 {
-            let steps = board::chain_steps(row, &self.snapshot.tasks);
-            let mut chain = div()
-                .flex()
-                .flex_wrap()
-                .items_center()
-                .gap(px(5.))
-                .text_size(px(12.))
-                .text_color(theme.text_2);
-            for (index, step) in steps.iter().enumerate() {
-                if index > 0 {
-                    chain = chain.child("\u{2192}");
-                }
-                let text = if step.is_inferable {
-                    step.name.clone()
+            .map(|result| {
+                let title = if row.status == Status::Failed {
+                    "Stop reason"
                 } else {
-                    format!("{} \u{b7} {}", step.name, step.status.name())
+                    "Result"
                 };
-                chain = chain.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(4.))
-                        .pl(px(6.))
-                        .pr(px(8.))
-                        .py(px(2.))
-                        .rounded(px(10.))
-                        .bg(theme.fill)
-                        .when(step.is_shown, |this| {
-                            this.text_color(theme.text)
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .border_1()
-                                .border_color(theme.line)
-                        })
-                        .child(icon(
-                            theme::status_icon(step.status),
-                            11.,
-                            theme.status_color(step.status, false),
-                        ))
-                        .child(text),
-                );
-            }
-            body = body.child(Self::section("Chain", theme).child(chain));
+                Self::section(title, theme)
+                    .child(div().child(board::plain_result(result)))
+                    .into_any_element()
+            });
+        let pull_requests = self.render_pull_requests(row, theme, cx);
+        let chain = self.render_chain(row, theme);
+        let prompt = self.render_prompt(&task, theme, cx);
+        let activity = self.render_activity(row, theme, cx);
+        let session = self
+            .is_showing_fields
+            .then(|| self.render_session(row, now, theme));
+        let sections = if row.status == Status::Running {
+            vec![Some(activity), chain, prompt, session]
+        } else {
+            vec![
+                result,
+                pull_requests,
+                chain,
+                prompt,
+                Some(activity),
+                session,
+            ]
+        };
+        body.children(sections.into_iter().flatten())
+            .into_any_element()
+    }
+
+    fn render_pull_requests(
+        &self,
+        row: &Row,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let pull_requests = board::row_pull_requests(&self.snapshot, row);
+        if pull_requests.is_empty() {
+            return None;
         }
-        if !task.prompt.trim().is_empty() {
-            let is_showing_prompt = self.is_showing_prompt;
-            let is_long = is_long_prompt(&task.prompt);
-            body = body.child(
-                Self::section("Prompt", theme)
+        let mut list = div().flex().flex_col().gap(px(3.)).text_size(px(12.5));
+        for pull_request in pull_requests {
+            let url = pull_request.url.clone();
+            let is_open = pull_request.state == "open";
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!("pr-{}", pull_request.url)))
+                    .flex()
+                    .gap(px(6.))
+                    .items_baseline()
+                    .rounded(px(5.))
+                    .hover(|style| style.bg(theme.hover))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        let url = url.clone();
+                        this.run_in_background(
+                            Vec::new(),
+                            move || outcome_or(golem_cli::open_url(&url), String::new()),
+                            cx,
+                        );
+                    }))
                     .child(
                         div()
-                            .text_color(theme.text_2)
-                            .when(is_long && !is_showing_prompt, |this| this.line_clamp(3))
-                            .child(task.prompt.trim().to_string()),
+                            .font_weight(FontWeight::BOLD)
+                            .child(board::pull_request_number(&pull_request)),
                     )
-                    .when(is_long, |this| {
-                        this.child(
-                            div()
-                                .id("prompt-toggle")
-                                .flex()
-                                .items_center()
-                                .gap(px(6.))
-                                .text_size(px(12.))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(theme.accent)
-                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                    this.is_showing_prompt = !this.is_showing_prompt;
-                                    cx.notify();
-                                }))
-                                .child(if is_showing_prompt {
-                                    "Show less"
-                                } else {
-                                    "Show more"
-                                })
-                                .child(kbd("E", theme)),
-                        )
-                    }),
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(if is_open { theme.green } else { theme.gray })
+                            .child(pull_request.state.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .font_family(MONO_FONT)
+                            .text_size(px(11.5))
+                            .text_color(theme.text_3)
+                            .child(pull_request.url.trim_start_matches("https://").to_string()),
+                    ),
             );
         }
-        let fields_meta = if self.is_showing_fields {
-            String::new()
-        } else {
-            task.backend.clone()
-        };
-        let mut fields = Self::disclosure(
-            "fields",
-            "Session",
-            self.is_showing_fields,
-            fields_meta,
-            Vec::new(),
-            theme,
-            cx,
-        );
-        if self.is_showing_fields {
-            let mut grid = div()
-                .flex()
-                .flex_col()
-                .gap(px(4.))
-                .ml(px(18.))
-                .mt(px(4.))
-                .mb(px(8.))
-                .text_size(px(12.5));
-            for (label, value) in board::task_fields(row, &self.snapshot, now) {
-                let is_code = matches!(
-                    label,
-                    "Directory" | "Worktree" | "Session" | "Gate" | "Setup"
-                );
-                grid = grid.child(
-                    div()
-                        .flex()
-                        .gap(px(12.))
-                        .child(
-                            div()
-                                .w(px(78.))
-                                .flex_none()
-                                .text_color(theme.text_2)
-                                .child(label),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .when(is_code, |this| {
-                                    this.font_family(MONO_FONT).text_size(px(12.))
-                                })
-                                .child(value),
-                        ),
-                );
-            }
-            fields = fields.child(grid);
-        }
-        body = body.child(fields);
+        Some(
+            Self::section("Pull requests", theme)
+                .child(list)
+                .into_any_element(),
+        )
+    }
 
-        let lines = self.selected_activity();
-        let mut trailing: Vec<AnyElement> = Vec::new();
-        if self.is_following {
-            let live = if row.status == Status::Running {
-                "Live"
-            } else {
-                "Full log"
-            };
-            trailing.push(
+    /// The chain's other steps; the shown step's position is already in the status line.
+    fn render_chain(&self, row: &Row, theme: &Theme) -> Option<AnyElement> {
+        if row.chain_ids.len() < 2 {
+            return None;
+        }
+        let steps = board::chain_steps(row, &self.snapshot.tasks);
+        let shown_index = steps.iter().position(|step| step.is_shown).unwrap_or(0);
+        let lines = steps
+            .iter()
+            .enumerate()
+            .filter(|(_, step)| !step.is_shown)
+            .map(|(index, step)| {
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(5.))
-                    .text_color(theme.accent)
-                    .text_size(px(12.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(div().size(px(6.)).rounded_full().bg(theme.accent))
-                    .child(live)
-                    .into_any_element(),
+                    .gap(px(6.))
+                    .text_size(px(12.5))
+                    .child(div().w(px(42.)).flex_none().text_color(theme.text_3).child(
+                        if index < shown_index {
+                            "Before"
+                        } else {
+                            "After"
+                        },
+                    ))
+                    .child(icon(
+                        theme::status_icon(step.status),
+                        11.,
+                        theme.status_color(step.status, false),
+                    ))
+                    .child(div().min_w_0().truncate().child(step.name.clone()))
+                    .when(!step.is_inferable, |this| {
+                        this.child(div().text_color(theme.text_3).child(step.status.name()))
+                    })
+            });
+        Some(
+            Self::section("Chain", theme)
+                .children(lines)
+                .into_any_element(),
+        )
+    }
+
+    fn render_prompt(
+        &self,
+        task: &ledger::Task,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let prompt = task.prompt.trim();
+        if prompt.is_empty() {
+            return None;
+        }
+        let is_showing_prompt = self.is_showing_prompt;
+        let is_long = is_long_prompt(prompt);
+        Some(
+            Self::section("Prompt", theme)
+                .child(
+                    div()
+                        .text_color(theme.text_2)
+                        .when(is_long && !is_showing_prompt, |this| this.line_clamp(3))
+                        .child(prompt.to_string()),
+                )
+                .when(is_long, |this| {
+                    this.child(
+                        div()
+                            .id("prompt-toggle")
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .text_size(px(12.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.accent)
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.is_showing_prompt = !this.is_showing_prompt;
+                                cx.notify();
+                            }))
+                            .child(if is_showing_prompt {
+                                "Show less"
+                            } else {
+                                "Show more"
+                            })
+                            .child(kbd("E", theme)),
+                    )
+                })
+                .into_any_element(),
+        )
+    }
+
+    fn render_session(&self, row: &Row, now: DateTime<Local>, theme: &Theme) -> AnyElement {
+        let mut grid = div().flex().flex_col().gap(px(4.)).text_size(px(12.5));
+        for (label, value) in board::task_fields(row, &self.snapshot, now) {
+            let is_code = matches!(
+                label,
+                "Directory" | "Worktree" | "Session" | "Gate" | "Setup"
+            );
+            grid = grid.child(
+                div()
+                    .flex()
+                    .gap(px(12.))
+                    .child(
+                        div()
+                            .w(px(78.))
+                            .flex_none()
+                            .text_color(theme.text_2)
+                            .child(label),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .when(is_code, |this| {
+                                this.font_family(MONO_FONT).text_size(px(12.))
+                            })
+                            .child(value),
+                    ),
             );
         }
-        if self.is_showing_activity {
-            let segments = ActivityLevel::ALL.into_iter().map(|level| {
-                let is_pressed = level == self.activity_level;
+        Self::section("Session", theme)
+            .child(grid)
+            .into_any_element()
+    }
+
+    fn render_activity(&mut self, row: &Row, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let lines = self.selected_activity();
+        let segments = ActivityLevel::ALL.into_iter().map(|level| {
+            let is_pressed = level == self.activity_level;
+            div()
+                .id(level.label())
+                .px(px(8.))
+                .py(px(1.))
+                .rounded(px(5.))
+                .text_size(px(11.))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(if is_pressed { theme.text } else { theme.text_2 })
+                .when(is_pressed, |this| this.bg(theme.raised))
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.activity_level = level;
+                    this.is_following = false;
+                    cx.notify();
+                }))
+                .child(level.label())
+        });
+        let live = self.is_following.then(|| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(5.))
+                .text_color(theme.accent)
+                .text_size(px(11.5))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(div().size(px(6.)).rounded_full().bg(theme.accent))
+                .child(if row.status == Status::Running {
+                    "Live"
+                } else {
+                    "Full log"
+                })
+        });
+        let header = div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .mb(px(2.))
+            .child(
                 div()
-                    .id(level.label())
-                    .px(px(8.))
-                    .py(px(1.))
-                    .rounded(px(5.))
+                    .flex_1()
                     .text_size(px(11.))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(if is_pressed { theme.text } else { theme.text_2 })
-                    .when(is_pressed, |this| this.bg(theme.raised))
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.activity_level = level;
-                        this.is_following = false;
-                        cx.notify();
-                    }))
-                    .child(level.label())
-            });
-            trailing.push(
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.text_2)
+                    .child("ACTIVITY"),
+            )
+            .children(live)
+            .child(
                 div()
                     .flex()
                     .p(px(1.))
                     .rounded(px(6.))
                     .bg(theme.fill)
-                    .children(segments)
-                    .into_any_element(),
+                    .children(segments),
+            );
+        let mut log = div().flex().flex_col().text_size(px(12.5));
+        if lines.is_empty() {
+            let text = if row.status == Status::Running {
+                "No activity yet"
+            } else {
+                "No activity"
+            };
+            log = log.child(div().text_color(theme.text_3).child(text));
+        }
+        let items = board::activity_view(&lines, self.activity_level);
+        let earlier_count = match self.activity_level {
+            ActivityLevel::Messages => items.len().saturating_sub(MESSAGE_ITEM_LIMIT),
+            _ => 0,
+        };
+        if earlier_count > 0 {
+            log = log.child(
+                div()
+                    .py(px(2.))
+                    .text_color(theme.text_3)
+                    .child(format!("{earlier_count} earlier, shown in All")),
             );
         }
-        let activity_meta = if self.is_showing_activity {
-            String::new()
-        } else {
-            board::activity_counts(&lines)
-        };
-        let mut activity = Self::disclosure(
-            "activity",
-            "Activity",
-            self.is_showing_activity,
-            activity_meta,
-            trailing,
-            theme,
-            cx,
-        );
-        if self.is_showing_activity {
-            let mut log = div()
-                .flex()
-                .flex_col()
-                .ml(px(18.))
-                .mt(px(3.))
-                .mb(px(6.))
-                .text_size(px(12.5));
-            if lines.is_empty() {
-                let text = if row.status == Status::Running {
-                    "No activity yet"
-                } else {
-                    "No activity"
-                };
-                log = log.child(div().text_color(theme.text_3).child(text));
-            }
-            for (index, item) in board::activity_view(&lines, self.activity_level)
-                .into_iter()
-                .enumerate()
-            {
-                log = log.child(match item {
-                    ActivityItem::Message(text) => div().py(px(2.)).child(text).into_any_element(),
-                    ActivityItem::Tool(text) => div()
-                        .py(px(2.))
-                        .pl(px(12.))
-                        .font_family(MONO_FONT)
-                        .text_size(px(12.))
-                        .text_color(theme.text_2)
-                        .child(text)
-                        .into_any_element(),
-                    ActivityItem::Fold(text) => div()
-                        .id(("fold", index))
-                        .py(px(2.))
-                        .text_color(theme.text_2)
-                        .hover(|style| style.text_color(theme.accent))
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.activity_level = this.activity_level.next();
-                            cx.notify();
-                        }))
-                        .child(format!("+ {text}"))
-                        .into_any_element(),
-                });
-            }
-            activity = activity.child(log);
+        for item in items.into_iter().skip(earlier_count) {
+            log = log.child(match item {
+                ActivityItem::Message(text) => div().py(px(2.)).child(text),
+                ActivityItem::Tool(text) => div()
+                    .py(px(2.))
+                    .pl(px(12.))
+                    .font_family(MONO_FONT)
+                    .text_size(px(12.))
+                    .text_color(theme.text_2)
+                    .child(text),
+                ActivityItem::Fold(text) => div()
+                    .py(px(2.))
+                    .pl(px(12.))
+                    .text_size(px(12.))
+                    .text_color(theme.text_3)
+                    .child(format!("{}{text}", board::TOOL_MARK)),
+            });
         }
-        body.child(activity).into_any_element()
+        div()
+            .flex()
+            .flex_col()
+            .mb(px(12.))
+            .child(header)
+            .child(log)
+            .into_any_element()
     }
 
-    fn callout(&self, label: &str, text: &str, is_warning: bool, theme: &Theme) -> Div {
+    fn callout(label: &str, text: &str, color: Hsla, is_code: bool, theme: &Theme) -> Div {
         div()
             .mb(px(12.))
             .px(px(12.))
@@ -2088,7 +2141,7 @@ impl BoardView {
             .rounded(px(8.))
             .bg(theme.raised)
             .border_l(px(3.))
-            .border_color(if is_warning { theme.orange } else { theme.red })
+            .border_color(color)
             .child(
                 div()
                     .mb(px(3.))
@@ -2099,8 +2152,9 @@ impl BoardView {
             )
             .child(
                 div()
-                    .font_family(MONO_FONT)
-                    .text_size(px(12.))
+                    .when(is_code, |this| {
+                        this.font_family(MONO_FONT).text_size(px(12.))
+                    })
                     .child(text.to_string()),
             )
     }
@@ -2123,9 +2177,13 @@ impl BoardView {
         let mut sub_parts =
             vec![board::card_when_text(&row, &task, now).replacen("stuck ", "overdue ", 1)];
         sub_parts.push(board::start_text(&row, &task, now));
+        if !row.step.is_empty() {
+            sub_parts.push(format!("step {}", row.step.replace('/', " of ")));
+        }
         if let Some(branch) = board::branch_name(&task) {
             sub_parts.push(branch.to_string());
         }
+        sub_parts.push(task.backend.clone());
         sub_parts.retain(|part| !part.is_empty());
         let mut sub = div()
             .flex()
@@ -2249,9 +2307,12 @@ impl BoardView {
                     FontWeight::MEDIUM
                 })
                 .when(Some(index) == first_ending, |this| this.ml_auto())
-                .when(busy_action.is_some(), |this| this.opacity(0.55))
-                .when(busy_action.is_none(), |this| {
-                    this.hover(|style| style.opacity(0.9))
+                .map(|this| {
+                    if busy_action.is_some() && action.is_golem_run() {
+                        this.opacity(0.55)
+                    } else {
+                        this.hover(|style| style.opacity(0.9))
+                    }
                 })
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.request(action, cx)))
                 .child(label)
@@ -2265,16 +2326,37 @@ impl BoardView {
             .child(head)
             .child(
                 div()
-                    .id("detail")
+                    .relative()
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.detail_scroll)
-                    .pl(px(18.))
-                    .pr(px(18.))
-                    .pt(px(2.))
-                    .pb(px(16.))
-                    .child(body),
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .id("detail")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.detail_scroll)
+                            .pl(px(18.))
+                            .pr(px(18.))
+                            .pt(px(2.))
+                            .pb(px(16.))
+                            .child(body),
+                    )
+                    .child(div().absolute().bottom_0().left_0().w_full().h(px(20.)).bg(
+                        linear_gradient(
+                            180.,
+                            linear_color_stop(
+                                Hsla {
+                                    a: 0.,
+                                    ..theme.panel
+                                },
+                                0.,
+                            ),
+                            linear_color_stop(theme.panel, 1.),
+                        ),
+                    )),
             )
             .child(
                 div()
@@ -2443,7 +2525,6 @@ impl BoardView {
             (action, Some(row)) => {
                 let name = board::row_title(row);
                 let body = match action {
-                    Action::Close => "It moves to Done.",
                     Action::Cancel if row.status == Status::Running => {
                         "The agent stops and the task moves to Done."
                     }
@@ -2554,17 +2635,19 @@ impl BoardView {
             &[
                 ("\u{2191}\u{2193} J K", "select"),
                 ("\u{2190}\u{2192} H L", "switch group"),
+                ("tab \u{21e7}tab", "next group"),
                 ("1-4", "jump to group"),
                 ("G \u{21e7}G", "first, last"),
                 ("N", "next needing you"),
                 ("\u{23ce}", "details"),
                 ("esc", "back"),
-                ("\u{2303}D \u{2303}U", "scroll"),
+                ("space \u{2303}D", "scroll down"),
+                ("\u{2303}U", "scroll up"),
             ],
         );
         let board_keys = section(
             "Board",
-            72.,
+            60.,
             &[
                 ("/", "filter"),
                 ("A", "show Done"),
@@ -2576,7 +2659,7 @@ impl BoardView {
         );
         let task_keys = section(
             "Task",
-            30.,
+            60.,
             &[
                 ("P", "pick up"),
                 ("W", "follow log"),
@@ -2591,14 +2674,14 @@ impl BoardView {
             ],
         );
         let columns = [
+            div().flex_1().min_w_0().flex().flex_col().child(move_keys),
             div()
                 .flex_1()
                 .min_w_0()
                 .flex()
                 .flex_col()
-                .child(move_keys)
+                .child(task_keys)
                 .child(board_keys),
-            div().flex_1().min_w_0().flex().flex_col().child(task_keys),
         ];
         let statuses = [
             Status::Scheduled,
@@ -2622,6 +2705,44 @@ impl BoardView {
                 ))
                 .child(status.name())
         });
+        let chain_chip = div()
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .text_size(px(12.))
+            .child(
+                div()
+                    .px(px(5.))
+                    .rounded(px(4.))
+                    .bg(theme.fill)
+                    .text_size(px(10.5))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.text_2)
+                    .child("1/2"),
+            )
+            .child("chain step");
+        let status_keys = div()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .mt(px(10.))
+                    .mb(px(6.))
+                    .text_size(px(11.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.text_2)
+                    .child("STATUS"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_x(px(10.))
+                    .gap_y(px(6.))
+                    .children(legend)
+                    .child(chain_chip),
+            );
+        let [move_column, task_column] = columns;
         let width = (self.panel_width() as f32 - 24.).min(640.);
         self.scrim(theme)
             .id("help")
@@ -2639,14 +2760,11 @@ impl BoardView {
                             .id("help-body")
                             .max_h(px(PANEL_HEIGHT as f32 - 150.))
                             .overflow_y_scroll()
-                            .child(div().flex().gap(px(18.)).children(columns))
                             .child(
                                 div()
                                     .flex()
-                                    .flex_wrap()
-                                    .gap(px(10.))
-                                    .mt(px(12.))
-                                    .children(legend),
+                                    .gap(px(18.))
+                                    .children([move_column.child(status_keys), task_column]),
                             ),
                     )
                     .child(
@@ -2842,13 +2960,7 @@ impl BoardView {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .map(|this| {
-                                if toast.is_error {
-                                    this.line_clamp(3)
-                                } else {
-                                    this.truncate()
-                                }
-                            })
+                            .truncate()
                             .child(toast.text.clone()),
                     ),
             )
