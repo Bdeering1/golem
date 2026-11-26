@@ -31,6 +31,7 @@ const MIN_PANEL_HEIGHT: f64 = 320.0;
 /// Collapsed-panel layout heights used to fit the panel to its longest group.
 const PANEL_CHROME_HEIGHT: f64 = 140.0;
 const CARD_GAP: f32 = 2.0;
+const REPOSITORY_MAX_WIDTH: f32 = 120.0;
 const CARD_PITCH: f64 = 63.0;
 const EMPTY_LIST_HEIGHT: f64 = 90.0;
 const SIDE_WIDTH: f32 = 340.0;
@@ -44,12 +45,15 @@ const REOPEN_GUARD: Duration = Duration::from_millis(300);
 const SCROLL_STEP: f32 = 240.0;
 const BUSY_PULSE_PERIOD: Duration = Duration::from_millis(1400);
 const BUSY_PULSE_FPS: f32 = 30.0;
-const LONG_PROMPT_CHARS: usize = 240;
+const CHARS_PER_LINE: usize = 80;
+const PROMPT_LINE_LIMIT: usize = 3;
+const RESULT_LINE_LIMIT: usize = 6;
 const MESSAGE_ITEM_LIMIT: usize = 12;
 /// The palette's top offset, search row and margin, subtracted from the panel height for its list.
-const PALETTE_CHROME_HEIGHT: f32 = 150.0;
+const PALETTE_CHROME_HEIGHT: f32 = 112.0;
 const PALETTE_ROW_HEIGHT: f32 = 28.0;
-const PALETTE_HEADING_HEIGHT: f32 = 25.0;
+const PALETTE_HEADING_HEIGHT: f32 = 28.5;
+const PALETTE_LIST_PADDING: f32 = 5.0;
 const PALETTE_FADE_HEIGHT: f32 = 22.0;
 const NOTHING_NEEDS_YOU_TEXT: &str = "Nothing needs you right now";
 const GOLEM_MISSING_TEXT: &str = "Still looking for golem";
@@ -145,7 +149,7 @@ pub struct BoardView {
     is_following: bool,
     is_follow_paused: bool,
     is_showing_fields: bool,
-    is_showing_prompt: bool,
+    is_showing_full_text: bool,
     pending: Option<Pending>,
     is_showing_help: bool,
     palette: Option<Palette>,
@@ -321,7 +325,7 @@ impl BoardView {
             is_following: false,
             is_follow_paused: false,
             is_showing_fields: false,
-            is_showing_prompt: false,
+            is_showing_full_text: false,
             pending: None,
             is_showing_help: false,
             palette: None,
@@ -603,13 +607,15 @@ impl BoardView {
     }
 
     fn show_toast(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
-        self.show_message(text, false, cx);
+        self.show_message(text, false, None, cx);
     }
 
+    /// An error with no task to open stays until dismissed, since it's the only place to read it.
     fn show_message(
         &mut self,
         text: impl Into<SharedString>,
         is_error: bool,
+        task_id: Option<String>,
         cx: &mut Context<Self>,
     ) {
         let text = text.into();
@@ -622,12 +628,12 @@ impl BoardView {
             text,
             id: toast_id,
             is_error,
-            task_id: None,
+            task_id: task_id.clone(),
         });
-        let duration = if is_error {
-            ERROR_TOAST_DURATION
-        } else {
-            TOAST_DURATION
+        let duration = match (is_error, &task_id) {
+            (true, None) => return cx.notify(),
+            (true, Some(_)) => ERROR_TOAST_DURATION,
+            (false, _) => TOAST_DURATION,
         };
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(duration).await;
@@ -661,7 +667,7 @@ impl BoardView {
 
     fn select(&mut self, root_id: String, cx: &mut Context<Self>) {
         self.selected_roots.insert(self.tab, root_id);
-        self.is_showing_prompt = false;
+        self.is_showing_full_text = false;
         self.input = Input::None;
         self.is_following = false;
         self.detail_scroll.set_offset(point(px(0.), px(0.)));
@@ -933,7 +939,7 @@ impl BoardView {
                     (true, [(task_id, action)]) => {
                         this.note_failure(task_id, *action, outcome.message, cx)
                     }
-                    _ => this.show_message(outcome.message, outcome.is_error, cx),
+                    _ => this.show_message(outcome.message, outcome.is_error, None, cx),
                 }
                 this.reload(cx);
             });
@@ -957,10 +963,12 @@ impl BoardView {
                 .selected_row()
                 .is_some_and(|row| row.task_id == task_id);
         if !is_in_view {
-            self.show_message(format!("{} for {name}", action.failed_text()), true, cx);
-            if let Some(toast) = self.toast.as_mut() {
-                toast.task_id = Some(task_id.to_string());
-            }
+            self.show_message(
+                format!("{} for {name}", action.failed_text()),
+                true,
+                Some(task_id.to_string()),
+                cx,
+            );
         }
         self.action_errors
             .insert(task_id.to_string(), ActionError { action, message });
@@ -974,6 +982,13 @@ impl BoardView {
         let (column, root_id) = (row.column, row.root_id.clone());
         if column == Column::Done {
             self.is_showing_done = true;
+        }
+        if !self
+            .column_rows(column)
+            .iter()
+            .any(|row| row.root_id == root_id)
+        {
+            self.query.clear();
         }
         self.tab = column;
         self.select(root_id, cx);
@@ -1393,7 +1408,7 @@ impl BoardView {
                 }
             }
             (_, "e") => {
-                self.is_showing_prompt = !self.is_showing_prompt || self.is_following;
+                self.is_showing_full_text = !self.is_showing_full_text || self.is_following;
                 self.is_following = false;
                 if !self.is_expanded {
                     self.set_expanded(true, cx);
@@ -1439,6 +1454,26 @@ fn palette_child_index(items: &[PaletteItem], index: usize) -> usize {
     index + palette_heading_count(&items[..=index])
 }
 
+/// The palette list's height at most `available`, cut after a whole row so none shows half.
+fn palette_list_height(items: &[PaletteItem], available: f32) -> f32 {
+    let mut height = PALETTE_LIST_PADDING * 2.;
+    for (index, item) in items.iter().enumerate() {
+        let is_new_group = index == 0 || items[index - 1].group != item.group;
+        let next = height
+            + PALETTE_ROW_HEIGHT
+            + if is_new_group {
+                PALETTE_HEADING_HEIGHT
+            } else {
+                0.
+            };
+        if next > available {
+            break;
+        }
+        height = next;
+    }
+    height
+}
+
 /// How many group headings the palette renders above and among these items.
 fn palette_heading_count(items: &[PaletteItem]) -> usize {
     items
@@ -1457,10 +1492,10 @@ fn pull_request_repository(url: &str) -> String {
     }
 }
 
-/// Whether a prompt is long enough to clamp to three lines in the details pane.
-fn is_long_prompt(prompt: &str) -> bool {
-    let prompt = prompt.trim();
-    prompt.lines().count() > 3 || prompt.chars().count() > LONG_PROMPT_CHARS
+/// Whether text is long enough to clamp to `line_limit` lines in the details pane.
+fn is_long_text(text: &str, line_limit: usize) -> bool {
+    let text = text.trim();
+    text.lines().count() > line_limit || text.chars().count() > line_limit * CHARS_PER_LINE
 }
 
 fn sentence_case(text: &str) -> String {
@@ -1501,15 +1536,6 @@ impl BoardView {
             .flat_map(|column| self.column_rows(column))
             .filter(|row| self.needs_you(row))
             .count();
-        let logo = div()
-            .size(px(22.))
-            .flex_none()
-            .rounded(px(6.))
-            .bg(theme.accent)
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(icon(theme::ICON_LOGO, 15., theme.on_accent));
         div()
             .flex()
             .flex_col()
@@ -1523,7 +1549,6 @@ impl BoardView {
                     .flex()
                     .items_center()
                     .gap(px(7.))
-                    .child(logo)
                     .child(
                         div()
                             .id("filter")
@@ -1587,9 +1612,9 @@ impl BoardView {
                                 if needing_count == 0 {
                                     return this.bg(theme.fill).text_color(theme.text_3);
                                 }
-                                this.bg(theme.accent_soft)
-                                    .text_color(theme.accent)
-                                    .hover(|style| style.opacity(0.85))
+                                this.bg(theme.fill)
+                                    .text_color(theme.text)
+                                    .hover(|style| style.bg(theme.hover))
                             })
                             .on_click(
                                 cx.listener(|this, _: &ClickEvent, _, cx| this.next_attention(cx)),
@@ -1599,6 +1624,7 @@ impl BoardView {
                                 this.child(
                                     div()
                                         .font_weight(FontWeight::BOLD)
+                                        .text_color(theme.accent)
                                         .child(needing_count.to_string()),
                                 )
                             })
@@ -1713,7 +1739,8 @@ impl BoardView {
                     let actions = board::available_actions(&self.snapshot, Some(row));
                     board::primary_action(&self.snapshot, row, &actions)
                 })
-                .flatten();
+                .flatten()
+                .filter(|action| *action != Action::Watch);
         let root_id = row.root_id.clone();
         div()
             .id(SharedString::from(format!("card-{}", row.root_id)))
@@ -1805,6 +1832,8 @@ impl BoardView {
                     .child(
                         div()
                             .flex_none()
+                            .max_w(px(REPOSITORY_MAX_WIDTH))
+                            .truncate()
                             .text_color(theme.text_3)
                             .child(board::repository_name(row).to_string()),
                     )
@@ -1922,17 +1951,17 @@ impl BoardView {
             .or(task.setup_failure_reason.clone())
             .unwrap_or_default();
         if !stop_reason.is_empty() {
-            let label = match (&task.gate_stop_reason, &task.gate) {
-                (Some(_), Some(gate)) => format!("Gate failed: {gate}"),
-                (Some(_), None) => "Gate failed".to_string(),
-                _ => "Setup failed".to_string(),
+            let (label, text) = match (&task.gate_stop_reason, &task.gate) {
+                (Some(_), Some(gate)) => ("Gate failed", format!("$ {gate}\n{stop_reason}")),
+                (Some(_), None) => ("Gate failed", stop_reason),
+                _ => ("Setup failed", stop_reason),
             };
             let color = if row.status == Status::Blocked {
                 theme.orange
             } else {
                 theme.red
             };
-            body = body.child(Self::callout(&label, &stop_reason, color, true, theme));
+            body = body.child(Self::callout(label, &text, color, true, theme));
         }
         if let Some(error) = self.action_errors.get(&row.task_id) {
             body = body.child(Self::callout(
@@ -1963,7 +1992,14 @@ impl BoardView {
                     "Result"
                 };
                 Self::section(title, theme)
-                    .child(div().child(board::plain_result(result)))
+                    .child(self.clamped_text(
+                        "result-toggle",
+                        &board::plain_result(result),
+                        RESULT_LINE_LIMIT,
+                        theme.text,
+                        theme,
+                        cx,
+                    ))
                     .into_any_element()
             });
         let pull_requests = self.render_pull_requests(row, theme, cx);
@@ -2099,40 +2135,73 @@ impl BoardView {
         if prompt.is_empty() {
             return None;
         }
-        let is_showing_prompt = self.is_showing_prompt;
-        let is_long = is_long_prompt(prompt);
         Some(
             Self::section("Prompt", theme)
-                .child(
-                    div()
-                        .text_color(theme.text_2)
-                        .when(is_long && !is_showing_prompt, |this| this.line_clamp(3))
-                        .child(prompt.to_string()),
-                )
-                .when(is_long, |this| {
-                    this.child(
-                        div()
-                            .id("prompt-toggle")
-                            .flex()
-                            .items_center()
-                            .gap(px(6.))
-                            .text_size(px(12.))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme.accent)
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                this.is_showing_prompt = !this.is_showing_prompt;
-                                cx.notify();
-                            }))
-                            .child(if is_showing_prompt {
-                                "Show less"
-                            } else {
-                                "Show more"
-                            })
-                            .child(kbd("E", theme)),
-                    )
-                })
+                .child(self.clamped_text(
+                    "prompt-toggle",
+                    prompt,
+                    PROMPT_LINE_LIMIT,
+                    theme.text_2,
+                    theme,
+                    cx,
+                ))
                 .into_any_element(),
         )
+    }
+
+    /// Long text clamped to `line_limit` lines with a Show more control; E expands all of it.
+    fn clamped_text(
+        &self,
+        toggle_id: &'static str,
+        text: &str,
+        line_limit: usize,
+        color: Hsla,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let is_showing_full_text = self.is_showing_full_text;
+        let is_long = is_long_text(text, line_limit);
+        let is_clamped = is_long && !is_showing_full_text;
+        // line_clamp limits each paragraph separately, so a clamped preview joins them.
+        let shown_text = if is_clamped {
+            text.split_whitespace().collect::<Vec<_>>().join(" ")
+        } else {
+            text.to_string()
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(3.))
+            .child(
+                div()
+                    .text_color(color)
+                    .when(is_clamped, |this| {
+                        this.line_clamp(line_limit).text_ellipsis()
+                    })
+                    .child(shown_text),
+            )
+            .when(is_long, |this| {
+                this.child(
+                    div()
+                        .id(toggle_id)
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .text_size(px(12.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.accent)
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.is_showing_full_text = !this.is_showing_full_text;
+                            cx.notify();
+                        }))
+                        .child(if is_showing_full_text {
+                            "Show less"
+                        } else {
+                            "Show more"
+                        })
+                        .child(kbd("E", theme)),
+                )
+            })
     }
 
     fn render_session(&self, row: &Row, now: DateTime<Local>, theme: &Theme) -> AnyElement {
@@ -2210,6 +2279,7 @@ impl BoardView {
                 .font_weight(FontWeight::SEMIBOLD)
                 .child(div().size(px(6.)).rounded_full().bg(color))
                 .child(label)
+                .child(kbd("esc", theme))
         });
         let header = div()
             .flex()
@@ -2394,7 +2464,7 @@ impl BoardView {
                             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                                 this.set_expanded(false, cx)
                             }))
-                            .child(kbd("esc", theme))
+                            .when(!self.is_following, |this| this.child(kbd("esc", theme)))
                             .child(icon(theme::ICON_FOLD, 15., theme.text_2)),
                     ),
             )
@@ -2864,7 +2934,7 @@ impl BoardView {
                 ("C", "close"),
                 ("X", "cancel, dismiss"),
                 ("Y", "copy ID"),
-                ("E", "full prompt"),
+                ("E", "full text"),
                 ("I", "session"),
                 ("T", "activity level"),
             ],
@@ -2994,19 +3064,17 @@ impl BoardView {
         let current = palette.map_or(0, |palette| {
             palette.index.min(items.len().saturating_sub(1))
         });
-        let list_height = (self.panel_height() as f32 - PALETTE_CHROME_HEIGHT).min(420.);
-        let heading_count = palette_heading_count(&items);
-        let content_height =
-            items.len() as f32 * PALETTE_ROW_HEIGHT + heading_count as f32 * PALETTE_HEADING_HEIGHT;
-        let is_overflowing = content_height > list_height;
+        let available_height = (self.panel_height() as f32 - PALETTE_CHROME_HEIGHT).min(420.);
+        let list_height = palette_list_height(&items, available_height);
+        let is_overflowing = list_height < palette_list_height(&items, f32::MAX);
         let mut list = div()
             .id("palette-list")
             .max_h(px(list_height))
             .overflow_y_scroll()
             .track_scroll(&self.palette_scroll)
             .px(px(5.))
-            .pt(px(4.))
-            .pb(px(6.));
+            .pt(px(PALETTE_LIST_PADDING))
+            .pb(px(PALETTE_LIST_PADDING));
         let mut group = String::new();
         for (index, item) in items.iter().enumerate() {
             if item.group != group {
@@ -3185,7 +3253,10 @@ impl BoardView {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .truncate()
+                            .map(|this| match toast.task_id {
+                                Some(_) => this.truncate(),
+                                None => this.line_clamp(3),
+                            })
                             .child(toast.text.clone()),
                     )
                     .when(toast.task_id.is_some(), |this| {
