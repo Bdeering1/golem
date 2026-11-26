@@ -1139,7 +1139,7 @@ impl BoardView {
         cx.notify();
     }
 
-    /// Keeps a failed run on its card, and toasts it only when the details pane isn't showing it.
+    /// Keeps a failed run on its card, and toasts it only when that card is out of sight.
     fn note_failure(
         &mut self,
         task_id: &str,
@@ -1149,10 +1149,10 @@ impl BoardView {
     ) {
         let row = self.snapshot.rows.iter().find(|row| row.task_id == task_id);
         let name = row.map_or(task_id, board::row_title).to_string();
-        let is_in_view = self.is_expanded
-            && self
-                .selected_row()
-                .is_some_and(|row| row.task_id == task_id);
+        let is_in_view = self
+            .column_rows(self.tab)
+            .iter()
+            .any(|row| row.task_id == task_id);
         if !is_in_view {
             self.show_message(
                 format!("{} for {name}", action.failed_text()),
@@ -1648,6 +1648,13 @@ impl BoardView {
                 self.open_toast_details(cx);
             }
             (_, "d") if self.load_error.is_some() => self.show_load_error(),
+            (_, "d")
+                if self
+                    .selected_row()
+                    .is_some_and(|row| self.action_errors.contains_key(&row.task_id)) =>
+            {
+                self.set_expanded(true, cx)
+            }
             (_, "q") => self.hide(cx),
             _ => {
                 self.request_key(typed, cx);
@@ -2140,19 +2147,6 @@ impl BoardView {
                             .font_weight(FontWeight::MEDIUM)
                             .child(board::row_title(row).to_string()),
                     )
-                    .when(!row.step.is_empty(), |this| {
-                        this.child(
-                            div()
-                                .flex_none()
-                                .px(px(5.))
-                                .rounded(px(4.))
-                                .bg(theme.fill)
-                                .text_size(px(10.5))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(theme.text_2)
-                                .child(row.step.clone()),
-                        )
-                    })
                     .child(
                         div()
                             .flex_none()
@@ -2390,13 +2384,13 @@ impl BoardView {
         let sections = if self.is_following {
             vec![Some(activity)]
         } else if row.status == Status::Running {
-            vec![Some(activity), chain, prompt, session]
+            vec![Some(activity), prompt, chain, session]
         } else {
             vec![
                 result,
                 pull_requests,
-                chain,
                 prompt,
+                chain,
                 Some(activity),
                 session,
             ]
@@ -3117,6 +3111,10 @@ impl BoardView {
     }
 
     fn render_footer(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        // A bottom sheet floats just above the footer, so the footer empties rather than peek out.
+        if self.pending.is_some() || self.error_detail.is_some() {
+            return div().h(px(BOTTOM_BAR_HEIGHT)).into_any_element();
+        }
         let done_count = self.column_rows(Column::Done).len();
         let done_label: AnyElement = if self.is_showing_done {
             div().child("Hide Done").into_any_element()
@@ -3470,7 +3468,6 @@ impl BoardView {
     }
 
     fn render_help(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let jump_keys = format!("1-{}", self.tabs().len());
         let section = |title: &str, key_width: f32, entries: &[(&str, &str)]| {
             let rows = entries.iter().map(|(keys, text)| {
                 div()
@@ -3509,7 +3506,7 @@ impl BoardView {
             &[
                 ("\u{2191}\u{2193} J K", "Select"),
                 ("\u{2190}\u{2192} H L", "Switch group"),
-                (jump_keys.as_str(), "Jump to group"),
+                ("1-4", "Jump to group"),
                 ("G \u{21e7}G", "First, last"),
                 ("N", "Next needing you"),
                 ("\u{23ce}", "Details"),
@@ -3575,22 +3572,6 @@ impl BoardView {
                 ))
                 .child(status.name())
         });
-        let chain_chip = div()
-            .flex()
-            .items_center()
-            .gap(px(4.))
-            .text_size(px(12.))
-            .child(
-                div()
-                    .px(px(5.))
-                    .rounded(px(4.))
-                    .bg(theme.fill)
-                    .text_size(px(10.5))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.text_2)
-                    .child("1/2"),
-            )
-            .child("chain step");
         let status_keys = div()
             .flex()
             .flex_col()
@@ -3609,8 +3590,7 @@ impl BoardView {
                     .flex_wrap()
                     .gap_x(px(10.))
                     .gap_y(px(6.))
-                    .children(legend)
-                    .child(chain_chip),
+                    .children(legend),
             );
         let [move_column, task_column] = columns;
         let width = self.sheet_width(640.);

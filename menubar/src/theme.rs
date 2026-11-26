@@ -23,7 +23,7 @@ pub struct Theme {
     pub fill: Hsla,
     pub accent: Hsla,
     pub accent_soft: Hsla,
-    /// The selected card; near-neutral in dark so its filled quick action is the only strong blue.
+    /// The selected card; near-neutral so its filled quick action is the only strong blue.
     pub selection: Hsla,
     /// Darker accent and red for filled controls, so white labels on them stay readable.
     pub accent_fill: Hsla,
@@ -65,7 +65,7 @@ impl Theme {
             fill: rgba(0x00000011).into(),
             accent: rgba(0x0a66e4ff).into(),
             accent_soft: rgba(0x0a66e41f).into(),
-            selection: rgba(0x0a66e41f).into(),
+            selection: rgba(0x3c4a641f).into(),
             accent_fill: rgba(0x0a66e4ff).into(),
             red_fill: rgba(0xd92d20ff).into(),
             changed: rgba(0x0a66e40f).into(),
