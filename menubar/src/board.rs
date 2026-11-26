@@ -999,7 +999,11 @@ pub fn card_snippet(row: &Row, snapshot: &Snapshot) -> String {
         .as_deref()
         .filter(|result| !result.trim().is_empty())
         .unwrap_or(&task.prompt);
-    first_line(text.trim()).to_string()
+    let line = first_line(text.trim());
+    line.strip_prefix("Error:")
+        .unwrap_or(line)
+        .trim()
+        .to_string()
 }
 
 /// A task result without the Markdown heading marks and emphasis golem's TUI also drops.
@@ -1234,7 +1238,12 @@ pub fn activity_view(lines: &[String], level: ActivityLevel) -> Vec<ActivityItem
         return Vec::new();
     }
     if level == ActivityLevel::Summary {
-        return vec![ActivityItem::Fold(activity_counts(lines))];
+        let latest = lines.iter().rev().find(|line| !is_tool_line(line));
+        return latest
+            .map(|line| ActivityItem::Message(line.clone()))
+            .into_iter()
+            .chain([ActivityItem::Fold(activity_counts(lines))])
+            .collect();
     }
     let mut items = Vec::new();
     for group in lines.chunk_by(|left, right| is_tool_line(left) == is_tool_line(right)) {
@@ -1448,7 +1457,10 @@ mod tests {
         .to_vec();
         assert_eq!(
             activity_view(&lines, ActivityLevel::Summary),
-            vec![ActivityItem::Fold("2 messages, 3 tool calls".into())]
+            vec![
+                ActivityItem::Message("Done".into()),
+                ActivityItem::Fold("2 messages, 3 tool calls".into())
+            ]
         );
         assert_eq!(
             activity_view(&lines, ActivityLevel::Messages),

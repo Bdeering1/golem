@@ -7,7 +7,7 @@ use futures::StreamExt;
 use futures::channel::mpsc::UnboundedReceiver;
 use gpui::{
     Animation, AnimationExt, AnyElement, BoxShadow, ClickEvent, ClipboardItem, Context, Div,
-    FocusHandle, FontWeight, Hsla, KeyDownEvent, ScrollHandle, SharedString, Stateful,
+    FocusHandle, FontWeight, Hsla, KeyDownEvent, ScrollEvent, ScrollHandle, SharedString, Stateful,
     Subscription, Task, Window, div, linear_color_stop, linear_gradient, point, prelude::*,
     pulsating_between, px, svg,
 };
@@ -45,6 +45,8 @@ const BUSY_PULSE_PERIOD: Duration = Duration::from_millis(1400);
 const BUSY_PULSE_FPS: f32 = 30.0;
 const LONG_PROMPT_CHARS: usize = 240;
 const MESSAGE_ITEM_LIMIT: usize = 12;
+/// The palette's top offset, search row and margin, subtracted from the panel height for its list.
+const PALETTE_CHROME_HEIGHT: f32 = 150.0;
 const NOTHING_NEEDS_YOU_TEXT: &str = "Nothing needs you right now";
 const GOLEM_MISSING_TEXT: &str = "Still looking for golem";
 const TERMINAL_BACKENDS: [&str; 2] = ["claude", "codex"];
@@ -97,6 +99,8 @@ struct Toast {
     text: SharedString,
     id: u64,
     is_error: bool,
+    /// The failed task a click on the toast opens.
+    task_id: Option<String>,
 }
 
 /// The result of a background `golem` run: the toast text and whether it reports a failure.
@@ -519,7 +523,7 @@ impl BoardView {
 
     /// The collapsed panel fits its longest group so it doesn't change height when switching tabs.
     fn panel_height(&self) -> f64 {
-        if self.is_expanded || self.is_showing_help || self.palette.is_some() {
+        if self.is_expanded || self.is_showing_help {
             return PANEL_HEIGHT;
         }
         let longest = self
@@ -611,6 +615,7 @@ impl BoardView {
             text,
             id: toast_id,
             is_error,
+            task_id: None,
         });
         let duration = if is_error {
             ERROR_TOAST_DURATION
@@ -702,13 +707,8 @@ impl BoardView {
         cx.notify();
     }
 
-    /// The palette needs the full panel height, so the panel grows while it shows.
     fn set_palette(&mut self, palette: Option<Palette>, cx: &mut Context<Self>) {
-        let is_resizing = palette.is_some() != self.palette.is_some();
         self.palette = palette;
-        if is_resizing {
-            self.place(false, cx);
-        }
         cx.notify();
     }
 
@@ -779,7 +779,10 @@ impl BoardView {
         self.select(target.root_id, cx);
     }
 
-    fn scroll_by(&self, delta: f32) {
+    fn scroll_by(&mut self, delta: f32) {
+        if delta < 0. {
+            self.is_following = false;
+        }
         let handle = if self.is_expanded {
             &self.detail_scroll
         } else {
@@ -919,14 +922,27 @@ impl BoardView {
                 .selected_row()
                 .is_some_and(|row| row.task_id == task_id);
         if !is_in_view {
-            self.show_message(
-                format!("{} for {name}: {message}", action.failed_text()),
-                true,
-                cx,
-            );
+            self.show_message(format!("{} for {name}", action.failed_text()), true, cx);
+            if let Some(toast) = self.toast.as_mut() {
+                toast.task_id = Some(task_id.to_string());
+            }
         }
         self.action_errors
             .insert(task_id.to_string(), ActionError { action, message });
+    }
+
+    /// Shows a task's details, switching to its group.
+    fn open_task(&mut self, task_id: &str, cx: &mut Context<Self>) {
+        let Some(row) = self.snapshot.rows.iter().find(|row| row.task_id == task_id) else {
+            return;
+        };
+        let (column, root_id) = (row.column, row.root_id.clone());
+        if column == Column::Done {
+            self.is_showing_done = true;
+        }
+        self.tab = column;
+        self.select(root_id, cx);
+        self.set_expanded(true, cx);
     }
 
     fn perform(&mut self, action: Action, row: &Row, cx: &mut Context<Self>) {
@@ -1242,7 +1258,7 @@ impl BoardView {
                 self.query.clear();
                 self.input = Input::None;
             }
-            KEY_ENTER | KEY_DOWN => self.input = Input::None,
+            KEY_ENTER | KEY_DOWN | KEY_UP => self.input = Input::None,
             KEY_BACKSPACE => {
                 self.query.pop();
             }
@@ -1367,10 +1383,26 @@ fn outcome_or(outcome: golem_cli::CommandOutcome, done_text: String) -> Outcome 
     }
 }
 
+/// The "owner/repo" part of a GitHub pull request URL.
+fn pull_request_repository(url: &str) -> String {
+    let parts: Vec<&str> = url.trim_start_matches("https://").split('/').collect();
+    match parts.as_slice() {
+        [_, owner, repository, ..] => format!("{owner}/{repository}"),
+        _ => url.to_string(),
+    }
+}
+
 /// Whether a prompt is long enough to clamp to three lines in the details pane.
 fn is_long_prompt(prompt: &str) -> bool {
     let prompt = prompt.trim();
     prompt.lines().count() > 3 || prompt.chars().count() > LONG_PROMPT_CHARS
+}
+
+fn sentence_case(text: &str) -> String {
+    let mut chars = text.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(chars).collect()
+    })
 }
 
 fn is_printable(typed: &str) -> bool {
@@ -1564,7 +1596,7 @@ impl BoardView {
                         .text_color(theme.text_3)
                         .child(rows.len().to_string()),
                 )
-                .when(has_attention, |this| {
+                .when(has_attention && !is_current, |this| {
                     this.child(div().size(px(6.)).rounded_full().bg(theme.orange))
                 })
         });
@@ -1608,6 +1640,12 @@ impl BoardView {
         };
         let is_code =
             snippet.starts_with(board::SHELL_PROMPT) || snippet.starts_with(board::TOOL_MARK);
+        let quick_action = (is_selected && !self.is_expanded && busy_action.is_none())
+            .then(|| {
+                let actions = board::available_actions(&self.snapshot, Some(row));
+                board::primary_action(&self.snapshot, row, &actions)
+            })
+            .flatten();
         let root_id = row.root_id.clone();
         div()
             .id(SharedString::from(format!("card-{}", row.root_id)))
@@ -1674,8 +1712,9 @@ impl BoardView {
                                 .child(row.step.clone()),
                         )
                     })
-                    .child(
-                        div()
+                    .child(match quick_action {
+                        Some(action) => Self::quick_action_button(action, theme, cx),
+                        None => div()
                             .flex_none()
                             .text_size(px(11.5))
                             .font_weight(if is_stuck {
@@ -1684,8 +1723,9 @@ impl BoardView {
                                 FontWeight::NORMAL
                             })
                             .text_color(if is_stuck { theme.orange } else { theme.text_3 })
-                            .child(when),
-                    ),
+                            .child(when)
+                            .into_any_element(),
+                    }),
             )
             .child(
                 div()
@@ -1712,6 +1752,37 @@ impl BoardView {
                             .child(snippet),
                     ),
             )
+    }
+
+    /// The selected card's primary action in the collapsed panel, so it runs without opening details.
+    fn quick_action_button(action: Action, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .id("quick-action")
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(5.))
+            .h(px(20.))
+            .pl(px(8.))
+            .pr(px(3.))
+            .rounded(px(5.))
+            .bg(theme.accent)
+            .text_color(theme.on_accent)
+            .text_size(px(11.5))
+            .font_weight(FontWeight::SEMIBOLD)
+            .hover(|style| style.opacity(0.9))
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                cx.stop_propagation();
+                this.request(action, cx);
+            }))
+            .child(action.label())
+            .child(
+                kbd(&key_label(action), theme)
+                    .h(px(14.))
+                    .bg(gpui::rgba(0xffffff38))
+                    .text_color(theme.on_accent),
+            )
+            .into_any_element()
     }
 
     fn render_list(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
@@ -1794,7 +1865,7 @@ impl BoardView {
         if let Some(error) = self.action_errors.get(&row.task_id) {
             body = body.child(Self::callout(
                 error.action.failed_text(),
-                &error.message,
+                &sentence_case(&error.message),
                 theme.red,
                 false,
                 theme,
@@ -1830,7 +1901,9 @@ impl BoardView {
         let session = self
             .is_showing_fields
             .then(|| self.render_session(row, now, theme));
-        let sections = if row.status == Status::Running {
+        let sections = if self.is_following {
+            vec![Some(activity)]
+        } else if row.status == Status::Running {
             vec![Some(activity), chain, prompt, session]
         } else {
             vec![
@@ -1889,13 +1962,10 @@ impl BoardView {
                     )
                     .child(
                         div()
-                            .flex_1()
                             .min_w_0()
                             .truncate()
-                            .font_family(MONO_FONT)
-                            .text_size(px(11.5))
                             .text_color(theme.text_3)
-                            .child(pull_request.url.trim_start_matches("https://").to_string()),
+                            .child(pull_request_repository(&pull_request.url)),
                     ),
             );
         }
@@ -1995,7 +2065,13 @@ impl BoardView {
 
     fn render_session(&self, row: &Row, now: DateTime<Local>, theme: &Theme) -> AnyElement {
         let mut grid = div().flex().flex_col().gap(px(4.)).text_size(px(12.5));
-        for (label, value) in board::task_fields(row, &self.snapshot, now) {
+        let task = &self.snapshot.tasks[&row.task_id];
+        let is_gate_in_callout = task.gate_stop_reason.is_some();
+        let fields = board::task_fields(row, &self.snapshot, now)
+            .into_iter()
+            .filter(|(label, value)| !(*label == "Backend" && *value == task.backend))
+            .filter(|(label, _)| !(*label == "Gate" && is_gate_in_callout));
+        for (label, value) in fields {
             let is_code = matches!(
                 label,
                 "Directory" | "Worktree" | "Session" | "Gate" | "Setup"
@@ -2121,7 +2197,7 @@ impl BoardView {
                     .pl(px(12.))
                     .text_size(px(12.))
                     .text_color(theme.text_3)
-                    .child(format!("{}{text}", board::TOOL_MARK)),
+                    .child(text),
             });
         }
         div()
@@ -2338,6 +2414,13 @@ impl BoardView {
                             .min_h_0()
                             .overflow_y_scroll()
                             .track_scroll(&self.detail_scroll)
+                            .on_scroll(cx.listener(|this, event: &ScrollEvent, _, cx| {
+                                let is_scrolling_up = event.delta.pixel_delta(px(16.)).y > px(0.);
+                                if this.is_following && is_scrolling_up {
+                                    this.is_following = false;
+                                    cx.notify();
+                                }
+                            }))
                             .pl(px(18.))
                             .pr(px(18.))
                             .pt(px(2.))
@@ -2457,8 +2540,10 @@ impl BoardView {
         label: String,
         key: &str,
         is_primary: bool,
+        is_danger: bool,
         theme: &Theme,
     ) -> Stateful<Div> {
+        let primary_color = if is_danger { theme.red } else { theme.accent };
         div()
             .id(id)
             .flex_1()
@@ -2468,7 +2553,11 @@ impl BoardView {
             .gap(px(7.))
             .h(px(28.))
             .rounded(px(7.))
-            .bg(if is_primary { theme.accent } else { theme.fill })
+            .bg(if is_primary {
+                primary_color
+            } else {
+                theme.fill
+            })
             .text_color(if is_primary {
                 theme.on_accent
             } else {
@@ -2577,6 +2666,7 @@ impl BoardView {
                                     decline.to_string(),
                                     "esc",
                                     false,
+                                    false,
                                     theme,
                                 )
                                 .on_click(
@@ -2586,10 +2676,19 @@ impl BoardView {
                                 ),
                             )
                             .child(
-                                Self::sheet_button("accept", verb, "\u{23ce}", true, theme)
-                                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                Self::sheet_button(
+                                    "accept",
+                                    verb,
+                                    "\u{23ce}",
+                                    true,
+                                    pending.action == Action::Cancel,
+                                    theme,
+                                )
+                                .on_click(
+                                    cx.listener(|this, _: &ClickEvent, _, cx| {
                                         this.answer(true, cx)
-                                    })),
+                                    }),
+                                ),
                             ),
                     ),
             )
@@ -2769,11 +2868,20 @@ impl BoardView {
                     )
                     .child(
                         div().flex().mt(px(14.)).child(
-                            Self::sheet_button("help-ok", "OK".to_string(), "esc", false, theme)
-                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            Self::sheet_button(
+                                "help-ok",
+                                "OK".to_string(),
+                                "esc",
+                                false,
+                                false,
+                                theme,
+                            )
+                            .on_click(cx.listener(
+                                |this, _: &ClickEvent, _, cx| {
                                     this.set_help(false, cx);
                                     cx.notify();
-                                })),
+                                },
+                            )),
                         ),
                     ),
             )
@@ -2791,7 +2899,9 @@ impl BoardView {
         });
         let mut list = div()
             .id("palette-list")
-            .max_h(px(420.))
+            .max_h(px(
+                (self.panel_height() as f32 - PALETTE_CHROME_HEIGHT).min(420.)
+            ))
             .overflow_y_scroll()
             .track_scroll(&self.palette_scroll)
             .px(px(5.))
@@ -2927,7 +3037,7 @@ impl BoardView {
                 div()
                     .id("toast")
                     .flex()
-                    .items_start()
+                    .items_center()
                     .gap(px(8.))
                     .px(px(11.))
                     .py(px(6.))
@@ -2945,16 +3055,18 @@ impl BoardView {
                     .text_size(px(12.))
                     .font_weight(FontWeight::MEDIUM)
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.toast = None;
+                        let toast = this.toast.take();
+                        if let Some(task_id) = toast.and_then(|toast| toast.task_id) {
+                            this.open_task(&task_id, cx);
+                        }
                         cx.notify();
                     }))
                     .when(toast.is_error, |this| {
-                        this.border_color(theme.red)
-                            .child(div().mt(px(2.)).child(icon(
-                                theme::status_icon(Status::Failed),
-                                12.,
-                                theme.red,
-                            )))
+                        this.border_color(theme.red).child(icon(
+                            theme::status_icon(Status::Failed),
+                            12.,
+                            theme.red,
+                        ))
                     })
                     .child(
                         div()
@@ -2962,7 +3074,16 @@ impl BoardView {
                             .min_w_0()
                             .truncate()
                             .child(toast.text.clone()),
-                    ),
+                    )
+                    .when(toast.task_id.is_some(), |this| {
+                        this.child(
+                            div()
+                                .flex_none()
+                                .text_color(theme.accent)
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child("Details"),
+                        )
+                    }),
             )
             .into_any_element()
     }
@@ -2986,6 +3107,7 @@ impl Render for BoardView {
                     .border_color(theme.line)
             })
             .when(!self.is_expanded, |this| this.flex_1())
+            .child(self.render_header(&theme, cx))
             .child(self.render_tabs(&theme, cx))
             .child(self.render_list(&theme, cx));
         let mut body = div().flex_1().min_h_0().flex().child(side);
@@ -3007,7 +3129,6 @@ impl Render for BoardView {
             .bg(theme.panel)
             .text_color(theme.text)
             .text_size(px(13.))
-            .child(self.render_header(&theme, cx))
             .child(body)
             .child(self.render_footer(&theme, cx));
         if let Some(toast) = &self.toast {
