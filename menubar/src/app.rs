@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::f32::consts::FRAC_PI_2;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -8,10 +9,10 @@ use futures::StreamExt;
 use futures::channel::mpsc::UnboundedReceiver;
 use gpui::{
     Animation, AnimationExt, AnyElement, BoxShadow, ClickEvent, ClipboardItem, Context, Div,
-    ElementId, FocusHandle, FontWeight, HighlightStyle, Hsla, KeyDownEvent, MouseButton,
+    ElementId, FocusHandle, Font, FontWeight, HighlightStyle, Hsla, KeyDownEvent, MouseButton,
     MouseDownEvent, Pixels, ScrollEvent, ScrollHandle, SharedString, Stateful, StyledText,
-    Subscription, Task, Transformation, Window, div, linear_color_stop, linear_gradient, point,
-    prelude::*, pulsating_between, px, radians, svg,
+    Subscription, Task, TextRun, Transformation, Window, WindowTextSystem, div, linear_color_stop,
+    linear_gradient, point, prelude::*, pulsating_between, px, radians, svg,
 };
 use notify::Watcher;
 use objc2::rc::Retained;
@@ -59,7 +60,9 @@ const FILTER_RESET_AFTER: Duration = Duration::from_secs(60);
 const SCROLL_STEP: f32 = 240.0;
 const BUSY_PULSE_PERIOD: Duration = Duration::from_millis(1400);
 const BUSY_PULSE_FPS: f32 = 30.0;
-const CHARS_PER_LINE: usize = 80;
+/// The details body's side padding, and a callout's extra inset (padding and left border).
+const DETAIL_SIDE_PADDING: f32 = 18.;
+const CALLOUT_INSET: f32 = 27.;
 const PROMPT_LINE_LIMIT: usize = 3;
 const PARAGRAPH_GAP: f32 = 7.;
 /// A one-letter keycap's width; a button that hides its keycap while typing pads both sides
@@ -67,11 +70,13 @@ const PARAGRAPH_GAP: f32 = 7.;
 const KEYCAP_WIDTH: f32 = 17.;
 const COPIED_DURATION: Duration = Duration::from_millis(1500);
 /// Session fields the palette offers to copy, for handing off to a terminal.
-const COPYABLE_FIELDS: [(&str, &str); 4] = [
+const COPYABLE_FIELDS: [(&str, &str); 6] = [
     ("Directory", "Copy directory"),
     ("Worktree", "Copy worktree path"),
     ("Branch", "Copy branch"),
     ("Session", "Copy session ID"),
+    ("Gate", "Copy gate command"),
+    ("Setup", "Copy setup command"),
 ];
 const RESULT_LINE_LIMIT: usize = 12;
 const CALLOUT_LINE_LIMIT: usize = 4;
@@ -129,6 +134,11 @@ enum Command {
     /// Copies the selected task's Session field with this label.
     CopyField(&'static str),
     Quit,
+}
+
+struct TextMeasure {
+    system: Rc<WindowTextSystem>,
+    font: Font,
 }
 
 struct ErrorDetail {
@@ -219,6 +229,8 @@ pub struct BoardView {
     shown_task_id: Option<String>,
     is_error_copied: bool,
     copied_id: Option<SharedString>,
+    /// The window's text system and font, kept from the last frame to measure wrapping.
+    text_measure: Option<TextMeasure>,
     /// The panel size render last asked AppKit for, so content changes resize it once.
     placed_size: Option<(f64, f64)>,
     pending: Option<Pending>,
@@ -409,6 +421,7 @@ impl BoardView {
             shown_task_id: None,
             is_error_copied: false,
             copied_id: None,
+            text_measure: None,
             placed_size: None,
             pending: None,
             is_showing_help: false,
@@ -1921,11 +1934,6 @@ fn pull_request_repository(url: &str) -> String {
 }
 
 /// Whether text is long enough to clamp to `line_limit` lines in the details pane.
-fn is_long_text(text: &str, line_limit: usize) -> bool {
-    let text = text.trim();
-    text.lines().count() > line_limit || text.chars().count() > line_limit * CHARS_PER_LINE
-}
-
 fn sentence_case(text: &str) -> String {
     let mut chars = text.chars();
     chars.next().map_or_else(String::new, |first| {
@@ -2763,6 +2771,48 @@ impl BoardView {
     }
 
     /// Long text clamped to `line_limit` lines with its own Show more control; E expands all.
+    /// How many lines `text` takes in the details pane, wrapped as rendered; blank lines
+    /// render as paragraph gaps, so they don't count. Before the first frame, source lines.
+    fn wrapped_line_count(&self, section: &str, text: &str) -> usize {
+        let Some(measure) = &self.text_measure else {
+            return text.lines().count();
+        };
+        let is_callout = matches!(section, SECTION_STOP_REASON | SECTION_ACTION_ERROR);
+        let width = self.panel_width() as f32
+            - PANEL_WIDTH as f32
+            - 1.
+            - 2. * DETAIL_SIDE_PADDING
+            - if is_callout { CALLOUT_INSET } else { 0. };
+        let (font, font_size) = match section {
+            SECTION_STOP_REASON => (gpui::font(MONO_FONT), 12.),
+            _ => (measure.font.clone(), 13.),
+        };
+        let run = TextRun {
+            len: text.len(),
+            font,
+            color: Hsla::default(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let shaped = measure.system.shape_text(
+            SharedString::from(text.to_string()),
+            px(font_size),
+            &[run],
+            Some(px(width)),
+            None,
+        );
+        shaped.map_or_else(
+            |_| text.lines().count(),
+            |lines| {
+                (lines.iter())
+                    .filter(|line| !line.text.trim().is_empty())
+                    .map(|line| line.wrap_boundaries().len() + 1)
+                    .sum()
+            },
+        )
+    }
+
     fn clamped_text(
         &self,
         section: &'static str,
@@ -2773,7 +2823,7 @@ impl BoardView {
         cx: &mut Context<Self>,
     ) -> Div {
         let is_expanded = self.expanded_sections.contains(section);
-        let is_long = is_long_text(text, line_limit);
+        let is_long = self.wrapped_line_count(section, text.trim()) > line_limit;
         let is_clamped = is_long && !is_expanded;
         // Diagnostics keep their lines, each cut to one; prose joins its paragraphs, because
         // line_clamp limits each paragraph separately.
@@ -3356,8 +3406,8 @@ impl BoardView {
                                     cx.notify();
                                 }
                             }))
-                            .pl(px(18.))
-                            .pr(px(18.))
+                            .pl(px(DETAIL_SIDE_PADDING))
+                            .pr(px(DETAIL_SIDE_PADDING))
                             .pt(px(2.))
                             .pb(px(DETAIL_FADE_HEIGHT + 4.))
                             .flex()
@@ -4166,6 +4216,10 @@ impl BoardView {
 impl Render for BoardView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::for_appearance(window.appearance());
+        self.text_measure = Some(TextMeasure {
+            system: window.text_system().clone(),
+            font: window.text_style().font(),
+        });
         if !self.tabs().contains(&self.tab) {
             self.tab = Column::Review;
         }
