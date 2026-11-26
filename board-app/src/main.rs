@@ -4,6 +4,7 @@ mod golem_cli;
 mod ledger;
 mod macos;
 mod theme;
+mod zoom;
 
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};

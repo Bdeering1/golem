@@ -2,7 +2,7 @@
 
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
-use objc2_app_kit::{NSApplication, NSScreen, NSView, NSWindow};
+use objc2_app_kit::{NSApplication, NSView, NSWindow};
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
@@ -54,13 +54,6 @@ pub fn create_tray_icon() -> TrayIcon {
         .expect("menu bar item can be created")
 }
 
-/// The menu bar item's frame in AppKit screen coordinates (origin at the bottom left).
-fn status_item_frame(tray_icon: &TrayIcon) -> Option<NSRect> {
-    let mtm = MainThreadMarker::new()?;
-    let button = tray_icon.ns_status_item()?.button(mtm)?;
-    Some(button.window()?.frame())
-}
-
 pub fn native_window(window: &gpui::Window) -> Option<Retained<NSWindow>> {
     let handle = HasWindowHandle::window_handle(window).ok()?;
     let RawWindowHandle::AppKit(appkit_handle) = handle.as_raw() else {
@@ -71,21 +64,24 @@ pub fn native_window(window: &gpui::Window) -> Option<Retained<NSWindow>> {
     view.window()
 }
 
-/// The panel frame that puts its top just below the menu bar item, kept on screen.
-pub fn panel_frame(
-    panel: &NSWindow,
-    tray_icon: &TrayIcon,
-    width: f64,
-    height: f64,
-) -> Option<NSRect> {
-    let item_frame = status_item_frame(tray_icon)?;
+/// The panel frame that puts its top just below the menu bar item, kept on the item's screen.
+/// AppKit screen coordinates have their origin at the bottom left.
+pub fn panel_frame(tray_icon: &TrayIcon, width: f64, height: f64) -> Option<NSRect> {
+    let mtm = MainThreadMarker::new()?;
+    let item_window = tray_icon.ns_status_item()?.button(mtm)?.window()?;
+    let item_frame = item_window.frame();
     let item_center = item_frame.origin.x + item_frame.size.width / 2.0;
     let top = item_frame.origin.y - PANEL_GAP;
+    let mut width = width;
     let mut right = item_center + PANEL_RIGHT_OVERHANG.min(width / 2.0);
     let mut bottom_limit = f64::MIN;
-    if let Some(screen) = panel.screen().or_else(|| item_screen(tray_icon)) {
+    // The item's screen, not the panel's: a hidden panel reports the screen it last opened on.
+    if let Some(screen) = item_window.screen() {
         let visible = screen.visibleFrame();
-        right = right.min(visible.origin.x + visible.size.width - SCREEN_MARGIN);
+        let left_limit = visible.origin.x + SCREEN_MARGIN;
+        let right_limit = visible.origin.x + visible.size.width - SCREEN_MARGIN;
+        width = width.min(right_limit - left_limit);
+        right = right.max(left_limit + width).min(right_limit);
         bottom_limit = visible.origin.y + SCREEN_MARGIN;
     }
     let height = height.min(top - bottom_limit);
@@ -93,11 +89,6 @@ pub fn panel_frame(
         NSPoint::new(right - width, top - height),
         NSSize::new(width, height),
     ))
-}
-
-fn item_screen(tray_icon: &TrayIcon) -> Option<Retained<NSScreen>> {
-    let mtm = MainThreadMarker::new()?;
-    tray_icon.ns_status_item()?.button(mtm)?.window()?.screen()
 }
 
 pub fn show_panel(panel: &NSWindow) {

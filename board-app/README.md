@@ -18,6 +18,7 @@ cp -R "target/release/Golem Board.app" /Applications
 ```
 
 Click the menu bar icon or press ctrl-option-G to open the board, and press `?` for keys.
+Cmd-plus and cmd-minus zoom the board, and cmd-0 resets it. The zoom level is remembered.
 
 Pickup for claude and codex tasks opens a terminal. Terminal.app is the default; set another
 in `~/.config/golem/board.toml`:

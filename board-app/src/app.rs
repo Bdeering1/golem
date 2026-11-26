@@ -13,7 +13,7 @@ use gpui::{
     ElementId, FocusHandle, Font, FontWeight, HighlightStyle, Hsla, KeyDownEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, Pixels, ScrollEvent, ScrollHandle, SharedString, Stateful,
     StyledText, Subscription, Task, TextRun, Transformation, Window, WindowTextSystem, div,
-    linear_color_stop, linear_gradient, point, prelude::*, pulsating_between, px, radians, svg,
+    linear_color_stop, linear_gradient, point, prelude::*, pulsating_between, radians, svg,
 };
 use notify::Watcher;
 use objc2::rc::Retained;
@@ -27,7 +27,9 @@ use crate::golem_cli::{self, Golem};
 use crate::ledger::{self, Status};
 use crate::macos;
 use crate::theme::{self, MONO_FONT, Theme};
+use crate::zoom::{self, px};
 
+const DEFAULT_REM_SIZE: f32 = 16.0;
 const PANEL_WIDTH: f64 = 440.0;
 const EXPANDED_PANEL_WIDTH: f64 = 900.0;
 const PANEL_HEIGHT: f64 = 640.0;
@@ -40,7 +42,7 @@ const CARD_GAP: f32 = 2.0;
 /// The footer and the details action bar share a height so their top edges line up.
 const BOTTOM_BAR_HEIGHT: f32 = 37.0;
 /// The shortcuts sheet with the top inset above it and 12 pt below.
-const HELP_PANEL_HEIGHT: f64 = 468.0;
+const HELP_PANEL_HEIGHT: f64 = 492.0;
 const SMALL_SHEET_MAX_WIDTH: f32 = 440.0;
 const LOAD_ERROR_TITLE: &str = "Can't read the ledger";
 const ERROR_TEXT_MAX_HEIGHT: f32 = 220.0;
@@ -144,6 +146,8 @@ enum Command {
     CopyResult,
     /// Lists the copy commands that an empty search folds into one row.
     ShowCopies,
+    /// Changes the zoom by this many percent, or resets it when zero.
+    Zoom(i32),
     Quit,
 }
 
@@ -351,6 +355,7 @@ impl BoardView {
         toggle_receiver: UnboundedReceiver<()>,
         hotkey_manager: Option<global_hotkey::GlobalHotKeyManager>,
     ) -> Self {
+        zoom::load();
         let (reload_sender, reload_receiver) = futures::channel::mpsc::unbounded::<bool>();
         let watcher = ledger_watcher(reload_sender);
         let subscriptions = vec![
@@ -662,6 +667,12 @@ impl BoardView {
         }
     }
 
+    /// The panel's size on screen, which is its design size at the current zoom.
+    fn panel_size(&self) -> (f64, f64) {
+        let zoom = f64::from(zoom::percent()) / 100.;
+        (self.panel_width() * zoom, self.panel_height() * zoom)
+    }
+
     /// The collapsed panel fits its longest group so it doesn't change height when switching tabs.
     fn panel_height(&self) -> f64 {
         if self.is_expanded {
@@ -736,12 +747,8 @@ impl BoardView {
         let Some(panel) = self.panel.clone() else {
             return;
         };
-        let frame = macos::panel_frame(
-            &panel,
-            &self.tray_icon,
-            self.panel_width(),
-            self.panel_height(),
-        );
+        let (width, height) = self.panel_size();
+        let frame = macos::panel_frame(&self.tray_icon, width, height);
         cx.spawn(async move |_, _| {
             if let Some(frame) = frame {
                 panel.setFrame_display(frame, true);
@@ -798,6 +805,17 @@ impl BoardView {
             macos::hide_panel(panel);
         }
         self.hidden_at = Some(Instant::now());
+        cx.notify();
+    }
+
+    /// Steps the zoom in `direction`, or resets it when zero.
+    fn zoom(&mut self, direction: i32, cx: &mut Context<Self>) {
+        let percent = match direction {
+            0 => zoom::DEFAULT_PERCENT,
+            _ => zoom::percent().saturating_add_signed(direction * zoom::STEP_PERCENT as i32),
+        };
+        let percent = zoom::set(percent);
+        self.show_toast(format!("Zoom {percent}%"), cx);
         cx.notify();
     }
 
@@ -1677,6 +1695,10 @@ impl BoardView {
                 .to_string(),
                 "A",
             )),
+            Some((Command::Zoom(1), "Zoom in".to_string(), "\u{2318}+")),
+            Some((Command::Zoom(-1), "Zoom out".to_string(), "\u{2318}-")),
+            (zoom::percent() != zoom::DEFAULT_PERCENT)
+                .then(|| (Command::Zoom(0), "Reset zoom".to_string(), "\u{2318}0")),
             Some((Command::Quit, "Quit golem board".to_string(), "\u{2318}Q")),
         ];
         for (command, label, key) in board_items.into_iter().flatten() {
@@ -1735,6 +1757,7 @@ impl BoardView {
                 }
             }
             Command::ShowCopies => {}
+            Command::Zoom(direction) => self.zoom(direction, cx),
             Command::Quit => cx.quit(),
         }
         self.focus_handle.focus(window, cx);
@@ -1776,6 +1799,9 @@ impl BoardView {
                 }
                 "w" => self.hide(cx),
                 "q" => cx.quit(),
+                "=" | "+" => self.zoom(1, cx),
+                "-" => self.zoom(-1, cx),
+                "0" => self.zoom(0, cx),
                 "v" => self.paste(cx),
                 KEY_BACKSPACE => self.clear_input(),
                 "left" | "right" if self.palette.is_some() || self.input == Input::Filter => {
@@ -4453,6 +4479,7 @@ impl BoardView {
                 ("A", "Show Done"),
                 ("\u{21e7}C", "Close finished"),
                 ("\u{2318}K", "All actions"),
+                ("\u{2318}+ \u{2318}-", "Zoom"),
                 ("\u{2303}\u{2325}G", "Open panel"),
             ],
         );
@@ -4796,7 +4823,8 @@ impl Render for BoardView {
             self.tab = Column::Review;
         }
         self.reset_view_if_task_changed();
-        let size = (self.panel_width(), self.panel_height());
+        window.set_rem_size(px(DEFAULT_REM_SIZE));
+        let size = self.panel_size();
         if self.is_visible() && self.placed_size != Some(size) {
             self.placed_size = Some(size);
             self.place(false, cx);
