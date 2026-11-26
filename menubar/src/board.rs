@@ -1147,6 +1147,7 @@ pub fn task_fields(
         ),
         ("Directory", display_directory(&row.directory)),
         ("Worktree", display_directory(worktree)),
+        ("Branch", branch_name(task).unwrap_or_default().to_string()),
         ("Backend", backend),
         ("Session", task.session_id.clone()),
         ("Due", moment_text(due_at, now)),
@@ -1229,27 +1230,9 @@ pub fn task_activity(row: &Row, snapshot: &Snapshot) -> Vec<String> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActivityLevel {
-    Summary,
+    /// Runs of tool calls fold into one line.
     Messages,
     All,
-}
-
-impl ActivityLevel {
-    pub fn label(self) -> &'static str {
-        match self {
-            ActivityLevel::Summary => "Summary",
-            ActivityLevel::Messages => "Messages",
-            ActivityLevel::All => "All",
-        }
-    }
-
-    pub fn next(self) -> ActivityLevel {
-        match self {
-            ActivityLevel::Summary => ActivityLevel::Messages,
-            ActivityLevel::Messages => ActivityLevel::All,
-            ActivityLevel::All => ActivityLevel::Summary,
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

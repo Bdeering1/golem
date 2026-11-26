@@ -33,11 +33,12 @@ const MIN_PANEL_HEIGHT: f64 = 320.0;
 /// Collapsed-panel layout heights used to fit the panel to its longest group.
 const PANEL_CHROME_HEIGHT: f64 = 140.0;
 const LOAD_ERROR_HEIGHT: f64 = 25.0;
+const TOAST_ROW_HEIGHT: f64 = 44.0;
 const CARD_GAP: f32 = 2.0;
 /// The footer and the details action bar share a height so their top edges line up.
 const BOTTOM_BAR_HEIGHT: f32 = 37.0;
 /// The shortcuts sheet's height plus the footer below it; the palette uses it too.
-const HELP_PANEL_HEIGHT: f64 = 545.0;
+const HELP_PANEL_HEIGHT: f64 = 568.0;
 const SMALL_SHEET_MAX_WIDTH: f32 = 440.0;
 const LOAD_ERROR_TITLE: &str = "Can't read the ledger";
 const ERROR_TEXT_MAX_HEIGHT: f32 = 220.0;
@@ -178,7 +179,10 @@ pub struct BoardView {
     query: String,
     input: Input,
     is_expanded: bool,
-    activity_level: ActivityLevel,
+    /// A stopped task with a Result shows its activity as one counts line until opened.
+    is_activity_open: bool,
+    /// Whether the activity shows its earlier messages, not just the latest few.
+    is_showing_earlier: bool,
     is_following: bool,
     is_follow_paused: bool,
     /// The activity shown when Follow paused; it stays put while new lines arrive.
@@ -190,6 +194,8 @@ pub struct BoardView {
     expanded_folds: HashSet<usize>,
     /// The task the details last showed; any other selection resets the per-task view.
     shown_root_id: Option<String>,
+    /// The panel size render last asked AppKit for, so content changes resize it once.
+    placed_size: Option<(f64, f64)>,
     /// Set by E so the next render scrolls to the first section it expanded.
     is_revealing_full_text: bool,
     pending: Option<Pending>,
@@ -366,7 +372,8 @@ impl BoardView {
             query: String::new(),
             input: Input::None,
             is_expanded: false,
-            activity_level: ActivityLevel::Messages,
+            is_activity_open: false,
+            is_showing_earlier: false,
             is_following: false,
             is_follow_paused: false,
             paused_lines: Vec::new(),
@@ -374,6 +381,7 @@ impl BoardView {
             expanded_sections: HashSet::new(),
             expanded_folds: HashSet::new(),
             shown_root_id: None,
+            placed_size: None,
             is_revealing_full_text: false,
             pending: None,
             is_showing_help: false,
@@ -607,7 +615,13 @@ impl BoardView {
         } else {
             0.
         };
-        (PANEL_CHROME_HEIGHT + load_error_height + list_height).clamp(minimum_height, PANEL_HEIGHT)
+        let toast_height = if self.toast.is_some() {
+            TOAST_ROW_HEIGHT
+        } else {
+            0.
+        };
+        (PANEL_CHROME_HEIGHT + load_error_height + toast_height + list_height)
+            .clamp(minimum_height, PANEL_HEIGHT)
     }
 
     /// Moves the panel under the menu bar item, then shows it if asked. AppKit applies the
@@ -736,7 +750,14 @@ impl BoardView {
         self.paused_lines.clear();
         self.expanded_sections.clear();
         self.expanded_folds.clear();
+        self.is_activity_open = false;
+        self.is_showing_earlier = false;
         self.detail_scroll.set_offset(point(px(0.), px(0.)));
+    }
+
+    fn open_activity(&mut self) {
+        self.is_activity_open = true;
+        self.is_showing_earlier = true;
     }
 
     /// The activity items that fold tool calls at the Messages level, for E to open them all.
@@ -942,35 +963,13 @@ impl BoardView {
         self.select(target.root_id, cx);
     }
 
-    /// Follow shows everything; at the default level a stopped task with a Result shows only a
-    /// summary, since its messages mostly restate the Result.
-    fn shown_activity_level(&self, row: &Row) -> ActivityLevel {
-        if self.is_following {
-            return ActivityLevel::All;
-        }
-        match self.activity_level {
-            ActivityLevel::Messages if self.is_summarised(row) => ActivityLevel::Summary,
-            level => level,
-        }
-    }
-
+    /// A stopped task's messages mostly restate its Result, so its activity starts summarised.
     fn is_summarised(&self, row: &Row) -> bool {
         let has_result = self.snapshot.tasks[&row.task_id]
             .result
             .as_deref()
             .is_some_and(|result| !result.trim().is_empty());
         row.status != Status::Running && has_result
-    }
-
-    /// T moves on from the level shown, skipping Messages where it would show as Summary.
-    fn next_activity_level(&self) -> ActivityLevel {
-        let Some(row) = self.selected_row() else {
-            return self.activity_level.next();
-        };
-        match self.shown_activity_level(row) {
-            ActivityLevel::Summary if self.is_summarised(row) => ActivityLevel::All,
-            level => level.next(),
-        }
     }
 
     fn pause_follow(&mut self) {
@@ -1587,8 +1586,20 @@ impl BoardView {
             (_, "a") => self.toggle_done(cx),
             (_, "?") => self.set_help(true, cx),
             (_, "t") => {
-                self.activity_level = self.next_activity_level();
                 self.is_following = false;
+                let fold_indexes = self.fold_indexes();
+                let is_summary_shown = !self.is_activity_open
+                    && self
+                        .selected_row()
+                        .is_some_and(|row| self.is_summarised(row));
+                if is_summary_shown {
+                    self.open_activity();
+                    self.expanded_folds = fold_indexes;
+                } else if self.expanded_folds == fold_indexes {
+                    self.expanded_folds.clear();
+                } else {
+                    self.expanded_folds = fold_indexes;
+                }
                 if !self.is_expanded {
                     self.set_expanded(true, cx);
                 }
@@ -2586,12 +2597,11 @@ impl BoardView {
         let is_gate_in_callout = task.gate_stop_reason.is_some();
         let fields = board::task_fields(row, &self.snapshot, now)
             .into_iter()
-            .filter(|(label, value)| !(*label == "Backend" && *value == task.backend))
             .filter(|(label, _)| !(*label == "Gate" && is_gate_in_callout));
         for (label, value) in fields {
             let is_code = matches!(
                 label,
-                "Directory" | "Worktree" | "Session" | "Gate" | "Setup"
+                "Directory" | "Worktree" | "Branch" | "Session" | "Gate" | "Setup"
             );
             grid = grid.child(
                 div()
@@ -2639,11 +2649,14 @@ impl BoardView {
             Some(new_lines) => Some(format!("{} new", new_lines.len())),
             None => Some("new activity".to_string()),
         };
-        let shown_level = self.shown_activity_level(row);
-        let is_summary = shown_level == ActivityLevel::Summary && !lines.is_empty();
+        let is_summary = !self.is_following
+            && !self.is_activity_open
+            && self.is_summarised(row)
+            && !lines.is_empty();
         if is_summary {
             let summary = div()
                 .id("activity-summary")
+                .self_start()
                 .flex()
                 .items_center()
                 .gap(px(5.))
@@ -2655,7 +2668,7 @@ impl BoardView {
                 .text_color(theme.text_2)
                 .hover(|style| style.bg(theme.hover))
                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.activity_level = this.next_activity_level();
+                    this.open_activity();
                     cx.notify();
                 }))
                 .child(board::activity_counts(&lines))
@@ -2664,24 +2677,6 @@ impl BoardView {
                 .child(summary)
                 .into_any_element();
         }
-        let level_button = div()
-            .id("activity-level")
-            .flex()
-            .items_center()
-            .gap(px(4.))
-            .px(px(6.))
-            .rounded(px(4.))
-            .bg(theme.fill)
-            .text_size(px(11.))
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(theme.text_2)
-            .hover(|style| style.bg(theme.hover))
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                this.activity_level = this.next_activity_level();
-                cx.notify();
-            }))
-            .child(shown_level.label())
-            .child(icon(theme::ICON_CHEVRON, 8., theme.text_3));
         let live = self.is_following.then(|| {
             let (color, label) = match (self.is_follow_paused, row.status) {
                 (true, _) if new_activity.is_some() => (
@@ -2705,7 +2700,6 @@ impl BoardView {
                 .font_weight(FontWeight::SEMIBOLD)
                 .child(div().size(px(6.)).rounded_full().bg(color))
                 .child(label)
-                .child(kbd("esc", theme))
         });
         let header = div()
             .flex()
@@ -2720,8 +2714,7 @@ impl BoardView {
                     .text_color(theme.text_2)
                     .child("ACTIVITY"),
             )
-            .children(live)
-            .when(!self.is_following, |this| this.child(level_button));
+            .children(live);
         let mut log = div().flex().flex_col().text_size(px(12.5));
         if lines.is_empty() {
             let text = if row.status == Status::Running {
@@ -2731,14 +2724,16 @@ impl BoardView {
             };
             log = log.child(div().text_color(theme.text_3).child(text));
         }
-        let level = shown_level;
+        let level = if self.is_following {
+            ActivityLevel::All
+        } else {
+            ActivityLevel::Messages
+        };
         let items = board::activity_view(&lines, level);
-        let earlier_count = match level {
-            ActivityLevel::Messages if row.status == Status::Running || self.is_following => {
-                items.len().saturating_sub(MESSAGE_ITEM_LIMIT)
-            }
-            ActivityLevel::Messages => items.len().saturating_sub(STOPPED_MESSAGE_ITEM_LIMIT),
-            _ => 0,
+        let earlier_count = match (self.is_following || self.is_showing_earlier, row.status) {
+            (true, _) => 0,
+            (false, Status::Running) => items.len().saturating_sub(MESSAGE_ITEM_LIMIT),
+            (false, _) => items.len().saturating_sub(STOPPED_MESSAGE_ITEM_LIMIT),
         };
         if earlier_count > 0 {
             log = log.child(
@@ -2747,7 +2742,7 @@ impl BoardView {
                     .py(px(2.))
                     .text_color(theme.accent)
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.activity_level = ActivityLevel::All;
+                        this.is_showing_earlier = true;
                         cx.notify();
                     }))
                     .child(format!("Show {earlier_count} earlier")),
@@ -2855,10 +2850,6 @@ impl BoardView {
         if !row.step.is_empty() {
             sub_parts.push(format!("step {}", row.step.replace('/', " of ")));
         }
-        if let Some(branch) = board::branch_name(&task) {
-            sub_parts.push(branch.to_string());
-        }
-        sub_parts.push(task.backend.clone());
         sub_parts.retain(|part| !part.is_empty());
         let mut sub = div()
             .flex()
@@ -2912,6 +2903,27 @@ impl BoardView {
                         board::repository_name(&row),
                         row.root_id
                     )))
+                    .when(self.is_following, |this| {
+                        this.child(
+                            div()
+                                .id("follow-back")
+                                .h(px(24.))
+                                .pl(px(6.))
+                                .pr(px(4.))
+                                .flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .rounded(px(6.))
+                                .text_color(theme.text_2)
+                                .hover(|style| style.bg(theme.hover))
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.is_following = false;
+                                    cx.notify();
+                                }))
+                                .child("Back")
+                                .child(kbd("esc", theme)),
+                        )
+                    })
                     .child(
                         div()
                             .id("collapse")
@@ -3429,43 +3441,44 @@ impl BoardView {
             "Move",
             72.,
             &[
-                ("\u{2191}\u{2193} J K", "select"),
-                ("\u{2190}\u{2192} H L", "switch group"),
-                ("\u{2303}N \u{2303}P", "select in search"),
-                (jump_keys.as_str(), "jump to group"),
-                ("G \u{21e7}G", "first, last"),
-                ("N", "next needing you"),
-                ("\u{23ce}", "details"),
-                ("esc", "back"),
-                ("\u{2423} \u{2303}D \u{2303}U", "scroll"),
+                ("\u{2191}\u{2193} J K", "Select"),
+                ("\u{2190}\u{2192} H L", "Switch group"),
+                ("\u{2303}N \u{2303}P", "Select in search"),
+                (jump_keys.as_str(), "Jump to group"),
+                ("G \u{21e7}G", "First, last"),
+                ("N", "Next needing you"),
+                ("\u{23ce}", "Details"),
+                ("esc", "Back"),
+                ("\u{2423} \u{2303}D \u{2303}U", "Scroll"),
             ],
         );
         let board_keys = section(
             "Board",
             48.,
             &[
-                ("/", "filter"),
-                ("A", "show Done"),
-                ("\u{21e7}C", "close finished"),
-                ("\u{2318}K", "all actions"),
-                ("Q \u{2318}W", "close panel"),
-                ("\u{2303}\u{2325}G", "open panel"),
+                ("/", "Filter"),
+                ("A", "Show Done"),
+                ("\u{21e7}C", "Close finished"),
+                ("\u{2318}K", "All actions"),
+                ("Q \u{2318}W", "Close panel"),
+                ("\u{2303}\u{2325}G", "Open panel"),
+                ("D", "Error details"),
             ],
         );
         let task_keys = section(
             "Task",
             48.,
             &[
-                ("P", "pick up"),
-                ("W", "follow log"),
-                ("O", "open PR"),
-                ("R", "retry, recheck"),
-                ("C", "close, dismiss"),
-                ("X", "cancel"),
-                ("Y", "copy ID"),
-                ("E", "expand all"),
-                ("I", "session"),
-                ("T", "activity level"),
+                ("P", "Pick up"),
+                ("W", "Follow log"),
+                ("O", "Open PR"),
+                ("R", "Retry, recheck"),
+                ("C", "Close, dismiss"),
+                ("X", "Cancel"),
+                ("Y", "Copy ID"),
+                ("E", "Expand all"),
+                ("I", "Session info"),
+                ("T", "Tool calls"),
             ],
         );
         let columns = [
@@ -3810,6 +3823,11 @@ impl Render for BoardView {
             self.shown_root_id = selected_root_id;
             self.reset_task_view();
         }
+        let size = (self.panel_width(), self.panel_height());
+        if self.is_visible() && self.placed_size != Some(size) {
+            self.placed_size = Some(size);
+            self.place(false, cx);
+        }
         let side = div()
             .flex()
             .flex_col()
@@ -3820,6 +3838,7 @@ impl Render for BoardView {
                     .flex_none()
                     .border_l_1()
                     .border_color(theme.line)
+                    .bg(theme.sidebar)
             })
             .when(!self.is_expanded, |this| this.flex_1())
             .relative()

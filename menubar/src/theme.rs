@@ -10,6 +10,8 @@ pub const MONO_FONT: &str = "Menlo";
 pub struct Theme {
     pub panel: Hsla,
     pub raised: Hsla,
+    /// The list column beside open details, one step back so the details read first.
+    pub sidebar: Hsla,
     pub text: Hsla,
     pub text_2: Hsla,
     pub text_3: Hsla,
@@ -46,6 +48,7 @@ impl Theme {
         Theme {
             panel: rgba(0xf4f4f5ff).into(),
             raised: rgba(0xffffffd0).into(),
+            sidebar: rgba(0xebebedff).into(),
             text: rgba(0x000000db).into(),
             text_2: rgba(0x000000a8).into(),
             text_3: rgba(0x00000085).into(),
@@ -74,6 +77,7 @@ impl Theme {
         Theme {
             panel: rgba(0x262629ff).into(),
             raised: rgba(0xffffff12).into(),
+            sidebar: rgba(0x1f1f22ff).into(),
             text: rgba(0xffffffeb).into(),
             text_2: rgba(0xffffffb3).into(),
             text_3: rgba(0xffffff80).into(),
