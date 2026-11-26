@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
@@ -13,6 +14,8 @@ const ENVIRONMENT_MARKER: &str = "__golem_menubar__";
 const DEFAULT_TERMINAL: &str = "Terminal";
 const CONFIG_FILE_NAME: &str = "menubar.toml";
 const INTERRUPTED_EXIT_STATUS: i32 = 130;
+const SHELL_TIMEOUT: Duration = Duration::from_secs(10);
+const SHELL_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const FALLBACK_DIRECTORIES: [&str; 3] = [".local/bin", "/opt/homebrew/bin", "/usr/local/bin"];
 
 static RUN_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -62,16 +65,40 @@ fn configured_terminal() -> String {
         .unwrap_or_else(|| DEFAULT_TERMINAL.to_string())
 }
 
+fn scratch_output_path() -> PathBuf {
+    let run_id = RUN_COUNTER.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("golem-menubar-{}-{run_id}.log", std::process::id()))
+}
+
 /// Asks the login shell for PATH and golem's location, since launchd gives apps neither.
-fn shell_environment() -> Option<(String, String)> {
+/// Gives up after `timeout`, so startup files that hang can't leave the app without golem.
+fn shell_environment(shell: &str, timeout: Duration) -> Option<(String, String)> {
     let script =
         format!("printf '\\n{ENVIRONMENT_MARKER}%s\\n%s\\n' \"$PATH\" \"$(command -v golem)\"");
-    let output = Command::new(login_shell())
-        .args(["-lic", &script])
-        .stdin(Stdio::null())
-        .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&output.stdout);
+    // A file, not a pipe: a job the startup files leave running would hold a pipe open.
+    let output_path = scratch_output_path();
+    let output = (|| {
+        let mut child = Command::new(shell)
+            .args(["-lic", &script])
+            .stdin(Stdio::null())
+            .stdout(std::fs::File::create(&output_path).ok()?)
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()?;
+        let deadline = Instant::now() + timeout;
+        while child.try_wait().ok()?.is_none() {
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            std::thread::sleep(SHELL_POLL_INTERVAL);
+        }
+        std::fs::read(&output_path).ok()
+    })();
+    let _ = std::fs::remove_file(&output_path);
+    let output = output?;
+    let text = String::from_utf8_lossy(&output);
     let (_, marked) = text.rsplit_once(ENVIRONMENT_MARKER)?;
     let mut lines = marked.lines();
     let path_variable = lines.next()?.to_string();
@@ -125,7 +152,8 @@ pub fn first_message(output: &str) -> String {
 impl Golem {
     pub fn discover() -> Golem {
         let inherited_path = std::env::var("PATH").unwrap_or_default();
-        let (path_variable, reported) = shell_environment().unwrap_or_else(|| {
+        let shell_environment = shell_environment(&login_shell(), SHELL_TIMEOUT);
+        let (path_variable, reported) = shell_environment.unwrap_or_else(|| {
             let home = ledger::home_directory();
             let path_variable = FALLBACK_DIRECTORIES
                 .iter()
@@ -158,9 +186,7 @@ impl Golem {
             return Golem::missing_outcome();
         };
         // Files, not pipes: an executor that golem starts inherits them and outlives it.
-        let run_id = RUN_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let output_path =
-            std::env::temp_dir().join(format!("golem-menubar-{}-{run_id}.log", std::process::id()));
+        let output_path = scratch_output_path();
         let result = (|| {
             let output_file = std::fs::File::create(&output_path)?;
             let status = Command::new(executable)
@@ -250,18 +276,39 @@ pub fn open_url(url: &str) -> CommandOutcome {
 mod tests {
     use super::*;
 
+    fn executable_script(directory: &std::path::Path, name: &str, text: &str) -> PathBuf {
+        std::fs::create_dir_all(directory).unwrap();
+        let path = directory.join(name);
+        std::fs::write(&path, text).unwrap();
+        Command::new("chmod").arg("+x").arg(&path).status().unwrap();
+        path
+    }
+
+    #[test]
+    fn shell_environment_survives_hung_and_lingering_startup_files() {
+        let directory =
+            std::env::temp_dir().join(format!("golem-menubar-shell-{}", std::process::id()));
+        let hung = executable_script(&directory, "hung", "#!/bin/sh\nexec sleep 5\n");
+        let lingering = executable_script(
+            &directory,
+            "lingering",
+            "#!/bin/sh\nsleep 5 &\nexec /bin/sh -c \"$2\"\n",
+        );
+        let started = Instant::now();
+        let hung_result = shell_environment(&hung.to_string_lossy(), Duration::from_millis(200));
+        let lingering_result =
+            shell_environment(&lingering.to_string_lossy(), Duration::from_secs(4));
+        std::fs::remove_dir_all(&directory).unwrap();
+        assert_eq!(hung_result, None);
+        assert!(lingering_result.is_some_and(|(path_variable, _)| !path_variable.is_empty()));
+        assert!(started.elapsed() < Duration::from_secs(4));
+    }
+
     #[test]
     fn pickup_script_runs_golem_with_the_task_id() {
         let directory =
             std::env::temp_dir().join(format!("golem-menubar-test-{}", std::process::id()));
-        std::fs::create_dir_all(&directory).unwrap();
-        let fake_golem = directory.join("golem's");
-        std::fs::write(&fake_golem, "#!/bin/sh\necho \"$@\"\n").unwrap();
-        Command::new("chmod")
-            .arg("+x")
-            .arg(&fake_golem)
-            .status()
-            .unwrap();
+        let fake_golem = executable_script(&directory, "golem's", "#!/bin/sh\necho \"$@\"\n");
         let script = pickup_script(&fake_golem.to_string_lossy(), "/usr/bin:/bin", "a1 b");
         let output = Command::new("/bin/sh")
             .args(["-c", &script])
