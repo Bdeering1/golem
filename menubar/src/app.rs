@@ -31,7 +31,7 @@ const EXPANDED_PANEL_WIDTH: f64 = 900.0;
 const PANEL_HEIGHT: f64 = 640.0;
 const MIN_PANEL_HEIGHT: f64 = 320.0;
 /// Collapsed-panel layout heights used to fit the panel to its longest group.
-const PANEL_CHROME_HEIGHT: f64 = 140.0;
+const PANEL_CHROME_HEIGHT: f64 = 134.0;
 const LOAD_ERROR_HEIGHT: f64 = 25.0;
 const TOAST_ROW_HEIGHT: f64 = 44.0;
 const CARD_GAP: f32 = 2.0;
@@ -62,6 +62,10 @@ const BUSY_PULSE_FPS: f32 = 30.0;
 const CHARS_PER_LINE: usize = 80;
 const PROMPT_LINE_LIMIT: usize = 3;
 const PARAGRAPH_GAP: f32 = 7.;
+/// A one-letter keycap's width; a button that hides its keycap while typing pads both sides
+/// by half of it and its gap, so the button keeps its width and its label stays centred.
+const KEYCAP_WIDTH: f32 = 17.;
+const COPIED_DURATION: Duration = Duration::from_millis(1500);
 /// Session fields the palette offers to copy, for handing off to a terminal.
 const COPYABLE_FIELDS: [(&str, &str); 4] = [
     ("Directory", "Copy directory"),
@@ -214,6 +218,7 @@ pub struct BoardView {
     shown_root_id: Option<String>,
     shown_task_id: Option<String>,
     is_error_copied: bool,
+    copied_id: Option<SharedString>,
     /// The panel size render last asked AppKit for, so content changes resize it once.
     placed_size: Option<(f64, f64)>,
     pending: Option<Pending>,
@@ -272,7 +277,7 @@ fn kbd(text: &str, theme: &Theme) -> Div {
     div()
         .flex_none()
         .px(px(4.))
-        .min_w(px(17.))
+        .min_w(px(KEYCAP_WIDTH))
         .h(px(16.))
         .flex()
         .items_center()
@@ -403,6 +408,7 @@ impl BoardView {
             shown_root_id: None,
             shown_task_id: None,
             is_error_copied: false,
+            copied_id: None,
             placed_size: None,
             pending: None,
             is_showing_help: false,
@@ -2057,9 +2063,7 @@ impl BoardView {
             .flex_col()
             .gap(px(6.))
             .px(px(10.))
-            .py(px(9.))
-            .border_b_1()
-            .border_color(theme.line)
+            .pt(px(9.))
             .child(
                 div()
                     .flex()
@@ -2236,7 +2240,7 @@ impl BoardView {
                 .flex()
                 .gap(px(1.))
                 .mx(px(10.))
-                .mt(px(9.))
+                .mt(px(13.))
                 .mb(px(7.))
                 .p(px(2.))
                 .rounded(px(8.))
@@ -2271,6 +2275,7 @@ impl BoardView {
         let (snippet, snippet_color) = match (busy_action, action_error) {
             (Some(action), _) => (action.busy_text().to_string(), theme.text_2),
             (None, Some(error)) => (error.action.failed_text().to_string(), theme.red),
+            (None, None) if is_handled => (board::card_snippet(row, &self.snapshot), theme.text_3),
             (None, None) => (board::card_snippet(row, &self.snapshot), theme.text_2),
         };
         let is_code = snippet.starts_with(board::SHELL_PROMPT)
@@ -2434,8 +2439,11 @@ impl BoardView {
             .gap(px(5.))
             .h(px(20.))
             .my(px(-2.))
-            .pl(px(8.))
-            .pr(px(if has_key { 3. } else { 8. }))
+            .map(|this| match (has_key, is_key_hidden) {
+                (true, false) => this.pl(px(8.)).pr(px(3.)),
+                (true, true) => this.px(px((8. + 5. + KEYCAP_WIDTH + 3.) / 2.)),
+                (false, _) => this.px(px(8.)),
+            })
             .rounded(px(5.))
             .bg(theme.accent_fill)
             .text_color(theme.on_accent)
@@ -2448,13 +2456,12 @@ impl BoardView {
                 this.request(action, cx);
             }))
             .child(action.label())
-            .when(has_key, |this| {
+            .when(has_key && !is_key_hidden, |this| {
                 this.child(
                     kbd(&key_label(action), theme)
                         .h(px(14.))
                         .bg(gpui::rgba(FILLED_KEYCAP_BACKGROUND))
-                        .text_color(theme.on_accent)
-                        .when(is_key_hidden, Div::invisible),
+                        .text_color(theme.on_accent),
                 )
             })
             .into_any_element()
@@ -2480,7 +2487,7 @@ impl BoardView {
             } else if self.query.is_empty() {
                 self.tab.empty_text()
             } else {
-                "No matches"
+                "No matches \u{b7} esc clears"
             };
             return list
                 .child(
@@ -2540,7 +2547,7 @@ impl BoardView {
                         .font_family(MONO_FONT)
                         .text_size(px(12.))
                         .child(format!("$ {gate}"));
-                    Self::copyable("gate-command".into(), gate, text, theme, cx)
+                    self.copyable("gate-command".into(), gate, text, theme, cx)
                 });
             let color = if row.status == Status::Blocked {
                 theme.orange
@@ -2826,12 +2833,14 @@ impl BoardView {
 
     /// A value with a Copy link that shows on hover, for paths, branches and commands.
     fn copyable(
+        &self,
         id: SharedString,
         value: String,
         content: Div,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
+        let is_copied = self.copied_id.as_ref() == Some(&id);
         div()
             .id(id.clone())
             .group(id.clone())
@@ -2843,17 +2852,35 @@ impl BoardView {
                 div()
                     .id(SharedString::from(format!("{id}-copy")))
                     .flex_none()
-                    .invisible()
-                    .group_hover(id, |style| style.visible())
+                    .when(!is_copied, |this| {
+                        this.invisible()
+                            .group_hover(id.clone(), |style| style.visible())
+                    })
                     .text_size(px(11.5))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.accent)
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         cx.write_to_clipboard(ClipboardItem::new_string(value.clone()));
-                        this.show_toast("Copied", cx);
+                        this.mark_copied(id.clone(), cx);
                     }))
-                    .child("Copy"),
+                    .child(if is_copied { "Copied" } else { "Copy" }),
             )
+    }
+
+    /// Shows "Copied" on the link that was clicked, briefly, where the eye already is.
+    fn mark_copied(&mut self, id: SharedString, cx: &mut Context<Self>) {
+        self.copied_id = Some(id.clone());
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(COPIED_DURATION).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.copied_id.as_ref() == Some(&id) {
+                    this.copied_id = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn render_session(
@@ -2894,7 +2921,7 @@ impl BoardView {
                             .text_size(px(12.))
                             .child(value.clone());
                         let id = SharedString::from(format!("session-{label}"));
-                        this.child(Self::copyable(id, value, text, theme, cx).flex_1())
+                        this.child(self.copyable(id, value, text, theme, cx).flex_1())
                     }),
             );
         }
@@ -3267,20 +3294,21 @@ impl BoardView {
                 (theme.fill, theme.text)
             };
             let has_key = is_primary;
-            let key_chip = kbd(&key_label(action), theme)
-                .when(is_primary, |this| {
-                    this.bg(gpui::rgba(FILLED_KEYCAP_BACKGROUND))
-                        .text_color(theme.on_accent)
-                })
-                .when(self.is_typing(), Div::invisible);
+            let key_chip = kbd(&key_label(action), theme).when(is_primary, |this| {
+                this.bg(gpui::rgba(FILLED_KEYCAP_BACKGROUND))
+                    .text_color(theme.on_accent)
+            });
             div()
                 .id(action.label())
                 .flex()
                 .items_center()
                 .gap(px(7.))
                 .h(px(26.))
-                .pl(px(10.))
-                .pr(px(if has_key { 6. } else { 10. }))
+                .map(|this| match (has_key, self.is_typing()) {
+                    (true, false) => this.pl(px(10.)).pr(px(6.)),
+                    (true, true) => this.px(px((10. + 7. + KEYCAP_WIDTH + 6.) / 2.)),
+                    (false, _) => this.px(px(10.)),
+                })
                 .rounded(px(7.))
                 .bg(background)
                 .text_color(foreground)
@@ -3299,7 +3327,7 @@ impl BoardView {
                 })
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.request(action, cx)))
                 .child(label)
-                .when(has_key, |this| this.child(key_chip))
+                .when(has_key && !self.is_typing(), |this| this.child(key_chip))
         });
         div()
             .flex_1()
@@ -3468,8 +3496,11 @@ impl BoardView {
                         this.set_help(true, cx);
                         cx.notify();
                     }))
+                    .when(self.is_typing(), |this| {
+                        this.px(px((7. + 6. + KEYCAP_WIDTH + 5.) / 2.))
+                    })
                     .child("Keys")
-                    .child(kbd("?", theme).when(self.is_typing(), Div::invisible)),
+                    .when(!self.is_typing(), |this| this.child(kbd("?", theme))),
             )
             .into_any_element()
     }
