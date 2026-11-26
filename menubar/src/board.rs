@@ -740,26 +740,30 @@ pub fn board_snapshot(tasks: Tasks, now: DateTime<Local>) -> Snapshot {
 
 /// What a card or its details show: the directory, the card's line, and each chain step's
 /// ID, label, prompt, result, failure reasons and PR numbers. Kept apart so a query can't
-/// match across two of them.
-fn searched_fields(row: &Row, snapshot: &Snapshot) -> Vec<String> {
-    let mut fields = vec![row.directory.clone(), card_snippet(row, snapshot)];
+/// match across two of them. Each comes with the name a card shows for a match in it.
+fn searched_fields(row: &Row, snapshot: &Snapshot) -> Vec<(&'static str, String)> {
+    let mut fields = vec![
+        ("Directory", row.directory.clone()),
+        ("", card_snippet(row, snapshot)),
+    ];
     for id in &row.chain_ids {
         let task = &snapshot.tasks[id];
         let pull_requests: Vec<String> =
             task.pull_requests.iter().map(pull_request_number).collect();
-        fields.push(id.clone());
+        fields.push(("ID", id.clone()));
+        let task_fields = [
+            ("Name", task.label.clone()),
+            ("Prompt", Some(task.prompt.clone())),
+            ("Result", task.result.clone()),
+            ("Gate", task.gate_stop_reason.clone()),
+            ("Setup", task.setup_failure_reason.clone()),
+        ];
         fields.extend(
-            [
-                task.label.clone(),
-                Some(task.prompt.clone()),
-                task.result.clone(),
-                task.gate_stop_reason.clone(),
-                task.setup_failure_reason.clone(),
-            ]
-            .into_iter()
-            .flatten(),
+            task_fields
+                .into_iter()
+                .filter_map(|(source, text)| text.map(|text| (source, text))),
         );
-        fields.push(pull_requests.join(" "));
+        fields.push(("PR", pull_requests.join(" ")));
     }
     fields
 }
@@ -769,11 +773,11 @@ pub fn is_matching(row: &Row, snapshot: &Snapshot, query: &str) -> bool {
     let fields = searched_fields(row, snapshot);
     fields
         .iter()
-        .any(|field| field.to_lowercase().contains(&query))
+        .any(|(_, field)| field.to_lowercase().contains(&query))
 }
 
 /// For a card whose title, repo and line don't show the query, the line of a hidden field
-/// that matched, from a little before the match, with the match's range in it.
+/// that matched, named and from a little before the match, with the match's range in it.
 pub fn match_excerpt(
     row: &Row,
     snapshot: &Snapshot,
@@ -792,22 +796,23 @@ pub fn match_excerpt(
         return None;
     }
     let fields = searched_fields(row, snapshot);
-    let line = fields
+    let (source, line) = fields
         .iter()
-        .flat_map(|field| field.lines())
-        .find(|line| line.to_lowercase().contains(&query))?
-        .trim();
+        .flat_map(|(source, field)| field.lines().map(move |line| (*source, line)))
+        .find(|(_, line)| line.to_lowercase().contains(&query))?;
+    let line = line.trim();
     let lowered = line.to_lowercase();
     // Lowercasing can change a line's byte length, which would misplace the highlight.
     let Some(start) = lowered.find(&query).filter(|_| lowered.len() == line.len()) else {
-        return Some((line.to_string(), 0..0));
+        return Some((format!("{source}: {line}"), 0..0));
     };
     let context_start = line[..start]
         .char_indices()
         .rev()
         .nth(EXCERPT_CONTEXT_SIZE - 1)
         .map_or(0, |(index, _)| index);
-    let prefix = if context_start > 0 { "\u{2026}" } else { "" };
+    let ellipsis = if context_start > 0 { "\u{2026}" } else { "" };
+    let prefix = format!("{source}: {ellipsis}");
     let match_start = prefix.len() + start - context_start;
     Some((
         format!("{prefix}{}", &line[context_start..]),
@@ -1573,6 +1578,7 @@ mod tests {
         assert!(!is_matching(running_row, &snapshot, "b fix"));
         let (excerpt, range) = match_excerpt(running_row, &snapshot, "FLAKY").unwrap();
         assert_eq!(&excerpt[range], "flaky");
+        assert!(excerpt.starts_with("Prompt"));
         assert_eq!(match_excerpt(running_row, &snapshot, "10 runs"), None);
     }
 

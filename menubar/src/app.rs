@@ -197,6 +197,8 @@ struct ActionError {
 struct Pending {
     action: Action,
     task_id: Option<String>,
+    /// The finished tasks a bulk close listed, so one finishing while it's open stays out.
+    closing_ids: Vec<String>,
 }
 
 pub struct BoardView {
@@ -1212,7 +1214,16 @@ impl BoardView {
             } else {
                 row.map(|row| row.task_id)
             };
-            self.pending = Some(Pending { action, task_id });
+            let closing_ids = if action == Action::CloseAll {
+                closable_ids
+            } else {
+                Vec::new()
+            };
+            self.pending = Some(Pending {
+                action,
+                task_id,
+                closing_ids,
+            });
             self.set_help(false, cx);
             cx.notify();
             return;
@@ -1266,7 +1277,7 @@ impl BoardView {
             return;
         }
         if pending.action == Action::CloseAll {
-            self.close_finished(cx);
+            self.close_finished(pending.closing_ids, cx);
             return;
         }
         let row = pending.task_id.and_then(|task_id| {
@@ -1440,12 +1451,14 @@ impl BoardView {
         }
     }
 
-    fn close_finished(&mut self, cx: &mut Context<Self>) {
+    /// Closes the listed tasks that are still finished in Review.
+    fn close_finished(&mut self, mut task_ids: Vec<String>, cx: &mut Context<Self>) {
         let Some(golem) = self.golem.clone() else {
             self.show_toast(GOLEM_MISSING_TEXT, cx);
             return;
         };
-        let task_ids = board::closable_task_ids(&self.snapshot);
+        let closable_ids = board::closable_task_ids(&self.snapshot);
+        task_ids.retain(|task_id| closable_ids.contains(task_id));
         let busy = task_ids
             .iter()
             .map(|task_id| (task_id.clone(), Action::Close))
@@ -1840,6 +1853,8 @@ impl BoardView {
             self.move_tab(-1, cx);
         } else if key == "space" && modifiers.shift {
             self.scroll_by(-SCROLL_STEP);
+        } else if event.is_held && ACTIONS.iter().any(|action| action.key() == typed) {
+            // A held action key would act again on each task the selection moves on to.
         } else {
             self.handle_board_key(key, &typed, cx);
         }
@@ -4096,9 +4111,12 @@ impl BoardView {
         });
         let (title, body, verb) = match (pending.action, row) {
             (Action::CloseAll, _) => {
-                let task_ids = board::closable_task_ids(&self.snapshot);
+                let closable_ids = board::closable_task_ids(&self.snapshot);
+                let task_ids: Vec<&String> = (pending.closing_ids.iter())
+                    .filter(|task_id| closable_ids.contains(task_id))
+                    .collect();
                 let rows: Vec<&Row> = (self.snapshot.rows.iter())
-                    .filter(|row| task_ids.contains(&row.task_id))
+                    .filter(|row| task_ids.contains(&&row.task_id))
                     .collect();
                 let names: Vec<&str> = rows.iter().map(|row| board::row_title(row)).collect();
                 let unopened_count = rows.iter().filter(|row| self.needs_you(row)).count();
