@@ -20,6 +20,7 @@ const FINISHED_AGE_SEPARATOR: &str = "; finished ";
 const WAITING_DIRECTORY_TEXT: &str = "waiting for directory:";
 const BUSY_DIRECTORY_TEXT: &str = "dir busy:";
 const NO_PR_TEXT: &str = "no PR";
+const CLOSED_TEXT: &str = "closed";
 const PULL_REQUEST_STATE_OPEN: &str = "open";
 const DONE_THREAD_STATES: [&str; 3] = ["settled", "archived", "deleted"];
 const THREAD_STATE_UNSETTLED: &str = "unsettled";
@@ -551,7 +552,7 @@ fn finished_chain_column(
     now: DateTime<Local>,
 ) -> (Column, String) {
     if chain_ids.iter().any(|id| tasks[id].closed_at.is_some()) {
-        return (Column::Done, "closed".to_string());
+        return (Column::Done, CLOSED_TEXT.to_string());
     }
     let pull_requests = chain_pull_requests(tasks, chain_ids);
     if !pull_requests.is_empty() {
@@ -810,7 +811,7 @@ pub fn card_when_text(row: &Row, task: &Task, now: DateTime<Local>) -> String {
     if is_stuck(row, task, now) {
         return format!("stuck {}", short_age_text(task.due_at.as_deref(), now));
     }
-    match row.status {
+    let text = match row.status {
         Status::Waiting => task
             .after
             .as_ref()
@@ -824,7 +825,27 @@ pub fn card_when_text(row: &Row, task: &Task, now: DateTime<Local>) -> String {
             )
         }
         _ => when_text(task, now),
+    };
+    largest_unit_only(&text)
+}
+
+/// Cards rank by age, so a duration keeps only its largest unit ("2h 30m ago" reads "2h ago").
+fn largest_unit_only(text: &str) -> String {
+    let is_unit = |word: &str| {
+        word.len() > 1
+            && word.ends_with(['m', 'h', 'd', 'y'])
+            && word[..word.len() - 1]
+                .chars()
+                .all(|char| char.is_ascii_digit())
+    };
+    let mut words: Vec<&str> = Vec::new();
+    for word in text.split(' ') {
+        if is_unit(word) && words.last().is_some_and(|last| is_unit(last)) {
+            continue;
+        }
+        words.push(word);
     }
+    words.join(" ")
 }
 
 pub fn start_text(row: &Row, task: &Task, now: DateTime<Local>) -> String {
@@ -1015,7 +1036,9 @@ pub fn card_snippet(row: &Row, snapshot: &Snapshot) -> String {
         reason = PATH_PREFIX_PATTERN.replace_all(&reason, "").into_owned();
     }
     let short_reason = short_reason_text(row, &reason, snapshot);
-    if !short_reason.is_empty() && short_reason != NO_PR_TEXT && short_reason != "cancelled" {
+    // These only restate the status icon, so the result or prompt says more.
+    let is_status_text = [NO_PR_TEXT, "cancelled", CLOSED_TEXT].contains(&short_reason.as_str());
+    if !short_reason.is_empty() && !is_status_text {
         return short_reason;
     }
     let text = task
@@ -1154,6 +1177,22 @@ pub struct ChainStep {
     pub is_inferable: bool,
 }
 
+/// A step's label, else the first line of its prompt, since a bare task ID says nothing.
+fn chain_step_name(task_id: &str, task: &Task) -> String {
+    if let Some(label) = &task.label {
+        return label.clone();
+    }
+    match task
+        .prompt
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+    {
+        Some(line) => line.to_string(),
+        None => task_id.to_string(),
+    }
+}
+
 pub fn chain_steps(row: &Row, tasks: &Tasks) -> Vec<ChainStep> {
     let statuses: Vec<Status> = row.chain_ids.iter().map(|id| tasks[id].status()).collect();
     let active_index = statuses
@@ -1164,19 +1203,12 @@ pub fn chain_steps(row: &Row, tasks: &Tasks) -> Vec<ChainStep> {
         .iter()
         .zip(&statuses)
         .enumerate()
-        .map(|(index, (task_id, status))| {
-            let step_name = step_display_name(tasks, task_id);
-            ChainStep {
-                name: if step_name.is_empty() {
-                    task_name(task_id, &tasks[task_id])
-                } else {
-                    step_name
-                },
-                status: *status,
-                is_shown: *task_id == row.task_id,
-                is_inferable: (*status == Status::Finished && index < active_index)
-                    || (*status == Status::Waiting && index > active_index),
-            }
+        .map(|(index, (task_id, status))| ChainStep {
+            name: chain_step_name(task_id, &tasks[task_id]),
+            status: *status,
+            is_shown: *task_id == row.task_id,
+            is_inferable: (*status == Status::Finished && index < active_index)
+                || (*status == Status::Waiting && index > active_index),
         })
         .collect()
 }
@@ -1222,8 +1254,6 @@ impl ActivityLevel {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ActivityItem {
-    /// Counts for the whole log, shown in place of it at the Summary level.
-    Summary(String),
     /// A run of tool calls hidden at the Messages level, holding their display text.
     Fold(Vec<String>),
     Tool(String),
@@ -1257,9 +1287,6 @@ pub fn activity_counts(lines: &[String]) -> String {
 pub fn activity_view(lines: &[String], level: ActivityLevel) -> Vec<ActivityItem> {
     if lines.is_empty() {
         return Vec::new();
-    }
-    if level == ActivityLevel::Summary {
-        return vec![ActivityItem::Summary(activity_counts(lines))];
     }
     let mut items = Vec::new();
     for group in lines.chunk_by(|left, right| is_tool_line(left) == is_tool_line(right)) {
@@ -1394,6 +1421,16 @@ mod tests {
     }
 
     #[test]
+    fn card_durations_keep_their_largest_unit() {
+        assert_eq!(largest_unit_only("2h 30m ago"), "2h ago");
+        assert_eq!(largest_unit_only("for 2d 18h"), "for 2d");
+        assert_eq!(
+            largest_unit_only("starts today 3:40pm"),
+            "starts today 3:40pm"
+        );
+    }
+
+    #[test]
     fn duration_text_matches_golem() {
         assert_eq!(duration_text(30.0), "<1m");
         assert_eq!(duration_text(5.0 * 60.0), "5m");
@@ -1486,10 +1523,7 @@ mod tests {
         ]
         .map(String::from)
         .to_vec();
-        assert_eq!(
-            activity_view(&lines, ActivityLevel::Summary),
-            vec![ActivityItem::Summary("2 messages, 3 tool calls".into())]
-        );
+        assert_eq!(activity_counts(&lines), "2 messages, 3 tool calls");
         assert_eq!(
             activity_view(&lines, ActivityLevel::Messages),
             vec![

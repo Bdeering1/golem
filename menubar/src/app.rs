@@ -8,9 +8,10 @@ use futures::StreamExt;
 use futures::channel::mpsc::UnboundedReceiver;
 use gpui::{
     Animation, AnimationExt, AnyElement, BoxShadow, ClickEvent, ClipboardItem, Context, Div,
-    ElementId, FocusHandle, FontWeight, Hsla, KeyDownEvent, ScrollEvent, ScrollHandle,
-    SharedString, Stateful, Subscription, Task, Transformation, Window, div, linear_color_stop,
-    linear_gradient, point, prelude::*, pulsating_between, px, radians, relative, svg,
+    ElementId, FocusHandle, FontWeight, HighlightStyle, Hsla, KeyDownEvent, ScrollEvent,
+    ScrollHandle, SharedString, Stateful, StyledText, Subscription, Task, Transformation, Window,
+    div, linear_color_stop, linear_gradient, point, prelude::*, pulsating_between, px, radians,
+    svg,
 };
 use notify::Watcher;
 use objc2::rc::Retained;
@@ -1618,6 +1619,29 @@ fn lines_since_pause<'a>(
     Some(&current_lines[index + 1..])
 }
 
+/// golem and agents mark commands and paths with backticks; show those in the code font instead.
+fn code_marked_text(text: &str) -> StyledText {
+    if text.matches('`').count() % 2 == 1 {
+        return StyledText::new(text.to_string());
+    }
+    let mut plain = String::new();
+    let mut overrides = Vec::new();
+    for (index, part) in text.split('`').enumerate() {
+        let start = plain.len();
+        plain.push_str(part);
+        if index % 2 == 1 && !part.is_empty() {
+            overrides.push((start..plain.len(), SharedString::from(MONO_FONT)));
+        }
+    }
+    // Font overrides only apply to whole runs, so empty highlights split the code spans out.
+    let highlights = overrides
+        .iter()
+        .map(|(range, _)| (range.clone(), HighlightStyle::default()));
+    StyledText::new(plain)
+        .with_highlights(highlights)
+        .with_font_family_overrides(overrides)
+}
+
 fn tool_line(text: String, theme: &Theme) -> Div {
     div()
         .py(px(2.))
@@ -1870,10 +1894,7 @@ impl BoardView {
     }
 
     fn render_tabs(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let columns = self.tabs();
-        // Sized in quarters, so showing Done adds a tab without moving the others.
-        let bar_width = relative(columns.len() as f32 / BOARD_COLUMNS.len() as f32);
-        let tabs = columns.into_iter().map(|column| {
+        let tabs = self.tabs().into_iter().map(|column| {
             let rows = self.column_rows(column);
             let is_current = column == self.tab;
             let has_attention = rows.iter().any(|row| self.needs_you(row));
@@ -1919,16 +1940,16 @@ impl BoardView {
                 })
         });
         let container = div().flex().flex_col().child(
-            div().flex().mx(px(10.)).mt(px(9.)).mb(px(7.)).child(
-                div()
-                    .flex()
-                    .w(bar_width)
-                    .gap(px(1.))
-                    .p(px(2.))
-                    .rounded(px(8.))
-                    .bg(theme.fill)
-                    .children(tabs),
-            ),
+            div()
+                .flex()
+                .gap(px(1.))
+                .mx(px(10.))
+                .mt(px(9.))
+                .mb(px(7.))
+                .p(px(2.))
+                .rounded(px(8.))
+                .bg(theme.fill)
+                .children(tabs),
         );
         container.into_any_element()
     }
@@ -1960,17 +1981,51 @@ impl BoardView {
             || (busy_action.is_none()
                 && action_error.is_none()
                 && board::is_tool_snippet(row, &self.snapshot));
-        let quick_action =
-            (is_selected && !self.is_expanded && busy_action.is_none() && self.tab != Column::Done)
-                .then(|| {
-                    let actions = board::available_actions(&self.snapshot, Some(row));
-                    board::primary_action(&self.snapshot, row, &actions)
-                })
-                .flatten()
-                .filter(|action| *action != Action::Watch);
+        let quick_action = (!self.is_expanded && busy_action.is_none() && self.tab != Column::Done)
+            .then(|| {
+                let actions = board::available_actions(&self.snapshot, Some(row));
+                board::primary_action(&self.snapshot, row, &actions)
+            })
+            .flatten()
+            .filter(|action| *action != Action::Watch);
         let root_id = row.root_id.clone();
+        let card_id = SharedString::from(format!("card-{}", row.root_id));
+        // Unselected rows reveal their action on hover, over the snippet, so no row loses width.
+        let hover_action = quick_action.filter(|_| !is_selected).map(|action| {
+            let backing = theme.panel.blend(if is_changed {
+                theme.changed
+            } else {
+                theme.hover
+            });
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .right_0()
+                .flex()
+                .items_center()
+                .invisible()
+                .group_hover(card_id.clone(), |style| style.visible())
+                .child(div().w(px(24.)).h_full().bg(linear_gradient(
+                    90.,
+                    linear_color_stop(Hsla { a: 0., ..backing }, 0.),
+                    linear_color_stop(backing, 1.),
+                )))
+                .child(
+                    div()
+                        .h_full()
+                        .flex()
+                        .items_center()
+                        .bg(backing)
+                        .child(Self::quick_action_button(action, &row.root_id, theme, cx)),
+                )
+        });
+        let quick_action = quick_action
+            .filter(|_| is_selected)
+            .map(|action| Self::quick_action_button(action, &row.root_id, theme, cx));
         div()
-            .id(SharedString::from(format!("card-{}", row.root_id)))
+            .id(card_id.clone())
+            .group(card_id)
             .flex()
             .flex_col()
             .gap(px(2.))
@@ -2052,6 +2107,7 @@ impl BoardView {
             )
             .child(
                 div()
+                    .relative()
                     .flex()
                     .items_center()
                     .gap(px(6.))
@@ -2077,16 +2133,21 @@ impl BoardView {
                             })
                             .child(snippet),
                     )
-                    .children(
-                        quick_action.map(|action| Self::quick_action_button(action, theme, cx)),
-                    ),
+                    .children(quick_action)
+                    .children(hover_action),
             )
     }
 
-    /// The selected card's primary action in the collapsed panel, so it runs without opening details.
-    fn quick_action_button(action: Action, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    /// A card's primary action in the collapsed panel, so it runs without opening details.
+    fn quick_action_button(
+        action: Action,
+        root_id: &str,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let root_id = root_id.to_string();
         div()
-            .id("quick-action")
+            .id(SharedString::from(format!("quick-action-{root_id}")))
             .flex_none()
             .flex()
             .items_center()
@@ -2103,6 +2164,7 @@ impl BoardView {
             .hover(|style| style.opacity(0.9))
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                 cx.stop_propagation();
+                this.select(root_id.clone(), cx);
                 this.request(action, cx);
             }))
             .child(action.label())
@@ -2453,7 +2515,7 @@ impl BoardView {
                     .when(is_clamped, |this| {
                         this.line_clamp(line_limit).text_ellipsis()
                     })
-                    .child(shown_text),
+                    .child(code_marked_text(&shown_text)),
             )
             .when(is_long, |this| {
                 this.child(
@@ -2540,6 +2602,38 @@ impl BoardView {
             None => Some("new activity".to_string()),
         };
         let shown_level = self.shown_activity_level(row);
+        if shown_level == ActivityLevel::Summary && !lines.is_empty() {
+            return div()
+                .id("activity-summary")
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .mb(px(12.))
+                .mx(px(-4.))
+                .px(px(4.))
+                .py(px(2.))
+                .rounded(px(5.))
+                .hover(|style| style.bg(theme.hover))
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.activity_level = this.next_activity_level();
+                    cx.notify();
+                }))
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.text_2)
+                        .child("ACTIVITY"),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(theme.text_3)
+                        .child(board::activity_counts(&lines)),
+                )
+                .child(icon(theme::ICON_CHEVRON, 8., theme.text_3))
+                .into_any_element();
+        }
         let level_button = div()
             .id("activity-level")
             .flex()
@@ -2676,18 +2770,6 @@ impl BoardView {
                     if is_open {
                         log = log.children(tools.into_iter().map(|text| tool_line(text, theme)));
                     }
-                }
-                ActivityItem::Summary(text) => {
-                    log = log.child(
-                        fold_row("activity-summary", theme)
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                this.activity_level = ActivityLevel::All;
-                                cx.notify();
-                            }))
-                            .child(text)
-                            .child("\u{b7}")
-                            .child(div().text_color(theme.accent).child("Show all")),
-                    );
                 }
             }
         }
@@ -3252,7 +3334,7 @@ impl BoardView {
                             .overflow_y_scroll()
                             .track_scroll(&self.error_scroll)
                             .text_color(theme.text_2)
-                            .child(detail.text.clone()),
+                            .child(code_marked_text(&detail.text)),
                     )
                     .child(
                         div()
@@ -3350,7 +3432,7 @@ impl BoardView {
         );
         let board_keys = section(
             "Board",
-            60.,
+            48.,
             &[
                 ("/", "filter"),
                 ("A", "show Done"),
@@ -3362,7 +3444,7 @@ impl BoardView {
         );
         let task_keys = section(
             "Task",
-            60.,
+            48.,
             &[
                 ("P", "pick up"),
                 ("W", "follow log"),
