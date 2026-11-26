@@ -140,6 +140,7 @@ enum Command {
     /// Copies the selected task's Session field with this label.
     CopyField(&'static str),
     CopyError,
+    CopyResult,
     Quit,
 }
 
@@ -1456,6 +1457,13 @@ impl BoardView {
             .filter(|reason| !reason.is_empty())
     }
 
+    /// The selected task's result as details show it.
+    fn selected_result(&self) -> Option<String> {
+        let row = self.selected_row()?;
+        let result = self.snapshot.tasks[&row.task_id].result.as_deref()?;
+        Some(board::plain_result(result)).filter(|text| !text.trim().is_empty())
+    }
+
     fn palette_items(&self) -> Vec<PaletteItem> {
         let query = self
             .palette
@@ -1507,6 +1515,13 @@ impl BoardView {
             let copy_error = self
                 .selected_error()
                 .map(|_| (Command::CopyError, "Copy error".to_string(), String::new()));
+            let copy_result = self.selected_result().map(|_| {
+                (
+                    Command::CopyResult,
+                    "Copy result".to_string(),
+                    String::new(),
+                )
+            });
             let copy_fields = COPYABLE_FIELDS
                 .into_iter()
                 .filter(|(field, _)| self.selected_field(field).is_some())
@@ -1528,6 +1543,7 @@ impl BoardView {
                 .into_iter()
                 .chain(copy_id)
                 .chain(copy_error)
+                .chain(copy_result)
                 .chain(copy_fields);
             for (command, label, key) in task_items {
                 items.push(PaletteItem {
@@ -1590,6 +1606,12 @@ impl BoardView {
             Command::CopyError => {
                 if let Some(message) = self.selected_error() {
                     cx.write_to_clipboard(ClipboardItem::new_string(message));
+                    self.show_toast("Copied", cx);
+                }
+            }
+            Command::CopyResult => {
+                if let Some(result) = self.selected_result() {
+                    cx.write_to_clipboard(ClipboardItem::new_string(result));
                     self.show_toast("Copied", cx);
                 }
             }
@@ -1866,6 +1888,7 @@ impl BoardView {
                     self.set_expanded(false, cx);
                 } else if !self.query.is_empty() {
                     self.query.clear();
+                    self.after_query_change();
                 } else {
                     self.hide(cx);
                 }
@@ -2668,13 +2691,45 @@ impl BoardView {
     }
 
     fn section(title: &str, theme: &Theme) -> Div {
-        div().flex().flex_col().gap(px(3.)).mb(px(12.)).child(
-            div()
-                .text_size(px(11.))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme.text_2)
-                .child(title.to_uppercase()),
-        )
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(3.))
+            .mb(px(12.))
+            .child(Self::section_title(title, theme))
+    }
+
+    fn section_title(title: &str, theme: &Theme) -> Div {
+        div()
+            .text_size(px(11.))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(theme.text_2)
+            .child(title.to_uppercase())
+    }
+
+    /// A section whose title row shows a Copy link for its whole text while hovered.
+    fn copyable_section(
+        &self,
+        title: &str,
+        copy_id: &'static str,
+        value: String,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        div()
+            .group(copy_id)
+            .flex()
+            .flex_col()
+            .gap(px(3.))
+            .mb(px(12.))
+            .child(
+                div()
+                    .flex()
+                    .justify_between()
+                    .items_baseline()
+                    .child(Self::section_title(title, theme))
+                    .child(self.copy_link(copy_id.into(), value, theme, cx)),
+            )
     }
 
     fn render_detail_body(
@@ -2770,10 +2825,11 @@ impl BoardView {
                 } else {
                     "Result"
                 };
-                Self::section(title, theme)
+                let text = board::plain_result(result);
+                self.copyable_section(title, "result", text.clone(), theme, cx)
                     .child(self.clamped_text(
                         SECTION_RESULT,
-                        &board::plain_result(result),
+                        &text,
                         RESULT_LINE_LIMIT,
                         |text| text,
                         theme,
