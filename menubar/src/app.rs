@@ -661,6 +661,40 @@ impl BoardView {
         if self.is_expanded {
             return PANEL_HEIGHT;
         }
+        let toast_height = if self.is_toast_in_row() {
+            TOAST_ROW_HEIGHT
+        } else {
+            0.
+        };
+        (self.base_panel_height() + toast_height).min(PANEL_HEIGHT)
+    }
+
+    /// An error toast takes its own row only when the shown group leaves no room for it under
+    /// its cards; otherwise it floats there, so the panel grows only when a card would be hidden.
+    fn is_toast_in_row(&self) -> bool {
+        if !self.toast.as_ref().is_some_and(|toast| toast.is_error) {
+            return false;
+        }
+        let panel_height = if self.is_expanded {
+            PANEL_HEIGHT
+        } else {
+            self.base_panel_height()
+        };
+        let list_height = panel_height - PANEL_CHROME_HEIGHT - self.load_error_height();
+        let cards_height =
+            (self.column_rows(self.tab).len() as f64 * CARD_PITCH).max(EMPTY_LIST_HEIGHT);
+        list_height - cards_height < TOAST_ROW_HEIGHT
+    }
+
+    fn load_error_height(&self) -> f64 {
+        if self.load_error.is_some() {
+            LOAD_ERROR_HEIGHT
+        } else {
+            0.
+        }
+    }
+
+    fn base_panel_height(&self) -> f64 {
         let longest = self
             .tabs()
             .into_iter()
@@ -678,17 +712,7 @@ impl BoardView {
         } else {
             MIN_PANEL_HEIGHT
         };
-        let load_error_height = if self.load_error.is_some() {
-            LOAD_ERROR_HEIGHT
-        } else {
-            0.
-        };
-        let toast_height = if self.toast.as_ref().is_some_and(|toast| toast.is_error) {
-            TOAST_ROW_HEIGHT
-        } else {
-            0.
-        };
-        (PANEL_CHROME_HEIGHT + load_error_height + toast_height + list_height)
+        (PANEL_CHROME_HEIGHT + self.load_error_height() + list_height)
             .clamp(minimum_height, PANEL_HEIGHT)
     }
 
@@ -1158,6 +1182,22 @@ impl BoardView {
             self.toggle_follow(cx);
             return;
         }
+        // ⇧C on one finished task you've opened closes it at once, as C does.
+        let closable_ids = board::closable_task_ids(&self.snapshot);
+        let only_closable = match closable_ids.as_slice() {
+            [task_id] => self
+                .snapshot
+                .rows
+                .iter()
+                .find(|row| &row.task_id == task_id),
+            _ => None,
+        };
+        if action == Action::CloseAll
+            && let Some(only) = only_closable.filter(|row| !self.needs_you(row)).cloned()
+        {
+            self.perform(Action::Close, &only, cx);
+            return;
+        }
         // Dismiss only confirms when it also cancels waiting steps, so C acts at once like Close.
         let is_dismissing_alone = action == Action::Dismiss
             && row.as_ref().is_some_and(|row| {
@@ -1342,7 +1382,7 @@ impl BoardView {
             Action::Watch => self.toggle_follow(cx),
             Action::Copy => {
                 cx.write_to_clipboard(ClipboardItem::new_string(task_id.clone()));
-                self.show_toast(format!("Copied {task_id}"), cx);
+                self.show_toast("Copied ID", cx);
             }
             Action::OpenPullRequest => {
                 let mut pull_requests = board::row_pull_requests(&self.snapshot, row);
@@ -1515,14 +1555,10 @@ impl BoardView {
             let copy_error = self
                 .selected_error()
                 .map(|_| (Command::CopyError, "Copy error".to_string(), String::new()));
-            let result_label = if row.status == Status::Failed {
-                "Copy stop reason"
-            } else {
-                "Copy result"
-            };
+            let result_label = format!("Copy {}", result_title(row).to_lowercase());
             let copy_result = self
                 .selected_result()
-                .map(|_| (Command::CopyResult, result_label.to_string(), String::new()));
+                .map(|_| (Command::CopyResult, result_label, String::new()));
             let copy_fields = COPYABLE_FIELDS
                 .into_iter()
                 .filter(|(field, _)| self.selected_field(field).is_some())
@@ -1599,21 +1635,28 @@ impl BoardView {
             Command::ToggleDetails => self.set_expanded(!self.is_expanded, cx),
             Command::ToggleSession => self.toggle_session(cx),
             Command::CopyField(label) => {
-                if let Some(value) = self.selected_field(label) {
+                let copy_label = COPYABLE_FIELDS.iter().find(|(field, _)| *field == label);
+                if let (Some(value), Some((_, copy_label))) =
+                    (self.selected_field(label), copy_label)
+                {
                     cx.write_to_clipboard(ClipboardItem::new_string(value));
-                    self.show_toast("Copied", cx);
+                    self.show_toast(copy_label.replacen("Copy", "Copied", 1), cx);
                 }
             }
             Command::CopyError => {
                 if let Some(message) = self.selected_error() {
                     cx.write_to_clipboard(ClipboardItem::new_string(message));
-                    self.show_toast("Copied", cx);
+                    self.show_toast("Copied error", cx);
                 }
             }
             Command::CopyResult => {
-                if let Some(result) = self.selected_result() {
+                if let Some((title, result)) = self
+                    .selected_row()
+                    .map(result_title)
+                    .zip(self.selected_result())
+                {
                     cx.write_to_clipboard(ClipboardItem::new_string(result));
-                    self.show_toast("Copied", cx);
+                    self.show_toast(format!("Copied {}", title.to_lowercase()), cx);
                 }
             }
             Command::Quit => cx.quit(),
@@ -2037,6 +2080,15 @@ fn scroll_handle_by(handle: &ScrollHandle, delta: f32) {
     let max_offset = handle.max_offset();
     let y = (offset.y - px(delta)).clamp(-max_offset.y, px(0.));
     handle.set_offset(point(offset.x, y));
+}
+
+/// A failed task's result says why it stopped.
+fn result_title(row: &Row) -> &'static str {
+    if row.status == Status::Failed {
+        "Stop reason"
+    } else {
+        "Result"
+    }
 }
 
 /// The palette list's child position for an item, counting the group headings rendered before it.
@@ -2821,13 +2873,8 @@ impl BoardView {
             .as_deref()
             .filter(|result| !result.trim().is_empty())
             .map(|result| {
-                let title = if row.status == Status::Failed {
-                    "Stop reason"
-                } else {
-                    "Result"
-                };
                 let text = board::plain_result(result);
-                self.copyable_section(title, "result", text.clone(), theme, cx)
+                self.copyable_section(result_title(row), "result", text.clone(), theme, cx)
                     .child(self.clamped_text(
                         SECTION_RESULT,
                         &text,
@@ -2889,10 +2936,14 @@ impl BoardView {
             .text_color(if is_open { theme.accent } else { theme.text_3 })
             .child(
                 div()
-                    .font_weight(FontWeight::BOLD)
+                    .font_weight(FontWeight::MEDIUM)
                     .child(board::pull_request_number(pull_request)),
             )
-            .child(pull_request.state.clone())
+            .child(
+                div()
+                    .when(is_open, |this| this.text_color(theme.text_2))
+                    .child(pull_request.state.clone()),
+            )
     }
 
     fn render_pull_requests(
@@ -3921,7 +3972,6 @@ impl BoardView {
                     .filter(|row| task_ids.contains(&row.task_id))
                     .collect();
                 let names: Vec<&str> = rows.iter().map(|row| board::row_title(row)).collect();
-                let verb = if rows.len() == 1 { "moves" } else { "move" };
                 let unopened_count = rows.iter().filter(|row| self.needs_you(row)).count();
                 let unopened = match unopened_count {
                     0 => String::new(),
@@ -3929,12 +3979,19 @@ impl BoardView {
                     count if count == rows.len() => " You haven't opened any of them.".to_string(),
                     count => format!(" You haven't opened {count} of them."),
                 };
-                (
-                    format!(
-                        "Close {}?",
-                        board::counted_text(rows.len(), "finished task")
+                let (title, moved) = match names.as_slice() {
+                    [name] => (format!("Close {name}?"), "It moves to Done.".to_string()),
+                    _ => (
+                        format!(
+                            "Close {}?",
+                            board::counted_text(rows.len(), "finished task")
+                        ),
+                        format!("{} move to Done.", board::names_text(&names)),
                     ),
-                    format!("{} {verb} to Done.{unopened}", board::names_text(&names)),
+                };
+                (
+                    title,
+                    format!("{moved}{unopened}"),
                     match rows.len() {
                         1 => "Close".to_string(),
                         count => format!("Close {count}"),
@@ -4178,7 +4235,7 @@ impl BoardView {
                 ("C", "Close, dismiss"),
                 ("X", "Cancel"),
                 ("Y", "Copy ID"),
-                ("E", "Expand all"),
+                ("E", "Expand activity"),
                 ("I", "Session info"),
             ],
         );
@@ -4532,7 +4589,20 @@ impl Render for BoardView {
             .child(self.render_list(&theme, cx))
             .when_some(
                 self.toast.as_ref().filter(|toast| toast.is_error),
-                |this, toast| this.child(self.render_toast(toast, &theme, cx)),
+                |this, toast| {
+                    let toast_element = self.render_toast(toast, &theme, cx);
+                    if self.is_toast_in_row() {
+                        return this.child(toast_element);
+                    }
+                    this.child(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .bottom(px(BOTTOM_BAR_HEIGHT))
+                            .w_full()
+                            .child(toast_element),
+                    )
+                },
             )
             .child(self.render_footer(&theme, cx));
         // Details open to the left so the list stays where it was under the pointer.
