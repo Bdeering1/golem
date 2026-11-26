@@ -24,7 +24,6 @@ const PULL_REQUEST_STATE_OPEN: &str = "open";
 const DONE_THREAD_STATES: [&str; 3] = ["settled", "archived", "deleted"];
 const THREAD_STATE_UNSETTLED: &str = "unsettled";
 pub const SHELL_PROMPT: &str = "$ ";
-pub const TOOL_MARK: &str = "\u{25b8} ";
 
 static EXIT_PREFIX_PATTERN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[^:]{1,40} exited (?:with status )?\d+:\s*").unwrap());
@@ -132,10 +131,12 @@ pub enum Action {
     Close,
     CloseAll,
     Cancel,
+    /// `golem cancel` on a task that isn't running: it only moves the task to Done.
+    Dismiss,
     Copy,
 }
 
-pub const ACTIONS: [Action; 9] = [
+pub const ACTIONS: [Action; 10] = [
     Action::Pickup,
     Action::Watch,
     Action::OpenPullRequest,
@@ -144,6 +145,7 @@ pub const ACTIONS: [Action; 9] = [
     Action::Close,
     Action::CloseAll,
     Action::Cancel,
+    Action::Dismiss,
     Action::Copy,
 ];
 
@@ -156,7 +158,7 @@ impl Action {
             Action::Retry | Action::RerunGate => "r",
             Action::Close => "c",
             Action::CloseAll => "C",
-            Action::Cancel => "x",
+            Action::Cancel | Action::Dismiss => "x",
             Action::Copy => "y",
         }
     }
@@ -171,6 +173,7 @@ impl Action {
             Action::Close => "Close",
             Action::CloseAll => "Close finished",
             Action::Cancel => "Cancel",
+            Action::Dismiss => "Dismiss",
             Action::Copy => "Copy ID",
         }
     }
@@ -182,13 +185,16 @@ impl Action {
             Action::Retry => "retry",
             Action::RerunGate => "continue",
             Action::Close | Action::CloseAll => "close",
-            Action::Cancel => "cancel",
+            Action::Cancel | Action::Dismiss => "cancel",
             Action::Watch | Action::OpenPullRequest | Action::Copy => "",
         }
     }
 
     pub fn is_confirmed(self) -> bool {
-        matches!(self, Action::CloseAll | Action::Cancel | Action::Retry)
+        matches!(
+            self,
+            Action::CloseAll | Action::Cancel | Action::Dismiss | Action::Retry
+        )
     }
 
     /// What a card says while this action's `golem` run is in flight.
@@ -199,6 +205,7 @@ impl Action {
             Action::RerunGate => "Rechecking the gate\u{2026}",
             Action::Close | Action::CloseAll => "Closing\u{2026}",
             Action::Cancel => "Cancelling\u{2026}",
+            Action::Dismiss => "Dismissing\u{2026}",
             Action::Watch | Action::OpenPullRequest | Action::Copy => "",
         }
     }
@@ -211,6 +218,7 @@ impl Action {
             Action::RerunGate => "Gate still failing",
             Action::Close | Action::CloseAll => "Close failed",
             Action::Cancel => "Cancel failed",
+            Action::Dismiss => "Dismiss failed",
             Action::Watch | Action::OpenPullRequest | Action::Copy => "",
         }
     }
@@ -230,7 +238,7 @@ impl Action {
             }
             Action::Close => "Only finished tasks in Review can be closed",
             Action::CloseAll => "Review has no finished tasks to close",
-            Action::Cancel => "This task can't be cancelled",
+            Action::Cancel | Action::Dismiss => "This task can't be cancelled",
             Action::Copy => "",
         }
     }
@@ -823,7 +831,7 @@ pub fn activity_text(line: &str) -> String {
         return format!("{SHELL_PROMPT}{}", &line[prefix.len()..]);
     }
     match line.strip_prefix(TOOL_LINE_PREFIX) {
-        Some(rest) => format!("{TOOL_MARK}{rest}"),
+        Some(rest) => rest.to_string(),
         None => line.to_string(),
     }
 }
@@ -1311,10 +1319,23 @@ pub fn available_actions(snapshot: &Snapshot, row: Option<&Row>) -> Vec<Action> 
         actions.push(Action::CloseAll);
     }
     if task.is_cancellable() {
-        actions.push(Action::Cancel);
+        actions.push(match row.status {
+            Status::Failed | Status::Blocked => Action::Dismiss,
+            _ => Action::Cancel,
+        });
     }
     actions.push(Action::Copy);
     actions
+}
+
+/// Whether a running task's card snippet is its latest tool call, shown in the code font.
+pub fn is_tool_snippet(row: &Row, snapshot: &Snapshot) -> bool {
+    row.status == Status::Running
+        && snapshot
+            .activity
+            .get(&row.task_id)
+            .and_then(|lines| lines.last())
+            .is_some_and(|line| is_tool_line(line))
 }
 
 /// The action most likely wanted next, shown as the default button.
@@ -1489,7 +1510,7 @@ mod tests {
             vec![
                 Action::Pickup,
                 Action::RerunGate,
-                Action::Cancel,
+                Action::Dismiss,
                 Action::Copy
             ]
         );

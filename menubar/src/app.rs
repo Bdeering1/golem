@@ -47,9 +47,13 @@ const LONG_PROMPT_CHARS: usize = 240;
 const MESSAGE_ITEM_LIMIT: usize = 12;
 /// The palette's top offset, search row and margin, subtracted from the panel height for its list.
 const PALETTE_CHROME_HEIGHT: f32 = 150.0;
+const PALETTE_ROW_HEIGHT: f32 = 28.0;
+const PALETTE_HEADING_HEIGHT: f32 = 25.0;
+const PALETTE_FADE_HEIGHT: f32 = 22.0;
 const NOTHING_NEEDS_YOU_TEXT: &str = "Nothing needs you right now";
 const GOLEM_MISSING_TEXT: &str = "Still looking for golem";
 const TERMINAL_BACKENDS: [&str; 2] = ["claude", "codex"];
+const FILLED_KEYCAP_BACKGROUND: u32 = 0x00000030;
 const KEY_ESCAPE: &str = "escape";
 const KEY_ENTER: &str = "enter";
 const KEY_DOWN: &str = "down";
@@ -138,6 +142,7 @@ pub struct BoardView {
     is_expanded: bool,
     activity_level: ActivityLevel,
     is_following: bool,
+    is_follow_paused: bool,
     is_showing_fields: bool,
     is_showing_prompt: bool,
     pending: Option<Pending>,
@@ -313,6 +318,7 @@ impl BoardView {
             is_expanded: false,
             activity_level: ActivityLevel::Messages,
             is_following: false,
+            is_follow_paused: false,
             is_showing_fields: false,
             is_showing_prompt: false,
             pending: None,
@@ -351,7 +357,7 @@ impl BoardView {
         }
         self.detail_activity = None;
         self.update_tray();
-        if self.is_following {
+        if self.is_following && !self.is_follow_paused {
             self.detail_scroll.scroll_to_bottom();
         }
         cx.notify();
@@ -662,6 +668,21 @@ impl BoardView {
         cx.notify();
     }
 
+    /// ⌃N/⌃P move the palette or list selection without leaving the text being typed.
+    fn move_while_typing(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.is_some() {
+            let key = if delta > 0 { KEY_DOWN } else { KEY_UP };
+            self.handle_palette_key(key, "", window, cx);
+            return;
+        }
+        if self.pending.is_some() || self.is_showing_help {
+            return;
+        }
+        let input = self.input;
+        self.move_selection(delta, cx);
+        self.input = input;
+    }
+
     fn move_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
         let rows = self.column_rows(self.tab);
         if rows.is_empty() {
@@ -707,8 +728,17 @@ impl BoardView {
         cx.notify();
     }
 
+    /// Dismisses the toast and opens the task it reports on, if any.
+    fn open_toast_task(&mut self, cx: &mut Context<Self>) {
+        let toast = self.toast.take();
+        if let Some(task_id) = toast.and_then(|toast| toast.task_id) {
+            self.open_task(&task_id, cx);
+        }
+    }
+
     fn set_palette(&mut self, palette: Option<Palette>, cx: &mut Context<Self>) {
         self.palette = palette;
+        self.palette_scroll.scroll_to_item(0);
         cx.notify();
     }
 
@@ -781,7 +811,7 @@ impl BoardView {
 
     fn scroll_by(&mut self, delta: f32) {
         if delta < 0. {
-            self.is_following = false;
+            self.is_follow_paused = true;
         }
         let handle = if self.is_expanded {
             &self.detail_scroll
@@ -840,8 +870,11 @@ impl BoardView {
         true
     }
 
+    /// W starts following, resumes a paused follow, or stops following.
     fn toggle_follow(&mut self, cx: &mut Context<Self>) {
-        self.is_following = !self.is_following;
+        let is_resuming = self.is_following && self.is_follow_paused;
+        self.is_following = is_resuming || !self.is_following;
+        self.is_follow_paused = false;
         if self.is_following {
             self.activity_level = ActivityLevel::All;
             self.detail_scroll.scroll_to_bottom();
@@ -993,6 +1026,7 @@ impl BoardView {
                     Action::RerunGate => format!("Gate passed for {name}; follow-ups started"),
                     Action::Close => format!("Closed {name}"),
                     Action::Cancel => format!("Cancelled {name}"),
+                    Action::Dismiss => format!("Dismissed {name}"),
                     _ => String::new(),
                 };
                 let busy = vec![(task_id.clone(), action)];
@@ -1179,6 +1213,8 @@ impl BoardView {
             match key {
                 "d" => self.scroll_by(SCROLL_STEP),
                 "u" => self.scroll_by(-SCROLL_STEP),
+                "n" | "j" => self.move_while_typing(1, window, cx),
+                "p" | "k" => self.move_while_typing(-1, window, cx),
                 _ => return,
             }
             cx.notify();
@@ -1234,6 +1270,8 @@ impl BoardView {
             KEY_DOWN | KEY_UP if !items.is_empty() => {
                 let step = if key == KEY_DOWN { 1 } else { items.len() - 1 };
                 palette.index = (palette.index + step) % items.len();
+                self.palette_scroll
+                    .scroll_to_item(palette_child_index(&items, palette.index));
             }
             KEY_ENTER => {
                 if let Some(item) = items.get(palette.index.min(items.len().saturating_sub(1))) {
@@ -1243,10 +1281,12 @@ impl BoardView {
             KEY_BACKSPACE => {
                 palette.query.pop();
                 palette.index = 0;
+                self.palette_scroll.scroll_to_item(0);
             }
             _ if is_printable(typed) => {
                 palette.query.push_str(typed);
                 palette.index = 0;
+                self.palette_scroll.scroll_to_item(0);
             }
             _ => {}
         }
@@ -1357,6 +1397,14 @@ impl BoardView {
                 }
             }
             (_, "i") => self.toggle_session(cx),
+            (_, "d")
+                if self
+                    .toast
+                    .as_ref()
+                    .is_some_and(|toast| toast.task_id.is_some()) =>
+            {
+                self.open_toast_task(cx);
+            }
             (_, "q") => self.hide(cx),
             _ => {
                 self.request_key(typed, cx);
@@ -1381,6 +1429,20 @@ fn outcome_or(outcome: golem_cli::CommandOutcome, done_text: String) -> Outcome 
             is_error: false,
         },
     }
+}
+
+/// The palette list's child position for an item, counting the group headings rendered before it.
+fn palette_child_index(items: &[PaletteItem], index: usize) -> usize {
+    index + palette_heading_count(&items[..=index])
+}
+
+/// How many group headings the palette renders above and among these items.
+fn palette_heading_count(items: &[PaletteItem]) -> usize {
+    items
+        .iter()
+        .enumerate()
+        .filter(|(index, item)| *index == 0 || items[index - 1].group != item.group)
+        .count()
 }
 
 /// The "owner/repo" part of a GitHub pull request URL.
@@ -1638,14 +1700,17 @@ impl BoardView {
             (None, Some(error)) => (error.action.failed_text().to_string(), theme.red),
             (None, None) => (board::card_snippet(row, &self.snapshot), theme.text_2),
         };
-        let is_code =
-            snippet.starts_with(board::SHELL_PROMPT) || snippet.starts_with(board::TOOL_MARK);
-        let quick_action = (is_selected && !self.is_expanded && busy_action.is_none())
-            .then(|| {
-                let actions = board::available_actions(&self.snapshot, Some(row));
-                board::primary_action(&self.snapshot, row, &actions)
-            })
-            .flatten();
+        let is_code = snippet.starts_with(board::SHELL_PROMPT)
+            || (busy_action.is_none()
+                && action_error.is_none()
+                && board::is_tool_snippet(row, &self.snapshot));
+        let quick_action =
+            (is_selected && !self.is_expanded && busy_action.is_none() && self.tab != Column::Done)
+                .then(|| {
+                    let actions = board::available_actions(&self.snapshot, Some(row));
+                    board::primary_action(&self.snapshot, row, &actions)
+                })
+                .flatten();
         let root_id = row.root_id.clone();
         div()
             .id(SharedString::from(format!("card-{}", row.root_id)))
@@ -1712,20 +1777,23 @@ impl BoardView {
                                 .child(row.step.clone()),
                         )
                     })
-                    .child(match quick_action {
-                        Some(action) => Self::quick_action_button(action, theme, cx),
-                        None => div()
-                            .flex_none()
-                            .text_size(px(11.5))
-                            .font_weight(if is_stuck {
-                                FontWeight::SEMIBOLD
-                            } else {
-                                FontWeight::NORMAL
-                            })
-                            .text_color(if is_stuck { theme.orange } else { theme.text_3 })
-                            .child(when)
-                            .into_any_element(),
-                    }),
+                    .when(quick_action.is_none() || is_stuck, |this| {
+                        this.child(
+                            div()
+                                .flex_none()
+                                .text_size(px(11.5))
+                                .font_weight(if is_stuck {
+                                    FontWeight::SEMIBOLD
+                                } else {
+                                    FontWeight::NORMAL
+                                })
+                                .text_color(if is_stuck { theme.orange } else { theme.text_3 })
+                                .child(when),
+                        )
+                    })
+                    .children(
+                        quick_action.map(|action| Self::quick_action_button(action, theme, cx)),
+                    ),
             )
             .child(
                 div()
@@ -1766,7 +1834,7 @@ impl BoardView {
             .pl(px(8.))
             .pr(px(3.))
             .rounded(px(5.))
-            .bg(theme.accent)
+            .bg(theme.accent_fill)
             .text_color(theme.on_accent)
             .text_size(px(11.5))
             .font_weight(FontWeight::SEMIBOLD)
@@ -1779,7 +1847,7 @@ impl BoardView {
             .child(
                 kbd(&key_label(action), theme)
                     .h(px(14.))
-                    .bg(gpui::rgba(0xffffff38))
+                    .bg(gpui::rgba(FILLED_KEYCAP_BACKGROUND))
                     .text_color(theme.on_accent),
             )
             .into_any_element()
@@ -2124,19 +2192,20 @@ impl BoardView {
                 .child(level.label())
         });
         let live = self.is_following.then(|| {
+            let (color, label) = match (self.is_follow_paused, row.status) {
+                (true, _) => (theme.text_2, "Paused"),
+                (false, Status::Running) => (theme.accent, "Live"),
+                (false, _) => (theme.accent, "Full log"),
+            };
             div()
                 .flex()
                 .items_center()
                 .gap(px(5.))
-                .text_color(theme.accent)
+                .text_color(color)
                 .text_size(px(11.5))
                 .font_weight(FontWeight::SEMIBOLD)
-                .child(div().size(px(6.)).rounded_full().bg(theme.accent))
-                .child(if row.status == Status::Running {
-                    "Live"
-                } else {
-                    "Full log"
-                })
+                .child(div().size(px(6.)).rounded_full().bg(color))
+                .child(label)
         });
         let header = div()
             .flex()
@@ -2344,18 +2413,19 @@ impl BoardView {
         actions.sort_by_key(|action| Some(*action) != primary);
         let first_ending = actions
             .iter()
-            .position(|action| matches!(action, Action::Close | Action::Cancel));
+            .position(|action| matches!(action, Action::Close | Action::Cancel | Action::Dismiss));
         let buttons = actions.into_iter().enumerate().map(|(index, action)| {
             let is_on = action == Action::Watch && self.is_following;
             let label = match action {
                 _ if busy_action == Some(action) => action.busy_text(),
+                Action::Watch if is_on && self.is_follow_paused => "Resume",
                 Action::Watch if is_on => "Following",
                 _ => action.label(),
             };
             let is_primary = Some(action) == primary && !is_on;
             let is_danger = action == Action::Cancel;
             let (background, foreground) = if is_primary {
-                (theme.accent, theme.on_accent)
+                (theme.accent_fill, theme.on_accent)
             } else if is_on {
                 (theme.accent_soft, theme.accent)
             } else if is_danger {
@@ -2364,7 +2434,8 @@ impl BoardView {
                 (theme.fill, theme.text)
             };
             let key_chip = kbd(&key_label(action), theme).when(is_primary, |this| {
-                this.bg(gpui::rgba(0xffffff38)).text_color(theme.on_accent)
+                this.bg(gpui::rgba(FILLED_KEYCAP_BACKGROUND))
+                    .text_color(theme.on_accent)
             });
             div()
                 .id(action.label())
@@ -2416,8 +2487,8 @@ impl BoardView {
                             .track_scroll(&self.detail_scroll)
                             .on_scroll(cx.listener(|this, event: &ScrollEvent, _, cx| {
                                 let is_scrolling_up = event.delta.pixel_delta(px(16.)).y > px(0.);
-                                if this.is_following && is_scrolling_up {
-                                    this.is_following = false;
+                                if this.is_following && !this.is_follow_paused && is_scrolling_up {
+                                    this.is_follow_paused = true;
                                     cx.notify();
                                 }
                             }))
@@ -2543,7 +2614,11 @@ impl BoardView {
         is_danger: bool,
         theme: &Theme,
     ) -> Stateful<Div> {
-        let primary_color = if is_danger { theme.red } else { theme.accent };
+        let primary_color = if is_danger {
+            theme.red_fill
+        } else {
+            theme.accent_fill
+        };
         div()
             .id(id)
             .flex_1()
@@ -2570,7 +2645,8 @@ impl BoardView {
             })
             .child(label)
             .child(kbd(key, theme).when(is_primary, |this| {
-                this.bg(gpui::rgba(0xffffff38)).text_color(theme.on_accent)
+                this.bg(gpui::rgba(FILLED_KEYCAP_BACKGROUND))
+                    .text_color(theme.on_accent)
             }))
     }
 
@@ -2617,7 +2693,7 @@ impl BoardView {
                     Action::Cancel if row.status == Status::Running => {
                         "The agent stops and the task moves to Done."
                     }
-                    Action::Cancel => "The task moves to Done.",
+                    Action::Cancel | Action::Dismiss => "The task moves to Done.",
                     _ => "It restarts from its prompt.",
                 };
                 let verb = if action == Action::Cancel {
@@ -2735,6 +2811,7 @@ impl BoardView {
                 ("\u{2191}\u{2193} J K", "select"),
                 ("\u{2190}\u{2192} H L", "switch group"),
                 ("tab \u{21e7}tab", "next group"),
+                ("\u{2303}N \u{2303}P", "select while typing"),
                 ("1-4", "jump to group"),
                 ("G \u{21e7}G", "first, last"),
                 ("N", "next needing you"),
@@ -2765,7 +2842,7 @@ impl BoardView {
                 ("O", "open PR"),
                 ("R", "retry, recheck"),
                 ("C", "close"),
-                ("X", "cancel"),
+                ("X", "cancel, dismiss"),
                 ("Y", "copy ID"),
                 ("E", "full prompt"),
                 ("I", "session"),
@@ -2897,25 +2974,21 @@ impl BoardView {
         let current = palette.map_or(0, |palette| {
             palette.index.min(items.len().saturating_sub(1))
         });
+        let list_height = (self.panel_height() as f32 - PALETTE_CHROME_HEIGHT).min(420.);
+        let heading_count = palette_heading_count(&items);
+        let content_height =
+            items.len() as f32 * PALETTE_ROW_HEIGHT + heading_count as f32 * PALETTE_HEADING_HEIGHT;
+        let is_overflowing = content_height > list_height;
         let mut list = div()
             .id("palette-list")
-            .max_h(px(
-                (self.panel_height() as f32 - PALETTE_CHROME_HEIGHT).min(420.)
-            ))
+            .max_h(px(list_height))
             .overflow_y_scroll()
             .track_scroll(&self.palette_scroll)
             .px(px(5.))
             .pt(px(4.))
             .pb(px(6.));
         let mut group = String::new();
-        let mut child_count = 0;
         for (index, item) in items.iter().enumerate() {
-            if index == current {
-                let heading_count = usize::from(item.group != group);
-                self.palette_scroll
-                    .scroll_to_item(child_count + heading_count);
-            }
-            child_count += 1 + usize::from(item.group != group);
             if item.group != group {
                 group = item.group.clone();
                 list = list.child(
@@ -2944,12 +3017,12 @@ impl BoardView {
                     .flex()
                     .items_center()
                     .gap(px(8.))
-                    .h(px(28.))
+                    .h(px(PALETTE_ROW_HEIGHT))
                     .pl(px(8.))
                     .pr(px(6.))
                     .rounded(px(6.))
                     .text_color(foreground)
-                    .when(is_current, |this| this.bg(theme.accent))
+                    .when(is_current, |this| this.bg(theme.accent_fill))
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                         this.run_command(command, window, cx)
                     }))
@@ -2961,7 +3034,8 @@ impl BoardView {
                             .child(item.label.clone()),
                     )
                     .child(kbd(&item.key, theme).when(is_current, |this| {
-                        this.bg(gpui::rgba(0xffffff38)).text_color(theme.on_accent)
+                        this.bg(gpui::rgba(FILLED_KEYCAP_BACKGROUND))
+                            .text_color(theme.on_accent)
                     })),
             );
         }
@@ -2999,6 +3073,7 @@ impl BoardView {
             .child(
                 div()
                     .id("palette-box")
+                    .relative()
                     .w(px(370.))
                     .rounded(px(12.))
                     .overflow_hidden()
@@ -3020,7 +3095,28 @@ impl BoardView {
                             .child(div().flex_1().min_w_0().child(search_text))
                             .child(kbd("esc", theme)),
                     )
-                    .child(list),
+                    .child(list)
+                    .when(is_overflowing, |this| {
+                        this.child(
+                            div()
+                                .absolute()
+                                .bottom_0()
+                                .left_0()
+                                .w_full()
+                                .h(px(PALETTE_FADE_HEIGHT))
+                                .bg(linear_gradient(
+                                    180.,
+                                    linear_color_stop(
+                                        Hsla {
+                                            a: 0.,
+                                            ..theme.panel
+                                        },
+                                        0.,
+                                    ),
+                                    linear_color_stop(theme.panel, 1.),
+                                )),
+                        )
+                    }),
             )
             .into_any_element()
     }
@@ -3055,10 +3151,7 @@ impl BoardView {
                     .text_size(px(12.))
                     .font_weight(FontWeight::MEDIUM)
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        let toast = this.toast.take();
-                        if let Some(task_id) = toast.and_then(|toast| toast.task_id) {
-                            this.open_task(&task_id, cx);
-                        }
+                        this.open_toast_task(cx);
                         cx.notify();
                     }))
                     .when(toast.is_error, |this| {
@@ -3083,6 +3176,7 @@ impl BoardView {
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .child("Details"),
                         )
+                        .child(kbd("D", theme))
                     }),
             )
             .into_any_element()
