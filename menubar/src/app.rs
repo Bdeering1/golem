@@ -580,7 +580,7 @@ impl BoardView {
             .rows
             .iter()
             .filter(|row| {
-                self.query.is_empty() || board::is_matching(row, &self.snapshot.tasks, &self.query)
+                self.query.is_empty() || board::is_matching(row, &self.snapshot, &self.query)
             })
             .collect()
     }
@@ -1594,6 +1594,17 @@ impl BoardView {
                     };
                     self.set_palette(palette, cx);
                     self.set_help(false, cx);
+                }
+                "c" | "x" if self.is_input_selected => {
+                    let text = self
+                        .palette
+                        .as_ref()
+                        .map_or(&self.query, |palette| &palette.query);
+                    cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                    if key == "x" {
+                        self.clear_input();
+                        self.is_input_selected = false;
+                    }
                 }
                 "c" if self.error_detail.is_some() => self.copy_error_detail(cx),
                 "w" => self.hide(cx),

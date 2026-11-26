@@ -737,9 +737,10 @@ pub fn board_snapshot(tasks: Tasks, now: DateTime<Local>) -> Snapshot {
     }
 }
 
-/// Matches what a card or its details show: IDs, labels, prompts, results, failure reasons
-/// and PR numbers, plus the directory.
-pub fn is_matching(row: &Row, tasks: &Tasks, query: &str) -> bool {
+/// Matches what a card or its details show: IDs, labels, prompts, results, failure reasons,
+/// PR numbers and the card's live activity line, plus the directory.
+pub fn is_matching(row: &Row, snapshot: &Snapshot, query: &str) -> bool {
+    let tasks = &snapshot.tasks;
     let searched: Vec<String> = row
         .chain_ids
         .iter()
@@ -762,7 +763,8 @@ pub fn is_matching(row: &Row, tasks: &Tasks, query: &str) -> bool {
             .join(" ")
         })
         .collect();
-    format!("{} {}", row.directory, searched.join(" "))
+    let snippet = card_snippet(row, snapshot);
+    format!("{} {} {snippet}", row.directory, searched.join(" "))
         .to_lowercase()
         .contains(&query.to_lowercase())
 }
@@ -1485,12 +1487,21 @@ mod tests {
             url: "https://x/pull/412".into(),
             state: "open".into(),
         }];
-        let tasks = tasks(vec![("a", blocked)]);
-        let row = &board_rows(&tasks, now())[0];
+        let mut running = task(Status::Running);
+        running.prompt = "fix the flaky suite".into();
+        let all = tasks(vec![("a", blocked), ("b", running)]);
+        let snapshot = Snapshot {
+            rows: board_rows(&all, now()),
+            tasks: all,
+            activity: HashMap::from([("b".into(), vec!["All 10 runs pass now".into()])]),
+        };
+        let row = |id: &str| snapshot.rows.iter().find(|row| row.task_id == id).unwrap();
+        let [blocked_row, running_row] = [row("a"), row("b")];
         for query in ["#412", "CHECKOUT.spec", "a"] {
-            assert!(is_matching(row, &tasks, query), "{query}");
+            assert!(is_matching(blocked_row, &snapshot, query), "{query}");
         }
-        assert!(!is_matching(row, &tasks, "#41 2"));
+        assert!(!is_matching(blocked_row, &snapshot, "#41 2"));
+        assert!(is_matching(running_row, &snapshot, "10 runs pass"));
     }
 
     #[test]
