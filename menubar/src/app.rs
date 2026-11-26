@@ -11,9 +11,9 @@ use futures::channel::mpsc::UnboundedReceiver;
 use gpui::{
     Animation, AnimationExt, AnyElement, BoxShadow, ClickEvent, ClipboardItem, Context, Div,
     ElementId, FocusHandle, Font, FontWeight, HighlightStyle, Hsla, KeyDownEvent, MouseButton,
-    MouseDownEvent, Pixels, ScrollEvent, ScrollHandle, SharedString, Stateful, StyledText,
-    Subscription, Task, TextRun, Transformation, Window, WindowTextSystem, div, linear_color_stop,
-    linear_gradient, point, prelude::*, pulsating_between, px, radians, svg,
+    MouseDownEvent, MouseMoveEvent, Pixels, ScrollEvent, ScrollHandle, SharedString, Stateful,
+    StyledText, Subscription, Task, TextRun, Transformation, Window, WindowTextSystem, div,
+    linear_color_stop, linear_gradient, point, prelude::*, pulsating_between, px, radians, svg,
 };
 use notify::Watcher;
 use objc2::rc::Retained;
@@ -1731,6 +1731,10 @@ impl BoardView {
         let keystroke = &event.keystroke;
         let modifiers = keystroke.modifiers;
         let key = keystroke.key.as_str();
+        // A held Return would run a palette command, then accept the sheet it opens.
+        if event.is_held && key == KEY_ENTER {
+            return;
+        }
         if modifiers.platform {
             match key {
                 "k" if self.pending.is_none() && self.error_detail.is_none() => {
@@ -1826,7 +1830,9 @@ impl BoardView {
             match (key, typed.as_str()) {
                 (KEY_ESCAPE, _) | (_, "n") => self.answer(false, cx),
                 (_, typed) if !event.is_held && typed == action.key() => self.answer(true, cx),
-                (KEY_ENTER, _) | (_, "y") if !is_destructive => self.answer(true, cx),
+                (KEY_ENTER, _) | (_, "y") if !is_destructive && !event.is_held => {
+                    self.answer(true, cx)
+                }
                 _ => {}
             }
         } else if self.is_showing_help {
@@ -2367,8 +2373,17 @@ impl BoardView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    this.place_caret(event.position.x, px(font_size), window);
+                    let is_extending = event.modifiers.shift;
+                    this.place_caret(event.position.x, px(font_size), is_extending, window);
                     cx.notify();
+                }),
+            )
+            .on_mouse_move(
+                cx.listener(move |this, event: &MouseMoveEvent, window, cx| {
+                    if event.pressed_button == Some(MouseButton::Left) {
+                        this.place_caret(event.position.x, px(font_size), true, window);
+                        cx.notify();
+                    }
                 }),
             )
             .child(run(&text[..start], false))
@@ -2377,11 +2392,18 @@ impl BoardView {
             .child(run(&text[end..], false))
     }
 
-    /// Moves the active input's caret to the character nearest `click_x`.
-    fn place_caret(&mut self, click_x: Pixels, font_size: Pixels, window: &mut Window) {
-        let text = match &self.palette {
-            Some(palette) => palette.query.clone(),
-            None => self.query.clone(),
+    /// Moves the active input's caret to the character nearest `click_x`. Extending, for a
+    /// drag or a shift-click, keeps the selection's other end where it was.
+    fn place_caret(
+        &mut self,
+        click_x: Pixels,
+        font_size: Pixels,
+        is_extending: bool,
+        window: &mut Window,
+    ) {
+        let (text, old_caret) = match &self.palette {
+            Some(palette) => (palette.query.clone(), palette.caret),
+            None => (self.query.clone(), self.query_caret),
         };
         let x = click_x - self.input_scroll.bounds().left() - self.input_scroll.offset().x;
         let run = window.text_style().to_run(text.len());
@@ -2389,7 +2411,10 @@ impl BoardView {
             .text_system()
             .shape_line(text.clone().into(), font_size, &[run], None);
         let caret = text.len() - line.closest_index_for_x(x).min(text.len());
-        self.input_anchor = None;
+        self.input_anchor = match is_extending {
+            true => Some(self.input_anchor.unwrap_or(old_caret)),
+            false => Some(caret),
+        };
         match self.palette.as_mut() {
             Some(palette) => palette.caret = caret,
             None => self.query_caret = caret,
