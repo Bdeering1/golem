@@ -54,6 +54,7 @@ const PALETTE_CHROME_HEIGHT: f32 = 112.0;
 const PALETTE_ROW_HEIGHT: f32 = 28.0;
 const PALETTE_HEADING_HEIGHT: f32 = 28.5;
 const PALETTE_LIST_PADDING: f32 = 5.0;
+const PALETTE_MIN_PEEK: f32 = 8.0;
 const PALETTE_FADE_HEIGHT: f32 = 22.0;
 const NOTHING_NEEDS_YOU_TEXT: &str = "Nothing needs you right now";
 const GOLEM_MISSING_TEXT: &str = "Still looking for golem";
@@ -150,6 +151,8 @@ pub struct BoardView {
     is_follow_paused: bool,
     is_showing_fields: bool,
     is_showing_full_text: bool,
+    /// Set by E so the next render scrolls to the first section it expanded.
+    is_revealing_full_text: bool,
     pending: Option<Pending>,
     is_showing_help: bool,
     palette: Option<Palette>,
@@ -326,6 +329,7 @@ impl BoardView {
             is_follow_paused: false,
             is_showing_fields: false,
             is_showing_full_text: false,
+            is_revealing_full_text: false,
             pending: None,
             is_showing_help: false,
             palette: None,
@@ -619,7 +623,11 @@ impl BoardView {
         cx: &mut Context<Self>,
     ) {
         let text = text.into();
-        if text.is_empty() {
+        let is_holding_error = self
+            .toast
+            .as_ref()
+            .is_some_and(|toast| toast.is_error && toast.task_id.is_none());
+        if text.is_empty() || (is_holding_error && !is_error) {
             return;
         }
         self.toast_count += 1;
@@ -710,6 +718,7 @@ impl BoardView {
         }
         self.tab = column;
         self.is_following = false;
+        self.is_showing_full_text = false;
         self.detail_scroll.set_offset(point(px(0.), px(0.)));
         self.reveal_selected();
         cx.notify();
@@ -1409,6 +1418,7 @@ impl BoardView {
             }
             (_, "e") => {
                 self.is_showing_full_text = !self.is_showing_full_text || self.is_following;
+                self.is_revealing_full_text = self.is_showing_full_text;
                 self.is_following = false;
                 if !self.is_expanded {
                     self.set_expanded(true, cx);
@@ -1941,10 +1951,10 @@ impl BoardView {
         row: &Row,
         theme: &Theme,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) -> Vec<AnyElement> {
         let now = Local::now();
         let task = self.snapshot.tasks[&row.task_id].clone();
-        let mut body = div().flex().flex_col();
+        let mut body: Vec<AnyElement> = Vec::new();
         let stop_reason = task
             .gate_stop_reason
             .clone()
@@ -1961,25 +1971,31 @@ impl BoardView {
             } else {
                 theme.red
             };
-            body = body.child(Self::callout(label, &text, color, true, theme));
+            body.push(Self::callout(label, &text, color, true, theme).into_any_element());
         }
         if let Some(error) = self.action_errors.get(&row.task_id) {
-            body = body.child(Self::callout(
-                error.action.failed_text(),
-                &sentence_case(&error.message),
-                theme.red,
-                false,
-                theme,
-            ));
+            body.push(
+                Self::callout(
+                    error.action.failed_text(),
+                    &sentence_case(&error.message),
+                    theme.red,
+                    false,
+                    theme,
+                )
+                .into_any_element(),
+            );
         }
         if board::is_stuck(row, &task, now) {
-            body = body.child(Self::callout(
-                "Stuck",
-                &board::waiting_reason_text(row, &self.snapshot),
-                theme.orange,
-                false,
-                theme,
-            ));
+            body.push(
+                Self::callout(
+                    "Stuck",
+                    &board::waiting_reason_text(row, &self.snapshot),
+                    theme.orange,
+                    false,
+                    theme,
+                )
+                .into_any_element(),
+            );
         }
         let result = task
             .result
@@ -2009,22 +2025,80 @@ impl BoardView {
         let session = self
             .is_showing_fields
             .then(|| self.render_session(row, now, theme));
+        let is_result_long = task
+            .result
+            .as_deref()
+            .is_some_and(|result| is_long_text(&board::plain_result(result), RESULT_LINE_LIMIT));
+        let is_prompt_long = is_long_text(&task.prompt, PROMPT_LINE_LIMIT);
+        // Each section pairs with whether E expands it, so E can scroll to the first one.
         let sections = if self.is_following {
-            vec![Some(activity)]
+            vec![(Some(activity), false)]
         } else if row.status == Status::Running {
-            vec![Some(activity), chain, prompt, session]
+            vec![
+                (Some(activity), false),
+                (chain, false),
+                (prompt, is_prompt_long),
+                (session, false),
+            ]
         } else {
             vec![
-                result,
-                pull_requests,
-                chain,
-                prompt,
-                Some(activity),
-                session,
+                (result, is_result_long),
+                (pull_requests, false),
+                (chain, false),
+                (prompt, is_prompt_long),
+                (Some(activity), false),
+                (session, false),
             ]
         };
-        body.children(sections.into_iter().flatten())
-            .into_any_element()
+        for (section, is_expandable) in sections {
+            let Some(section) = section else {
+                continue;
+            };
+            if is_expandable && self.is_revealing_full_text {
+                self.detail_scroll.scroll_to_top_of_item(body.len());
+                self.is_revealing_full_text = false;
+            }
+            body.push(section);
+        }
+        self.is_revealing_full_text = false;
+        body
+    }
+
+    /// "#412 open" that opens the pull request; a lone PR shows it in the details status line.
+    fn pull_request_link(
+        pull_request: &ledger::PullRequest,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let url = pull_request.url.clone();
+        let is_open = pull_request.state == "open";
+        div()
+            .id(SharedString::from(format!("pr-{}", pull_request.url)))
+            .flex()
+            .gap(px(6.))
+            .items_baseline()
+            .rounded(px(5.))
+            .hover(|style| style.bg(theme.hover))
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                let url = url.clone();
+                this.run_in_background(
+                    Vec::new(),
+                    move || outcome_or(golem_cli::open_url(&url), String::new()),
+                    cx,
+                );
+            }))
+            .child(
+                div()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(theme.accent)
+                    .child(board::pull_request_number(pull_request)),
+            )
+            .child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(if is_open { theme.green } else { theme.gray })
+                    .child(pull_request.state.clone()),
+            )
     }
 
     fn render_pull_requests(
@@ -2034,47 +2108,19 @@ impl BoardView {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let pull_requests = board::row_pull_requests(&self.snapshot, row);
-        if pull_requests.is_empty() {
+        if pull_requests.len() < 2 {
             return None;
         }
         let mut list = div().flex().flex_col().gap(px(3.)).text_size(px(12.5));
         for pull_request in pull_requests {
-            let url = pull_request.url.clone();
-            let is_open = pull_request.state == "open";
             list = list.child(
-                div()
-                    .id(SharedString::from(format!("pr-{}", pull_request.url)))
-                    .flex()
-                    .gap(px(6.))
-                    .items_baseline()
-                    .rounded(px(5.))
-                    .hover(|style| style.bg(theme.hover))
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        let url = url.clone();
-                        this.run_in_background(
-                            Vec::new(),
-                            move || outcome_or(golem_cli::open_url(&url), String::new()),
-                            cx,
-                        );
-                    }))
-                    .child(
-                        div()
-                            .font_weight(FontWeight::BOLD)
-                            .child(board::pull_request_number(&pull_request)),
-                    )
-                    .child(
-                        div()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(if is_open { theme.green } else { theme.gray })
-                            .child(pull_request.state.clone()),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_color(theme.text_3)
-                            .child(pull_request_repository(&pull_request.url)),
-                    ),
+                Self::pull_request_link(&pull_request, theme, cx).child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(theme.text_3)
+                        .child(pull_request_repository(&pull_request.url)),
+                ),
             );
         }
         Some(
@@ -2265,10 +2311,10 @@ impl BoardView {
                 .child(level.label())
         });
         let live = self.is_following.then(|| {
-            let (color, label) = match (self.is_follow_paused, row.status) {
-                (true, _) => (theme.text_2, "Paused"),
-                (false, Status::Running) => (theme.accent, "Live"),
-                (false, _) => (theme.accent, "Full log"),
+            let (color, label, key) = match (self.is_follow_paused, row.status) {
+                (true, _) => (theme.text_2, "Paused", "W"),
+                (false, Status::Running) => (theme.accent, "Live", "esc"),
+                (false, _) => (theme.accent, "Full log", "esc"),
             };
             div()
                 .flex()
@@ -2279,7 +2325,7 @@ impl BoardView {
                 .font_weight(FontWeight::SEMIBOLD)
                 .child(div().size(px(6.)).rounded_full().bg(color))
                 .child(label)
-                .child(kbd("esc", theme))
+                .child(kbd(key, theme))
         });
         let header = div()
             .flex()
@@ -2332,9 +2378,13 @@ impl BoardView {
                     .child(format!("{earlier_count} earlier, shown in All")),
             );
         }
+        let is_history = row.status != Status::Running && !self.is_following;
         for item in items.into_iter().skip(earlier_count) {
             log = log.child(match item {
-                ActivityItem::Message(text) => div().py(px(2.)).child(text),
+                ActivityItem::Message(text) => div()
+                    .py(px(2.))
+                    .when(is_history, |this| this.text_color(theme.text_2))
+                    .child(text),
                 ActivityItem::Tool(text) => div()
                     .py(px(2.))
                     .pl(px(12.))
@@ -2428,10 +2478,22 @@ impl BoardView {
                     .child(icon(theme::status_icon(row.status), 13., state_color))
                     .child(if is_stuck { "stuck" } else { row.status.name() }),
             );
-        for part in sub_parts {
+        let pull_requests = board::row_pull_requests(&self.snapshot, &row);
+        let mut lone_pull_request = match pull_requests.as_slice() {
+            [pull_request] => Some(Self::pull_request_link(pull_request, theme, cx)),
+            _ => None,
+        };
+        for (index, part) in sub_parts.into_iter().enumerate() {
             sub = sub
                 .child(div().text_color(theme.text_3).child("\u{b7}"))
                 .child(part);
+            if index == 0
+                && let Some(link) = lone_pull_request.take()
+            {
+                sub = sub
+                    .child(div().text_color(theme.text_3).child("\u{b7}"))
+                    .child(link);
+            }
         }
         let head = div()
             .pl(px(18.))
@@ -2505,7 +2567,8 @@ impl BoardView {
                 Action::Watch if is_on => "Following",
                 _ => action.label(),
             };
-            let is_primary = Some(action) == primary && !is_on;
+            let is_resume = is_on && self.is_follow_paused;
+            let is_primary = (Some(action) == primary && !is_on) || is_resume;
             let is_danger = action == Action::Cancel;
             let (background, foreground) = if is_primary {
                 (theme.accent_fill, theme.on_accent)
@@ -2579,7 +2642,9 @@ impl BoardView {
                             .pr(px(18.))
                             .pt(px(2.))
                             .pb(px(16.))
-                            .child(body),
+                            .flex()
+                            .flex_col()
+                            .children(body),
                     )
                     .child(div().absolute().bottom_0().left_0().w_full().h(px(20.)).bg(
                         linear_gradient(
@@ -2931,8 +2996,8 @@ impl BoardView {
                 ("W", "follow log"),
                 ("O", "open PR"),
                 ("R", "retry, recheck"),
-                ("C", "close"),
-                ("X", "cancel, dismiss"),
+                ("C", "close, dismiss"),
+                ("X", "cancel"),
                 ("Y", "copy ID"),
                 ("E", "full text"),
                 ("I", "session"),
@@ -3013,13 +3078,26 @@ impl BoardView {
         self.scrim(theme)
             .id("help")
             .occlude()
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.set_help(false, cx);
+                cx.notify();
+            }))
             .child(
                 Self::sheet(theme, width)
+                    .id("help-sheet")
+                    .on_click(|_, _, cx| cx.stop_propagation())
                     .child(
                         div()
-                            .text_size(px(14.))
-                            .font_weight(FontWeight::BOLD)
-                            .child("Keyboard shortcuts"),
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_size(px(14.))
+                                    .font_weight(FontWeight::BOLD)
+                                    .child("Keyboard shortcuts"),
+                            )
+                            .child(kbd("esc", theme)),
                     )
                     .child(
                         div()
@@ -3032,24 +3110,6 @@ impl BoardView {
                                     .gap(px(18.))
                                     .children([move_column.child(status_keys), task_column]),
                             ),
-                    )
-                    .child(
-                        div().flex().mt(px(14.)).child(
-                            Self::sheet_button(
-                                "help-ok",
-                                "OK".to_string(),
-                                "esc",
-                                false,
-                                false,
-                                theme,
-                            )
-                            .on_click(cx.listener(
-                                |this, _: &ClickEvent, _, cx| {
-                                    this.set_help(false, cx);
-                                    cx.notify();
-                                },
-                            )),
-                        ),
                     ),
             )
             .into_any_element()
@@ -3065,8 +3125,19 @@ impl BoardView {
             palette.index.min(items.len().saturating_sub(1))
         });
         let available_height = (self.panel_height() as f32 - PALETTE_CHROME_HEIGHT).min(420.);
-        let list_height = palette_list_height(&items, available_height);
-        let is_overflowing = list_height < palette_list_height(&items, f32::MAX);
+        let full_height = palette_list_height(&items, f32::MAX);
+        let is_overflowing = full_height > available_height;
+        // An overflowing list shows part of the next row, so it reads as scrollable.
+        let half_row = PALETTE_ROW_HEIGHT / 2.;
+        let whole_rows_height = palette_list_height(&items, available_height);
+        let spare_height = available_height - whole_rows_height;
+        let list_height = match is_overflowing {
+            false => full_height,
+            true if spare_height >= PALETTE_MIN_PEEK => {
+                whole_rows_height + spare_height.min(half_row)
+            }
+            true => palette_list_height(&items, available_height - half_row) + half_row,
+        };
         let mut list = div()
             .id("palette-list")
             .max_h(px(list_height))

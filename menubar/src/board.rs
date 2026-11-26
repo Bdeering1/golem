@@ -156,9 +156,9 @@ impl Action {
             Action::Watch => "w",
             Action::OpenPullRequest => "o",
             Action::Retry | Action::RerunGate => "r",
-            Action::Close => "c",
+            Action::Close | Action::Dismiss => "c",
             Action::CloseAll => "C",
-            Action::Cancel | Action::Dismiss => "x",
+            Action::Cancel => "x",
             Action::Copy => "y",
         }
     }
@@ -236,9 +236,10 @@ impl Action {
             Action::Retry | Action::RerunGate => {
                 "Only failed, cancelled or blocked tasks can be retried"
             }
-            Action::Close => "Only finished tasks in Review can be closed",
+            Action::Close => "Only tasks in Review can be closed",
             Action::CloseAll => "Review has no finished tasks to close",
-            Action::Cancel | Action::Dismiss => "This task can't be cancelled",
+            Action::Cancel => "This task can't be cancelled",
+            Action::Dismiss => "This task can't be dismissed",
             Action::Copy => "",
         }
     }
