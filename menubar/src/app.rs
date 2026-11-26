@@ -30,7 +30,8 @@ const PANEL_HEIGHT: f64 = 640.0;
 const MIN_PANEL_HEIGHT: f64 = 320.0;
 /// Collapsed-panel layout heights used to fit the panel to its longest group.
 const PANEL_CHROME_HEIGHT: f64 = 140.0;
-const CARD_PITCH: f64 = 66.0;
+const CARD_GAP: f32 = 2.0;
+const CARD_PITCH: f64 = 63.0;
 const EMPTY_LIST_HEIGHT: f64 = 90.0;
 const SIDE_WIDTH: f32 = 340.0;
 const TICK_INTERVAL: Duration = Duration::from_secs(1);
@@ -752,8 +753,10 @@ impl BoardView {
         cx.notify();
     }
 
+    /// Follow shows only the log, so revealing session info also leaves Follow.
     fn toggle_session(&mut self, cx: &mut Context<Self>) {
-        self.is_showing_fields = !self.is_showing_fields || !self.is_expanded;
+        self.is_showing_fields = !self.is_showing_fields || !self.is_expanded || self.is_following;
+        self.is_following = false;
         if !self.is_expanded {
             self.set_expanded(true, cx);
         }
@@ -876,7 +879,6 @@ impl BoardView {
         self.is_following = is_resuming || !self.is_following;
         self.is_follow_paused = false;
         if self.is_following {
-            self.activity_level = ActivityLevel::All;
             self.detail_scroll.scroll_to_bottom();
         }
         if !self.is_expanded {
@@ -1092,7 +1094,7 @@ impl BoardView {
                 }
                 let label = match action {
                     Action::Watch if row.status != Status::Running => "Show log".to_string(),
-                    Action::Pickup => "Pick up session".to_string(),
+                    Action::Pickup => "Pick up".to_string(),
                     Action::Watch => "Follow live log".to_string(),
                     _ => action.label().to_string(),
                 };
@@ -1391,7 +1393,8 @@ impl BoardView {
                 }
             }
             (_, "e") => {
-                self.is_showing_prompt = !self.is_showing_prompt;
+                self.is_showing_prompt = !self.is_showing_prompt || self.is_following;
+                self.is_following = false;
                 if !self.is_expanded {
                     self.set_expanded(true, cx);
                 }
@@ -1659,7 +1662,7 @@ impl BoardView {
                         .child(rows.len().to_string()),
                 )
                 .when(has_attention && !is_current, |this| {
-                    this.child(div().size(px(6.)).rounded_full().bg(theme.orange))
+                    this.child(div().size(px(6.)).rounded_full().bg(theme.accent))
                 })
         });
         let container = div().flex().flex_col().child(
@@ -1724,10 +1727,11 @@ impl BoardView {
             .border_1()
             .map(|this| match (is_selected, is_changed) {
                 (true, _) => this.bg(theme.accent_soft).border_color(theme.accent),
-                (false, true) => this.bg(theme.changed).border_color(theme.line),
+                (false, true) => this
+                    .bg(theme.changed)
+                    .border_color(gpui::transparent_black()),
                 (false, false) => this
-                    .bg(theme.raised)
-                    .border_color(theme.line)
+                    .border_color(gpui::transparent_black())
                     .hover(|style| style.bg(theme.hover)),
             })
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
@@ -1777,27 +1781,23 @@ impl BoardView {
                                 .child(row.step.clone()),
                         )
                     })
-                    .when(quick_action.is_none() || is_stuck, |this| {
-                        this.child(
-                            div()
-                                .flex_none()
-                                .text_size(px(11.5))
-                                .font_weight(if is_stuck {
-                                    FontWeight::SEMIBOLD
-                                } else {
-                                    FontWeight::NORMAL
-                                })
-                                .text_color(if is_stuck { theme.orange } else { theme.text_3 })
-                                .child(when),
-                        )
-                    })
-                    .children(
-                        quick_action.map(|action| Self::quick_action_button(action, theme, cx)),
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(11.5))
+                            .font_weight(if is_stuck {
+                                FontWeight::SEMIBOLD
+                            } else {
+                                FontWeight::NORMAL
+                            })
+                            .text_color(if is_stuck { theme.orange } else { theme.text_3 })
+                            .child(when),
                     ),
             )
             .child(
                 div()
                     .flex()
+                    .items_center()
                     .gap(px(6.))
                     .pl(px(21.))
                     .min_w_0()
@@ -1818,6 +1818,9 @@ impl BoardView {
                                 this.font_family(MONO_FONT).text_size(px(11.5))
                             })
                             .child(snippet),
+                    )
+                    .children(
+                        quick_action.map(|action| Self::quick_action_button(action, theme, cx)),
                     ),
             )
     }
@@ -1831,6 +1834,7 @@ impl BoardView {
             .items_center()
             .gap(px(5.))
             .h(px(20.))
+            .my(px(-2.))
             .pl(px(8.))
             .pr(px(3.))
             .rounded(px(5.))
@@ -1866,7 +1870,7 @@ impl BoardView {
             .pb(px(10.))
             .flex()
             .flex_col()
-            .gap(px(5.));
+            .gap(px(CARD_GAP));
         if rows.is_empty() {
             let text = if self.query.is_empty() {
                 self.tab.empty_text()
@@ -2065,7 +2069,7 @@ impl BoardView {
                         if index < shown_index {
                             "Before"
                         } else {
-                            "After"
+                            "Then"
                         },
                     ))
                     .child(icon(
@@ -2221,14 +2225,16 @@ impl BoardView {
                     .child("ACTIVITY"),
             )
             .children(live)
-            .child(
-                div()
-                    .flex()
-                    .p(px(1.))
-                    .rounded(px(6.))
-                    .bg(theme.fill)
-                    .children(segments),
-            );
+            .when(!self.is_following, |this| {
+                this.child(
+                    div()
+                        .flex()
+                        .p(px(1.))
+                        .rounded(px(6.))
+                        .bg(theme.fill)
+                        .children(segments),
+                )
+            });
         let mut log = div().flex().flex_col().text_size(px(12.5));
         if lines.is_empty() {
             let text = if row.status == Status::Running {
@@ -2238,8 +2244,13 @@ impl BoardView {
             };
             log = log.child(div().text_color(theme.text_3).child(text));
         }
-        let items = board::activity_view(&lines, self.activity_level);
-        let earlier_count = match self.activity_level {
+        let level = if self.is_following {
+            ActivityLevel::All
+        } else {
+            self.activity_level
+        };
+        let items = board::activity_view(&lines, level);
+        let earlier_count = match level {
             ActivityLevel::Messages => items.len().saturating_sub(MESSAGE_ITEM_LIMIT),
             _ => 0,
         };
@@ -2373,15 +2384,17 @@ impl BoardView {
                     .child(
                         div()
                             .id("collapse")
-                            .size(px(24.))
+                            .h(px(24.))
+                            .px(px(4.))
                             .flex()
                             .items_center()
-                            .justify_center()
+                            .gap(px(6.))
                             .rounded(px(6.))
                             .hover(|style| style.bg(theme.hover))
                             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                                 this.set_expanded(false, cx)
                             }))
+                            .child(kbd("esc", theme))
                             .child(icon(theme::ICON_FOLD, 15., theme.text_2)),
                     ),
             )
@@ -2689,12 +2702,19 @@ impl BoardView {
             }
             (action, Some(row)) => {
                 let name = board::row_title(row);
+                let follow_up_count =
+                    board::waiting_dependent_count(&self.snapshot.tasks, &row.task_id);
+                let moved = match follow_up_count {
+                    0 => "The task moves to Done.".to_string(),
+                    1 => "It and its waiting follow-up move to Done.".to_string(),
+                    count => format!("It and its {count} waiting follow-ups move to Done."),
+                };
                 let body = match action {
                     Action::Cancel if row.status == Status::Running => {
-                        "The agent stops and the task moves to Done."
+                        format!("The agent stops. {moved}")
                     }
-                    Action::Cancel | Action::Dismiss => "The task moves to Done.",
-                    _ => "It restarts from its prompt.",
+                    Action::Cancel | Action::Dismiss => moved,
+                    _ => "It restarts from its prompt.".to_string(),
                 };
                 let verb = if action == Action::Cancel {
                     "Cancel task"
@@ -2703,7 +2723,7 @@ impl BoardView {
                 };
                 (
                     format!("{} {name}?", action.label()),
-                    body.to_string(),
+                    body,
                     verb.to_string(),
                 )
             }
@@ -2811,7 +2831,7 @@ impl BoardView {
                 ("\u{2191}\u{2193} J K", "select"),
                 ("\u{2190}\u{2192} H L", "switch group"),
                 ("tab \u{21e7}tab", "next group"),
-                ("\u{2303}N \u{2303}P", "select while typing"),
+                ("\u{2303}N \u{2303}P", "select in search"),
                 ("1-4", "jump to group"),
                 ("G \u{21e7}G", "first, last"),
                 ("N", "next needing you"),
