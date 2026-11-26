@@ -1463,27 +1463,50 @@ impl BoardView {
             .iter()
             .map(|task_id| (task_id.clone(), Action::Close))
             .collect();
+        let names: Vec<(String, String)> = task_ids
+            .iter()
+            .map(|task_id| {
+                let row = self
+                    .snapshot
+                    .rows
+                    .iter()
+                    .find(|row| row.task_id == *task_id);
+                let name = row.map_or(task_id.as_str(), board::row_title);
+                (task_id.clone(), name.to_string())
+            })
+            .collect();
         self.run_in_background(
             busy,
             move || {
-                let failures: Vec<String> = task_ids
+                let failures: Vec<String> = names
                     .iter()
-                    .map(|task_id| golem.run(Action::Close.command(), task_id))
-                    .filter(|outcome| !outcome.is_success)
-                    .map(|outcome| outcome.message)
+                    .filter_map(|(task_id, name)| {
+                        let outcome = golem.run(Action::Close.command(), task_id);
+                        (!outcome.is_success).then(|| format!("{name}: {}", outcome.message))
+                    })
                     .collect();
-                match failures.first() {
-                    Some(failure) => Outcome {
-                        message: format!(
-                            "Couldn't close {}: {failure}",
-                            board::counted_text(failures.len(), "task")
-                        ),
-                        is_error: true,
-                    },
-                    None => Outcome {
-                        message: format!("Closed {}", board::counted_text(task_ids.len(), "task")),
+                if failures.is_empty() {
+                    return Outcome {
+                        message: format!("Closed {}", board::counted_text(names.len(), "task")),
                         is_error: false,
-                    },
+                    };
+                }
+                // The toast shows the first line; the error sheet lists each failure.
+                let closed_count = names.len() - failures.len();
+                let summary = match closed_count {
+                    0 => format!(
+                        "Couldn't close {}",
+                        board::counted_text(failures.len(), "task")
+                    ),
+                    _ => format!("Couldn't close {} of {}", failures.len(), names.len()),
+                };
+                let closed = match closed_count {
+                    0 => String::new(),
+                    count => format!("\n\n{} closed.", board::counted_text(count, "other task")),
+                };
+                Outcome {
+                    message: format!("{summary}\n\n{}{closed}", failures.join("\n\n")),
+                    is_error: true,
                 }
             },
             cx,
@@ -4740,7 +4763,8 @@ impl BoardView {
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .child(toast.text.clone()),
+                            // The first line summarises; Details shows the rest.
+                            .child(board::first_line(&toast.text).to_string()),
                     )
                     .when(toast.task_id.is_some() || toast.is_error, |this| {
                         this.child(
