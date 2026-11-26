@@ -1267,6 +1267,19 @@ fn is_tool_line(line: &str) -> bool {
     line.starts_with(TOOL_LINE_PREFIX)
 }
 
+/// Up to three names in prose, then how many more.
+pub fn names_text(names: &[&str]) -> String {
+    match names {
+        [] => String::new(),
+        [name] => name.to_string(),
+        [first, second] => format!("{first} and {second}"),
+        [first, second, third] => format!("{first}, {second} and {third}"),
+        [first, second, third, rest @ ..] => {
+            format!("{first}, {second}, {third} and {} more", rest.len())
+        }
+    }
+}
+
 pub fn counted_text(count: usize, noun: &str) -> String {
     if count == 1 {
         format!("{count} {noun}")
@@ -1477,6 +1490,12 @@ mod tests {
             .map(|row| (row.task_id.as_str(), row.column))
             .collect();
         assert_eq!(columns, vec![("a", Column::Review), ("b", Column::Done)]);
+    }
+
+    #[test]
+    fn names_text_lists_three_then_counts() {
+        assert_eq!(names_text(&["a", "b"]), "a and b");
+        assert_eq!(names_text(&["a", "b", "c", "d", "e"]), "a, b, c and 2 more");
     }
 
     #[test]

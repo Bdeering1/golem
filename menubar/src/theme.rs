@@ -144,6 +144,7 @@ pub const ICON_REVIEW: &str = "icons/review.svg";
 pub const ICON_SEARCH: &str = "icons/search.svg";
 pub const ICON_CHEVRON: &str = "icons/chevron.svg";
 pub const ICON_FOLD: &str = "icons/fold.svg";
+pub const ICON_WARNING: &str = "icons/warning.svg";
 
 pub fn status_icon(status: Status) -> &'static str {
     match status {
@@ -182,6 +183,9 @@ fn icon_body(path: &str) -> Option<&'static str> {
         ICON_CHEVRON => r#"<path d="M6 3.2L10.8 8 6 12.8"/>"#,
         ICON_FOLD => {
             r#"<rect x="1.8" y="2.8" width="12.4" height="10.4" rx="2.2"/><path d="M10 2.8v10.4"/><path d="M5 6.2L6.8 8 5 9.8"/>"#
+        }
+        ICON_WARNING => {
+            r#"<path d="M8 2.4L14.2 13.2H1.8z"/><path d="M8 6.6v2.8"/><circle cx="8" cy="11.2" r="0.5" fill="black"/>"#
         }
         _ => return None,
     })

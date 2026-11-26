@@ -38,8 +38,8 @@ const TOAST_ROW_HEIGHT: f64 = 44.0;
 const CARD_GAP: f32 = 2.0;
 /// The footer and the details action bar share a height so their top edges line up.
 const BOTTOM_BAR_HEIGHT: f32 = 37.0;
-/// The shortcuts sheet's height plus the footer below it; the palette uses it too.
-const HELP_PANEL_HEIGHT: f64 = 500.0;
+/// The shortcuts sheet with the top inset above it and 12 pt below.
+const HELP_PANEL_HEIGHT: f64 = 468.0;
 const SMALL_SHEET_MAX_WIDTH: f32 = 440.0;
 const LOAD_ERROR_TITLE: &str = "Can't read the ledger";
 const ERROR_TEXT_MAX_HEIGHT: f32 = 220.0;
@@ -95,7 +95,7 @@ const STOPPED_MESSAGE_ITEM_LIMIT: usize = 3;
 /// The palette's top offset, search row and margin, subtracted from the panel height for its list.
 /// The palette sits at the panel's top inset, covering the header and tabs whole rather than
 /// cutting through them.
-const PALETTE_TOP: f32 = 8.0;
+const SHEET_TOP: f32 = 8.0;
 const PALETTE_CHROME_HEIGHT: f32 = 58.0;
 const PALETTE_LIST_MAX_HEIGHT: f32 = 420.0;
 /// Added to the chrome's margin so a palette that grew the panel ends 12 pt from its edge.
@@ -2287,6 +2287,7 @@ impl BoardView {
                         .items_center()
                         .gap(px(6.))
                         .text_size(px(11.5))
+                        .child(icon(theme::ICON_WARNING, 12., theme.orange))
                         .child(
                             div()
                                 .flex_1()
@@ -3842,10 +3843,25 @@ impl BoardView {
         });
         let (title, body, verb) = match (pending.action, row) {
             (Action::CloseAll, _) => {
-                let count = board::closable_task_ids(&self.snapshot).len();
+                let task_ids = board::closable_task_ids(&self.snapshot);
+                let rows: Vec<&Row> = (self.snapshot.rows.iter())
+                    .filter(|row| task_ids.contains(&row.task_id))
+                    .collect();
+                let names: Vec<&str> = rows.iter().map(|row| board::row_title(row)).collect();
+                let verb = if rows.len() == 1 { "moves" } else { "move" };
+                let unopened_count = rows.iter().filter(|row| self.needs_you(row)).count();
+                let unopened = match unopened_count {
+                    0 => String::new(),
+                    1 if rows.len() == 1 => " You haven't opened it.".to_string(),
+                    count if count == rows.len() => " You haven't opened any of them.".to_string(),
+                    count => format!(" You haven't opened {count} of them."),
+                };
                 (
-                    format!("Close {}?", board::counted_text(count, "finished task")),
-                    "They move to Done.".to_string(),
+                    format!(
+                        "Close {}?",
+                        board::counted_text(rows.len(), "finished task")
+                    ),
+                    format!("{} {verb} to Done.{unopened}", board::names_text(&names)),
                     "Close all".to_string(),
                 )
             }
@@ -4147,12 +4163,14 @@ impl BoardView {
         self.scrim(theme)
             .id("help")
             .occlude()
+            .pt(px(SHEET_TOP))
             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                 this.set_help(false, cx);
                 cx.notify();
             }))
             .child(
                 Self::sheet(theme, width)
+                    .rounded(px(12.))
                     .id("help-sheet")
                     .on_click(|_, _, cx| cx.stop_propagation())
                     .child(
@@ -4296,7 +4314,7 @@ impl BoardView {
         self.scrim(theme)
             .id("palette")
             .occlude()
-            .pt(px(PALETTE_TOP))
+            .pt(px(SHEET_TOP))
             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                 this.set_palette(None, cx);
                 cx.notify();
@@ -4379,11 +4397,7 @@ impl BoardView {
                         cx.notify();
                     }))
                     .when(toast.is_error, |this| {
-                        this.border_color(theme.red).child(icon(
-                            theme::status_icon(Status::Failed),
-                            12.,
-                            theme.red,
-                        ))
+                        this.child(icon(theme::status_icon(Status::Failed), 12., theme.red))
                     })
                     .child(
                         div()
