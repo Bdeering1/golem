@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -31,6 +31,8 @@ const MIN_PANEL_HEIGHT: f64 = 320.0;
 /// Collapsed-panel layout heights used to fit the panel to its longest group.
 const PANEL_CHROME_HEIGHT: f64 = 140.0;
 const CARD_GAP: f32 = 2.0;
+/// The shortcuts sheet's height plus the footer below it.
+const HELP_PANEL_HEIGHT: f64 = 545.0;
 const REPOSITORY_MAX_WIDTH: f32 = 120.0;
 const CARD_PITCH: f64 = 63.0;
 const EMPTY_LIST_HEIGHT: f64 = 90.0;
@@ -48,6 +50,17 @@ const BUSY_PULSE_FPS: f32 = 30.0;
 const CHARS_PER_LINE: usize = 80;
 const PROMPT_LINE_LIMIT: usize = 3;
 const RESULT_LINE_LIMIT: usize = 6;
+const CALLOUT_LINE_LIMIT: usize = 4;
+const SECTION_RESULT: &str = "result";
+const SECTION_PROMPT: &str = "prompt";
+const SECTION_STOP_REASON: &str = "stop-reason";
+const SECTION_ACTION_ERROR: &str = "action-error";
+const EXPANDABLE_SECTIONS: [&str; 4] = [
+    SECTION_RESULT,
+    SECTION_PROMPT,
+    SECTION_STOP_REASON,
+    SECTION_ACTION_ERROR,
+];
 const MESSAGE_ITEM_LIMIT: usize = 12;
 /// The palette's top offset, search row and margin, subtracted from the panel height for its list.
 const PALETTE_CHROME_HEIGHT: f32 = 112.0;
@@ -150,7 +163,8 @@ pub struct BoardView {
     is_following: bool,
     is_follow_paused: bool,
     is_showing_fields: bool,
-    is_showing_full_text: bool,
+    /// Clamped sections the user expanded, by toggle id; E expands or collapses all of them.
+    expanded_sections: HashSet<&'static str>,
     /// Set by E so the next render scrolls to the first section it expanded.
     is_revealing_full_text: bool,
     pending: Option<Pending>,
@@ -328,7 +342,7 @@ impl BoardView {
             is_following: false,
             is_follow_paused: false,
             is_showing_fields: false,
-            is_showing_full_text: false,
+            expanded_sections: HashSet::new(),
             is_revealing_full_text: false,
             pending: None,
             is_showing_help: false,
@@ -538,7 +552,7 @@ impl BoardView {
 
     /// The collapsed panel fits its longest group so it doesn't change height when switching tabs.
     fn panel_height(&self) -> f64 {
-        if self.is_expanded || self.is_showing_help {
+        if self.is_expanded {
             return PANEL_HEIGHT;
         }
         let longest = self
@@ -551,7 +565,12 @@ impl BoardView {
             .max()
             .unwrap_or(0);
         let list_height = (longest as f64 * CARD_PITCH).max(EMPTY_LIST_HEIGHT);
-        (PANEL_CHROME_HEIGHT + list_height).clamp(MIN_PANEL_HEIGHT, PANEL_HEIGHT)
+        let minimum_height = if self.is_showing_help {
+            HELP_PANEL_HEIGHT
+        } else {
+            MIN_PANEL_HEIGHT
+        };
+        (PANEL_CHROME_HEIGHT + list_height).clamp(minimum_height, PANEL_HEIGHT)
     }
 
     /// Moves the panel under the menu bar item, then shows it if asked. AppKit applies the
@@ -675,7 +694,7 @@ impl BoardView {
 
     fn select(&mut self, root_id: String, cx: &mut Context<Self>) {
         self.selected_roots.insert(self.tab, root_id);
-        self.is_showing_full_text = false;
+        self.expanded_sections.clear();
         self.input = Input::None;
         self.is_following = false;
         self.detail_scroll.set_offset(point(px(0.), px(0.)));
@@ -718,7 +737,7 @@ impl BoardView {
         }
         self.tab = column;
         self.is_following = false;
-        self.is_showing_full_text = false;
+        self.expanded_sections.clear();
         self.detail_scroll.set_offset(point(px(0.), px(0.)));
         self.reveal_selected();
         cx.notify();
@@ -1237,6 +1256,11 @@ impl BoardView {
         }
         if modifiers.control {
             match key {
+                "d" | "u"
+                    if self.palette.is_some() || self.pending.is_some() || self.is_showing_help =>
+                {
+                    return;
+                }
                 "d" => self.scroll_by(SCROLL_STEP),
                 "u" => self.scroll_by(-SCROLL_STEP),
                 "n" | "j" => self.move_while_typing(1, window, cx),
@@ -1417,8 +1441,14 @@ impl BoardView {
                 }
             }
             (_, "e") => {
-                self.is_showing_full_text = !self.is_showing_full_text || self.is_following;
-                self.is_revealing_full_text = self.is_showing_full_text;
+                let is_expanding =
+                    self.is_following || self.expanded_sections.len() < EXPANDABLE_SECTIONS.len();
+                self.expanded_sections = if is_expanding {
+                    EXPANDABLE_SECTIONS.into_iter().collect()
+                } else {
+                    HashSet::new()
+                };
+                self.is_revealing_full_text = is_expanding;
                 self.is_following = false;
                 if !self.is_expanded {
                     self.set_expanded(true, cx);
@@ -1847,6 +1877,7 @@ impl BoardView {
                             .text_color(theme.text_3)
                             .child(board::repository_name(row).to_string()),
                     )
+                    .child(div().flex_none().text_color(theme.text_3).child("\u{b7}"))
                     .child(
                         div()
                             .flex_1()
@@ -1961,40 +1992,54 @@ impl BoardView {
             .or(task.setup_failure_reason.clone())
             .unwrap_or_default();
         if !stop_reason.is_empty() {
-            let (label, text) = match (&task.gate_stop_reason, &task.gate) {
-                (Some(_), Some(gate)) => ("Gate failed", format!("$ {gate}\n{stop_reason}")),
-                (Some(_), None) => ("Gate failed", stop_reason),
-                _ => ("Setup failed", stop_reason),
+            let label = match task.gate_stop_reason {
+                Some(_) => "Gate failed",
+                None => "Setup failed",
             };
+            let command = task
+                .gate_stop_reason
+                .as_ref()
+                .and(task.gate.as_ref())
+                .map(|gate| format!("$ {gate}"));
             let color = if row.status == Status::Blocked {
                 theme.orange
             } else {
                 theme.red
             };
-            body.push(Self::callout(label, &text, color, true, theme).into_any_element());
+            let mono = |text: Div| text.font_family(MONO_FONT).text_size(px(12.));
+            body.push(
+                Self::callout(label, color, theme)
+                    .children(command.map(|command| mono(div()).child(command)))
+                    .child(self.clamped_text(
+                        SECTION_STOP_REASON,
+                        &stop_reason,
+                        CALLOUT_LINE_LIMIT,
+                        mono,
+                        theme,
+                        cx,
+                    ))
+                    .into_any_element(),
+            );
         }
         if let Some(error) = self.action_errors.get(&row.task_id) {
             body.push(
-                Self::callout(
-                    error.action.failed_text(),
-                    &sentence_case(&error.message),
-                    theme.red,
-                    false,
-                    theme,
-                )
-                .into_any_element(),
+                Self::callout(error.action.failed_text(), theme.red, theme)
+                    .child(self.clamped_text(
+                        SECTION_ACTION_ERROR,
+                        &sentence_case(&error.message),
+                        CALLOUT_LINE_LIMIT,
+                        |text| text,
+                        theme,
+                        cx,
+                    ))
+                    .into_any_element(),
             );
         }
         if board::is_stuck(row, &task, now) {
             body.push(
-                Self::callout(
-                    "Stuck",
-                    &board::waiting_reason_text(row, &self.snapshot),
-                    theme.orange,
-                    false,
-                    theme,
-                )
-                .into_any_element(),
+                Self::callout("Stuck", theme.orange, theme)
+                    .child(board::waiting_reason_text(row, &self.snapshot))
+                    .into_any_element(),
             );
         }
         let result = task
@@ -2009,10 +2054,10 @@ impl BoardView {
                 };
                 Self::section(title, theme)
                     .child(self.clamped_text(
-                        "result-toggle",
+                        SECTION_RESULT,
                         &board::plain_result(result),
                         RESULT_LINE_LIMIT,
-                        theme.text,
+                        |text| text,
                         theme,
                         cx,
                     ))
@@ -2087,18 +2132,13 @@ impl BoardView {
                     cx,
                 );
             }))
+            .text_color(if is_open { theme.accent } else { theme.text_3 })
             .child(
                 div()
                     .font_weight(FontWeight::BOLD)
-                    .text_color(theme.accent)
                     .child(board::pull_request_number(pull_request)),
             )
-            .child(
-                div()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(if is_open { theme.green } else { theme.gray })
-                    .child(pull_request.state.clone()),
-            )
+            .child(pull_request.state.clone())
     }
 
     fn render_pull_requests(
@@ -2184,10 +2224,10 @@ impl BoardView {
         Some(
             Self::section("Prompt", theme)
                 .child(self.clamped_text(
-                    "prompt-toggle",
+                    SECTION_PROMPT,
                     prompt,
                     PROMPT_LINE_LIMIT,
-                    theme.text_2,
+                    |text| text.text_color(theme.text_2),
                     theme,
                     cx,
                 ))
@@ -2195,19 +2235,19 @@ impl BoardView {
         )
     }
 
-    /// Long text clamped to `line_limit` lines with a Show more control; E expands all of it.
+    /// Long text clamped to `line_limit` lines with its own Show more control; E expands all.
     fn clamped_text(
         &self,
-        toggle_id: &'static str,
+        section: &'static str,
         text: &str,
         line_limit: usize,
-        color: Hsla,
+        style: impl FnOnce(Div) -> Div,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Div {
-        let is_showing_full_text = self.is_showing_full_text;
+        let is_expanded = self.expanded_sections.contains(section);
         let is_long = is_long_text(text, line_limit);
-        let is_clamped = is_long && !is_showing_full_text;
+        let is_clamped = is_long && !is_expanded;
         // line_clamp limits each paragraph separately, so a clamped preview joins them.
         let shown_text = if is_clamped {
             text.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -2219,8 +2259,7 @@ impl BoardView {
             .flex_col()
             .gap(px(3.))
             .child(
-                div()
-                    .text_color(color)
+                style(div())
                     .when(is_clamped, |this| {
                         this.line_clamp(line_limit).text_ellipsis()
                     })
@@ -2229,18 +2268,20 @@ impl BoardView {
             .when(is_long, |this| {
                 this.child(
                     div()
-                        .id(toggle_id)
+                        .id(section)
                         .flex()
                         .items_center()
                         .gap(px(6.))
                         .text_size(px(12.))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme.accent)
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.is_showing_full_text = !this.is_showing_full_text;
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            if !this.expanded_sections.remove(section) {
+                                this.expanded_sections.insert(section);
+                            }
                             cx.notify();
                         }))
-                        .child(if is_showing_full_text {
+                        .child(if is_expanded {
                             "Show less"
                         } else {
                             "Show more"
@@ -2292,29 +2333,27 @@ impl BoardView {
 
     fn render_activity(&mut self, row: &Row, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let lines = self.selected_activity();
-        let segments = ActivityLevel::ALL.into_iter().map(|level| {
-            let is_pressed = level == self.activity_level;
-            div()
-                .id(level.label())
-                .px(px(8.))
-                .py(px(1.))
-                .rounded(px(5.))
-                .text_size(px(11.))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(if is_pressed { theme.text } else { theme.text_2 })
-                .when(is_pressed, |this| this.bg(theme.raised))
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.activity_level = level;
-                    this.is_following = false;
-                    cx.notify();
-                }))
-                .child(level.label())
-        });
+        let level_button = div()
+            .id("activity-level")
+            .flex()
+            .items_center()
+            .gap(px(5.))
+            .px(px(4.))
+            .rounded(px(5.))
+            .text_size(px(11.5))
+            .text_color(theme.text_3)
+            .hover(|style| style.bg(theme.hover))
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.activity_level = this.activity_level.next();
+                cx.notify();
+            }))
+            .child(self.activity_level.label())
+            .child(kbd("T", theme));
         let live = self.is_following.then(|| {
-            let (color, label, key) = match (self.is_follow_paused, row.status) {
-                (true, _) => (theme.text_2, "Paused", "W"),
-                (false, Status::Running) => (theme.accent, "Live", "esc"),
-                (false, _) => (theme.accent, "Full log", "esc"),
+            let (color, label) = match (self.is_follow_paused, row.status) {
+                (true, _) => (theme.text_2, "Paused"),
+                (false, Status::Running) => (theme.accent, "Live"),
+                (false, _) => (theme.accent, "Full log"),
             };
             div()
                 .flex()
@@ -2325,7 +2364,7 @@ impl BoardView {
                 .font_weight(FontWeight::SEMIBOLD)
                 .child(div().size(px(6.)).rounded_full().bg(color))
                 .child(label)
-                .child(kbd(key, theme))
+                .child(kbd("esc", theme))
         });
         let header = div()
             .flex()
@@ -2341,16 +2380,7 @@ impl BoardView {
                     .child("ACTIVITY"),
             )
             .children(live)
-            .when(!self.is_following, |this| {
-                this.child(
-                    div()
-                        .flex()
-                        .p(px(1.))
-                        .rounded(px(6.))
-                        .bg(theme.fill)
-                        .children(segments),
-                )
-            });
+            .when(!self.is_following, |this| this.child(level_button));
         let mut log = div().flex().flex_col().text_size(px(12.5));
         if lines.is_empty() {
             let text = if row.status == Status::Running {
@@ -2409,8 +2439,12 @@ impl BoardView {
             .into_any_element()
     }
 
-    fn callout(label: &str, text: &str, color: Hsla, is_code: bool, theme: &Theme) -> Div {
+    /// A boxed notice with a coloured edge and an uppercase label; callers add the body.
+    fn callout(label: &str, color: Hsla, theme: &Theme) -> Div {
         div()
+            .flex()
+            .flex_col()
+            .gap(px(3.))
             .mb(px(12.))
             .px(px(12.))
             .py(px(9.))
@@ -2420,18 +2454,10 @@ impl BoardView {
             .border_color(color)
             .child(
                 div()
-                    .mb(px(3.))
                     .text_size(px(10.5))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.text_2)
                     .child(label.to_uppercase()),
-            )
-            .child(
-                div()
-                    .when(is_code, |this| {
-                        this.font_family(MONO_FONT).text_size(px(12.))
-                    })
-                    .child(text.to_string()),
             )
     }
 

@@ -1203,12 +1203,6 @@ pub enum ActivityLevel {
 }
 
 impl ActivityLevel {
-    pub const ALL: [ActivityLevel; 3] = [
-        ActivityLevel::Summary,
-        ActivityLevel::Messages,
-        ActivityLevel::All,
-    ];
-
     pub fn label(self) -> &'static str {
         match self {
             ActivityLevel::Summary => "Summary",
