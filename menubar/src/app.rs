@@ -32,7 +32,7 @@ const EXPANDED_PANEL_WIDTH: f64 = 900.0;
 const PANEL_HEIGHT: f64 = 640.0;
 const MIN_PANEL_HEIGHT: f64 = 320.0;
 /// Collapsed-panel layout heights used to fit the panel to its longest group.
-const PANEL_CHROME_HEIGHT: f64 = 134.0;
+const PANEL_CHROME_HEIGHT: f64 = 131.0;
 const LOAD_ERROR_HEIGHT: f64 = 25.0;
 const TOAST_ROW_HEIGHT: f64 = 44.0;
 const CARD_GAP: f32 = 2.0;
@@ -93,7 +93,10 @@ const EXPANDABLE_SECTIONS: [&str; 4] = [
 const MESSAGE_ITEM_LIMIT: usize = 12;
 const STOPPED_MESSAGE_ITEM_LIMIT: usize = 3;
 /// The palette's top offset, search row and margin, subtracted from the panel height for its list.
-const PALETTE_CHROME_HEIGHT: f32 = 112.0;
+/// The palette sits at the panel's top inset, covering the header and tabs whole rather than
+/// cutting through them.
+const PALETTE_TOP: f32 = 8.0;
+const PALETTE_CHROME_HEIGHT: f32 = 58.0;
 const PALETTE_ROW_HEIGHT: f32 = 28.0;
 const PALETTE_HEADING_HEIGHT: f32 = 28.5;
 const PALETTE_LIST_PADDING: f32 = 5.0;
@@ -2089,7 +2092,12 @@ impl BoardView {
                             .pl(px(9.))
                             .pr(px(7.))
                             .rounded(px(8.))
-                            .bg(theme.fill)
+                            // Unused, the field is just its icon and placeholder, so the tabs
+                            // are the first strong shape.
+                            .when(is_filtering || !self.query.is_empty(), |this| {
+                                this.bg(theme.fill)
+                            })
+                            .hover(|style| style.bg(theme.fill))
                             .when(is_filtering, |this| {
                                 this.border_1().border_color(theme.accent)
                             })
@@ -2248,7 +2256,7 @@ impl BoardView {
                 .flex()
                 .gap(px(1.))
                 .mx(px(10.))
-                .mt(px(13.))
+                .mt(px(10.))
                 .mb(px(7.))
                 .p(px(2.))
                 .rounded(px(8.))
@@ -2346,7 +2354,8 @@ impl BoardView {
                     .border_color(gpui::transparent_black()),
                 (false, true) => this
                     .bg(theme.changed)
-                    .border_color(gpui::transparent_black()),
+                    .border_color(gpui::transparent_black())
+                    .hover(|style| style.bg(theme.hover)),
                 (false, false) => this
                     .border_color(gpui::transparent_black())
                     .hover(|style| style.bg(theme.hover)),
@@ -2453,8 +2462,11 @@ impl BoardView {
                 (false, _) => this.px(px(8.)),
             })
             .rounded(px(5.))
-            .bg(theme.accent_fill)
-            .text_color(theme.on_accent)
+            // Filled blue means the keys act here, so a hovered card's action is only tinted.
+            .map(|this| match has_key {
+                true => this.bg(theme.accent_fill).text_color(theme.on_accent),
+                false => this.bg(theme.accent_soft).text_color(theme.accent),
+            })
             .text_size(px(11.5))
             .font_weight(FontWeight::SEMIBOLD)
             .hover(|style| style.opacity(0.9))
@@ -3472,16 +3484,10 @@ impl BoardView {
         if self.palette.is_some() || self.is_sheet_open() {
             return div().h(px(BOTTOM_BAR_HEIGHT)).into_any_element();
         }
-        let done_count = self.column_rows(Column::Done).len();
-        let done_label: AnyElement = if self.is_showing_done {
-            div().child("Hide Done").into_any_element()
+        let done_label = if self.is_showing_done {
+            "Hide Done"
         } else {
-            div()
-                .flex()
-                .gap(px(4.))
-                .child("Show Done")
-                .child(div().text_color(theme.text_3).child(done_count.to_string()))
-                .into_any_element()
+            "Show Done"
         };
         div()
             .flex()
@@ -3635,9 +3641,31 @@ impl BoardView {
     /// Confirmations and errors sit at the bottom, so the task stays visible above; inset on
     /// every side, since a flush sheet in the 900 pt expanded panel would span it.
     fn bottom_sheet(&self, theme: &Theme) -> Div {
+        let dimmed_panel = theme.panel.blend(theme.scrim);
         Self::sheet(theme, self.sheet_width(SMALL_SHEET_MAX_WIDTH))
             .mb(px(12.))
             .rounded(px(12.))
+            .relative()
+            // Fades the card text the sheet's top edge would cut through.
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .bottom(gpui::relative(1.))
+                    .w_full()
+                    .h(px(28.))
+                    .bg(linear_gradient(
+                        180.,
+                        linear_color_stop(
+                            Hsla {
+                                a: 0.,
+                                ..dimmed_panel
+                            },
+                            0.,
+                        ),
+                        linear_color_stop(dimmed_panel, 1.),
+                    )),
+            )
     }
 
     fn render_confirm(
@@ -3663,12 +3691,14 @@ impl BoardView {
             }
             (action, Some(row)) => {
                 let name = board::row_title(row);
-                let follow_up_count =
-                    board::waiting_dependent_count(&self.snapshot.tasks, &row.task_id);
-                let moved = match follow_up_count {
-                    0 => "The task moves to Done.".to_string(),
-                    1 => "It and its waiting follow-up move to Done.".to_string(),
-                    count => format!("It and its {count} waiting follow-ups move to Done."),
+                let follow_ups = board::waiting_dependent_names(&self.snapshot.tasks, &row.task_id);
+                let moved = match follow_ups.as_slice() {
+                    [] => "The task moves to Done.".to_string(),
+                    [name] => format!("This task and its next step, {name}, move to Done."),
+                    names => format!(
+                        "This task and its {} waiting steps move to Done.",
+                        names.len()
+                    ),
                 };
                 let body = match action {
                     Action::Cancel if row.status == Status::Running => {
@@ -4102,7 +4132,7 @@ impl BoardView {
         self.scrim(theme)
             .id("palette")
             .occlude()
-            .pt(px(62.))
+            .pt(px(PALETTE_TOP))
             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                 this.set_palette(None, cx);
                 cx.notify();
@@ -4111,7 +4141,7 @@ impl BoardView {
                 div()
                     .id("palette-box")
                     .relative()
-                    .w(px(370.))
+                    .w(px(self.sheet_width(SMALL_SHEET_MAX_WIDTH)))
                     .rounded(px(12.))
                     .overflow_hidden()
                     .bg(theme.panel)

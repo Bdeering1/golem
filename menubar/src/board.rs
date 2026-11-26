@@ -284,18 +284,19 @@ fn dependent_task_ids<'a>(tasks: &'a Tasks, parent_id: &str) -> Vec<&'a str> {
 }
 
 /// How many waiting follow-up steps `golem cancel` cancels along with this task.
-pub fn waiting_dependent_count(tasks: &Tasks, task_id: &str) -> usize {
-    let mut count = 0;
+/// The names of the waiting steps that follow a task, which move to Done with it.
+pub fn waiting_dependent_names(tasks: &Tasks, task_id: &str) -> Vec<String> {
+    let mut names = Vec::new();
     let mut pending_ids = vec![task_id.to_string()];
     while let Some(parent_id) = pending_ids.pop() {
         for dependent_id in dependent_task_ids(tasks, &parent_id) {
             if tasks[dependent_id].status == Some(Status::Waiting) {
-                count += 1;
+                names.push(chain_step_name(dependent_id, &tasks[dependent_id]));
                 pending_ids.push(dependent_id.to_string());
             }
         }
     }
-    count
+    names
 }
 
 pub fn chain_task_ids(tasks: &Tasks, task_id: &str) -> BTreeSet<String> {

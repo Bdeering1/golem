@@ -93,7 +93,7 @@ impl Theme {
             text_3: rgba(0xffffff80).into(),
             line: rgba(0xffffff1c).into(),
             segment_shadow: rgba(0x00000000).into(),
-            hover: rgba(0xffffff1f).into(),
+            hover: rgba(0xffffff0d).into(),
             fill: rgba(0xffffff17).into(),
             accent: rgba(0x2f8cffff).into(),
             accent_soft: rgba(0x2f8cff33).into(),
