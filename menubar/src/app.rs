@@ -4436,7 +4436,8 @@ impl BoardView {
                 ("N", "Next needing you"),
                 ("\u{23ce}", "Details"),
                 ("esc", "Back"),
-                ("\u{2423} \u{2303}D \u{2303}U", "Scroll"),
+                ("space", "Scroll (\u{21e7} up)"),
+                ("\u{2303}D \u{2303}U", "Scroll down, up"),
             ],
         );
         let board_keys = section(
