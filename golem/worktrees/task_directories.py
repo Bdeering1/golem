@@ -58,10 +58,7 @@ def record_worktree_resource(
     }
     if repository is not None:
         resource["repository"] = repository
-    path = git.resolved_path(worktree)
-    existing = worktrees.get(path)
-    if existing is None or existing.get("removed_at") is not None:
-        worktrees[path] = resource
+    worktrees.setdefault(git.resolved_path(worktree), resource)
 
 
 def worktree_owner_marker_path(worktree: str) -> Path | None:
@@ -116,6 +113,10 @@ def named_codex_worktree_directory_name(task: ledger.Task) -> str | None:
     return None if name is None else name.replace("/", "+")
 
 
+def is_recorded_worktree_overridden(task: ledger.Task) -> bool:
+    return "worktree" not in task and named_codex_worktree_directory_name(task) is not None
+
+
 def is_worktree_left_to_agent(task: ledger.Task) -> bool:
     if task.get("no_worktree"):
         return True
@@ -125,16 +126,15 @@ def is_worktree_left_to_agent(task: ledger.Task) -> bool:
 
 
 def resolved_worktree(tasks: ledger.Tasks, task: ledger.Task) -> tuple[str | None, bool]:
-    named_directory_name = named_codex_worktree_directory_name(task)
     recorded = recorded_worktree(tasks, task)
-    if recorded is not None and (named_directory_name is None or "worktree" in task):
+    if recorded is not None and not is_recorded_worktree_overridden(task):
         return recorded
     if is_worktree_left_to_agent(task):
         return None, False
     common_directory = git.git_common_directory(task["cwd"])
     if common_directory is None or not git.git_has_head(task["cwd"]):
         return None, False
-    directory_name = named_directory_name or task["session_id"]
+    directory_name = named_codex_worktree_directory_name(task) or task["session_id"]
     return str(Path(common_directory).parent / ".claude" / "worktrees" / directory_name), True
 
 
@@ -203,6 +203,8 @@ def create_worktree(task_id: str, task: ledger.Task) -> str | None:
     has_branch = not git.run_git(
         cwd, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"
     ).returncode
+    if has_branch:
+        git.run_git(cwd, "worktree", "prune")
     add_arguments = (
         (worktree, branch) if has_branch else ("--no-track", "-b", branch, worktree, base)
     )

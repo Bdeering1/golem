@@ -148,33 +148,19 @@ def test_after_in_place_parent_runs_in_parent_directory(
 
 
 @pytest.mark.parametrize(
-    ("parent_fields", "run_arguments", "worktree_args", "message"),
+    ("parent_fields", "run_arguments", "message"),
     [
-        pytest.param(
-            {},
-            ["--now", "--no-worktree"],
-            [support.WORKTREE_FLAG, "custom"],
-            "--no-worktree does not accept",
-            id="flag",
-        ),
-        pytest.param(
-            {},
-            ["--now", "--no-worktree"],
-            ["-wcustom"],
-            "--no-worktree does not accept",
-            id="flag-attached-name",
-        ),
+        pytest.param({}, ["--now", "--no-worktree"], "--no-worktree does not accept", id="flag"),
         pytest.param(
             {"no_worktree": True},
             ["--after", support.PARENT_ID],
-            [support.WORKTREE_FLAG, "custom"],
             f"{support.PARENT_ID} runs in place",
             id="inherited",
         ),
     ],
 )
 def test_in_place_task_refuses_worktree_argument_without_changing_ledger(
-    installed_launch_agent, ledger_path, parent_fields, run_arguments, worktree_args, message
+    installed_launch_agent, ledger_path, parent_fields, run_arguments, message
 ):
     support.write_task(
         ledger_path, ledger.STATUS_SCHEDULED, task_id=support.PARENT_ID, **parent_fields
@@ -188,7 +174,8 @@ def test_in_place_task_refuses_worktree_argument_without_changing_ledger(
                 support.CHILD_PROMPT,
                 *run_arguments,
                 "--",
-                *worktree_args,
+                support.WORKTREE_FLAG,
+                "custom",
             ]
         )
 

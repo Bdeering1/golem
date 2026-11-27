@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import shutil
 import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -215,17 +216,19 @@ def test_codex_creates_and_uses_golem_worktree(
     assert ".claude/worktrees/" in exclude_path.read_text(encoding="utf-8").splitlines()
 
 
-@pytest.mark.parametrize("setup", ["new", "existing", "removed", "chained"])
+@pytest.mark.parametrize("setup", ["new", "existing", "removed", "deleted-folder", "chained"])
 def test_codex_named_worktree_runs_in_claude_worktree_directory(
     installed_launch_agent, fake_commands, git_repository, ledger_path, monkeypatch, setup
 ):
     worktree = git_repository / ".claude" / "worktrees" / "feature+login"
-    if setup == "existing":
+    if setup in {"existing", "deleted-folder"}:
         support.git_output(
             git_repository, "worktree", "add", "-qb", "worktree-feature+login", str(worktree)
         )
     if setup == "removed":
         support.git_output(git_repository, "branch", "worktree-feature+login")
+    if setup == "deleted-folder":
+        shutil.rmtree(worktree)
     monkeypatch.chdir(git_repository)
     task_id = support.TASK_ID
     run_arguments = ["run", support.PROMPT, "--backend", "codex", "--now"]

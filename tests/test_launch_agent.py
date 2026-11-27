@@ -408,12 +408,19 @@ def test_agent_does_not_recover_draining_while_a_dependent_is_running(
 
 
 def test_agent_waits_to_start_tasks_until_their_known_directory_is_free(
-    ledger_path, started_task_ids, tmp_path
+    git_repository, ledger_path, started_task_ids, tmp_path
 ):
     worktree = tmp_path / "worktree"
     worktree.mkdir()
     own_worktree_task = support.task_record(
         ledger.STATUS_SCHEDULED, task_id="own-worktree", agent_args=[support.WORKTREE_FLAG, "name"]
+    )
+    named_codex_task = support.task_record(
+        ledger.STATUS_SCHEDULED,
+        task_id="named-codex",
+        backend=ledger.BACKEND_CODEX,
+        cwd=str(git_repository),
+        agent_args=[support.WORKTREE_FLAG, "name"],
     )
     support.write_tasks(
         ledger_path,
@@ -428,11 +435,13 @@ def test_agent_waits_to_start_tasks_until_their_known_directory_is_free(
                 ledger.STATUS_SCHEDULED, task_id=support.SIBLING_ID, after=support.PARENT_ID
             ),
             "own-worktree": own_worktree_task,
+            "named-codex": named_codex_task,
         },
     )
+    named_codex_worktree = git_repository / ".claude" / "worktrees" / "name"
     directory_lock_files = [
         locks.acquire_lock(locks.directory_lock_path(directory))
-        for directory in (str(worktree), str(own_worktree_task["cwd"]))
+        for directory in (str(worktree), own_worktree_task["cwd"], str(named_codex_worktree))
     ]
     try:
         launch_agent.run_launch_agent_pass()
@@ -444,7 +453,12 @@ def test_agent_waits_to_start_tasks_until_their_known_directory_is_free(
 
     launch_agent.run_launch_agent_pass()
 
-    assert started_task_ids == [support.PARENT_ID, support.SIBLING_ID, "own-worktree"]
+    assert started_task_ids == [
+        support.PARENT_ID,
+        support.SIBLING_ID,
+        "own-worktree",
+        "named-codex",
+    ]
 
 
 def test_launch_agent_reaps_finished_executor_while_future_task_is_pending(
