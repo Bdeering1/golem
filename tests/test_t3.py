@@ -54,6 +54,7 @@ FIRST_RUN_ENDED = {
 }
 LATER_RUN = {"id": LATER_RUN_ID, "ordinal": 2, "startedAt": SUBAGENT_ENDED_AT}
 LATER_RUN_ENDED = {**LATER_RUN, "status": "completed", "completedAt": LATER_RUN_ENDED_AT}
+CANCELLED_QUEUED_RUN = {"id": "queued-run", "ordinal": 3, "status": "cancelled", "startedAt": None}
 RUNNING_SUBAGENT = {
     "id": "subagent",
     "runId": FIRST_RUN_ID,
@@ -454,10 +455,16 @@ def test_background_subagent_keeps_task_running_until_the_later_run_ends(
         projection(ENDED_SUBAGENT, runs=[FIRST_RUN_ENDED], sessions=[READY_SESSION]),
         # A session list without a live session doesn't end the wait while a run is active.
         projection(ENDED_SUBAGENT, runs=[FIRST_RUN_ENDED, {**LATER_RUN, "status": "running"}]),
+        # A queued run cancelled before it started doesn't end the wait or stand in for the result.
+        projection(
+            ENDED_SUBAGENT,
+            runs=[FIRST_RUN_ENDED, {**LATER_RUN, "status": "running"}, CANCELLED_QUEUED_RUN],
+            sessions=[READY_SESSION],
+        ),
         projection(
             ENDED_SUBAGENT,
             later_run_message(LATER_REPLY),
-            runs=[FIRST_RUN_ENDED, LATER_RUN_ENDED],
+            runs=[FIRST_RUN_ENDED, LATER_RUN_ENDED, CANCELLED_QUEUED_RUN],
             sessions=[READY_SESSION],
         ),
     ]
@@ -466,6 +473,30 @@ def test_background_subagent_keeps_task_running_until_the_later_run_ends(
 
     assert task["status"] == ledger.STATUS_FINISHED
     assert task["result"] == LATER_REPLY
+
+
+def test_send_cancelled_before_it_starts_fails_task(t3_server, follow_ups, ledger_path):
+    write_send_result(t3_server, 1, error="cancelled")
+    previous_run = {**FIRST_RUN_ENDED, "id": "previous-run"}
+    sent_run = {**CANCELLED_QUEUED_RUN, "id": FIRST_RUN_ID, "ordinal": 2}
+    # A subagent from the earlier run wakes the thread in a run after golem's cancelled send.
+    follow_ups[:] = [
+        projection(
+            {**RUNNING_SUBAGENT, "runId": previous_run["id"]},
+            runs=[previous_run, sent_run],
+            sessions=[READY_SESSION],
+        ),
+        projection(
+            {**ENDED_SUBAGENT, "runId": previous_run["id"]},
+            later_run_message(LATER_REPLY),
+            runs=[previous_run, sent_run, {**LATER_RUN_ENDED, "ordinal": 3}],
+            sessions=[READY_SESSION],
+        ),
+    ]
+
+    task = run_t3_task(ledger_path)
+
+    assert task["status"] == ledger.STATUS_FAILED
 
 
 def test_question_in_later_run_blocks_task(t3_server, follow_ups, ledger_path):

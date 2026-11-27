@@ -29,6 +29,7 @@ DEFAULT_MODELS = {"claudeAgent": "claude-opus-5-5", "codex": "gpt-6-astra"}
 THREAD_MISSING_MESSAGE = "is no longer available"
 EFFORT_OPTION_IDS = {"claudeAgent": "effort", "codex": "reasoningEffort"}
 SETTLE_RACE_MESSAGE = "The thread received another run before settlement."
+CANCELLED_RUN_STATUS = "cancelled"
 SETTLE_BLOCKING_FIELDS = (
     "pinnedAt",
     "snoozedUntil",
@@ -234,6 +235,26 @@ def latest_run(projection: ledger.JsonObject) -> ledger.JsonObject | None:
     return max(runs, key=lambda run: cast("int", run["ordinal"]), default=None)
 
 
+def is_cancelled_before_start(run: ledger.JsonObject) -> bool:
+    return (
+        run.get("status") == CANCELLED_RUN_STATUS
+        and run.get("startedAt") is None
+        and run.get("restartContinuationOfRunId") is None
+    )
+
+
+def latest_run_not_cancelled_before_start(
+    projection: ledger.JsonObject,
+) -> ledger.JsonObject | None:
+    # T3 Code can cancel a queued run before it starts while an earlier run is still active.
+    runs = [
+        run
+        for run in cast("list[ledger.JsonObject]", projection.get("runs", []))
+        if not is_cancelled_before_start(run)
+    ]
+    return max(runs, key=lambda run: cast("int", run["ordinal"]), default=None)
+
+
 def is_thread_settleable(
     thread: ledger.JsonObject, run: ledger.JsonObject | None, finished_at: str
 ) -> bool:
@@ -255,7 +276,7 @@ def settle_idle_thread(
         if is_thread_missing(thread_id):
             return
         raise T3CodeError("the thread projection has no thread")
-    run = latest_run(projection)
+    run = latest_run_not_cancelled_before_start(projection)
     if not is_thread_settleable(cast("ledger.JsonObject", thread), run, finished_at):
         return
     command: ledger.JsonObject = {
@@ -263,8 +284,9 @@ def settle_idle_thread(
         "commandId": str(uuid.uuid4()),
         "threadId": thread_id,
     }
-    if run is not None:
-        command["expectedLatestRunId"] = run["id"]
+    # T3 Code checks this against its highest-ordinal run, including cancelled ones.
+    if (latest := latest_run(projection)) is not None:
+        command["expectedLatestRunId"] = latest["id"]
     try:
         dispatch_command(origin, token, command)
     except T3CodeError as error:
