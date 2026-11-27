@@ -110,6 +110,7 @@ def test_session_field_is_not_recorded_on_a_newer_session(ledger_path):
         pytest.param(["--worktree"], None, [], id="long"),
         pytest.param(["--worktree", "name"], "name", [], id="long-name"),
         pytest.param(["--worktree=name"], "name", [], id="long-equals-name"),
+        pytest.param(["--worktree="], None, [], id="long-equals-empty"),
     ],
 )
 def test_parsed_worktree_arguments_accepts_claude_code_forms(agent_args, name, other_args):

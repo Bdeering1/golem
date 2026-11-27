@@ -49,7 +49,7 @@ def parsed_worktree_arguments(agent_args: list[str]) -> WorktreeArguments:
                 name = agent_args[index]
                 index += 1
         elif argument.startswith(f"{WORKTREE_LONG_ARGUMENT}="):
-            is_present, name = True, argument.removeprefix(f"{WORKTREE_LONG_ARGUMENT}=")
+            is_present, name = True, argument.removeprefix(f"{WORKTREE_LONG_ARGUMENT}=") or None
         elif argument.startswith(WORKTREE_SHORT_ARGUMENT) and not argument.startswith("--"):
             is_present, name = True, argument.removeprefix(WORKTREE_SHORT_ARGUMENT)
         else:
