@@ -15,7 +15,8 @@ USAGE_TIMEOUT_SECONDS = 30
 USAGE_WINDOW_PROMPT = "Reply with the single character: k"
 FULL_UTILIZATION = 100
 USAGE_LIMIT_RESUME_PROMPT = "The usage limit has reset. Continue the task."
-WORKTREE_ARGUMENTS = {"-w", "--worktree"}
+WORKTREE_SHORT_ARGUMENT = "-w"
+WORKTREE_LONG_ARGUMENT = "--worktree"
 
 
 def has_agent_argument(agent_args: list[str], names: set[str]) -> bool:
@@ -24,6 +25,36 @@ def has_agent_argument(agent_args: list[str], names: set[str]) -> bool:
         for argument in agent_args
         for name in names
     )
+
+
+@dataclass(frozen=True)
+class WorktreeArguments:
+    is_present: bool
+    name: str | None
+    other_args: list[str]
+
+
+def parsed_worktree_arguments(agent_args: list[str]) -> WorktreeArguments:
+    """Parse Claude Code's `-w, --worktree [name]` option; the last occurrence wins."""
+    is_present = False
+    name: str | None = None
+    other_args: list[str] = []
+    index = 0
+    while index < len(agent_args):
+        argument = agent_args[index]
+        index += 1
+        if argument in {WORKTREE_SHORT_ARGUMENT, WORKTREE_LONG_ARGUMENT}:
+            is_present, name = True, None
+            if index < len(agent_args) and not agent_args[index].startswith("-"):
+                name = agent_args[index]
+                index += 1
+        elif argument.startswith(f"{WORKTREE_LONG_ARGUMENT}="):
+            is_present, name = True, argument.removeprefix(f"{WORKTREE_LONG_ARGUMENT}=") or None
+        elif argument.startswith(WORKTREE_SHORT_ARGUMENT) and not argument.startswith("--"):
+            is_present, name = True, argument.removeprefix(WORKTREE_SHORT_ARGUMENT)
+        else:
+            other_args.append(argument)
+    return WorktreeArguments(is_present, name, other_args)
 
 
 def is_usage_limit_resume(task: ledger.Task) -> bool:

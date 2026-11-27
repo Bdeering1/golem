@@ -1,6 +1,7 @@
 import json
 import os
 import queue
+import re
 import subprocess
 import threading
 import time
@@ -39,6 +40,8 @@ CODEX_UNSUPPORTED_ARGUMENTS = {
     "--remote",
     "--remote-auth-token-env",
 }
+MAX_WORKTREE_NAME_LENGTH = 64
+WORKTREE_NAME_SEGMENT_PATTERN = re.compile(r"[a-zA-Z0-9._-]+")
 CODEX_PROVIDER_OVERRIDE = 'model_provider="openai"'
 CODEX_PROVIDER_ARGUMENTS = ("-c", CODEX_PROVIDER_OVERRIDE)
 NAME: str = "Codex"
@@ -79,16 +82,37 @@ def has_codex_permission_argument(agent_args: list[str]) -> bool:
     )
 
 
-def reject_unsupported_codex_arguments(agent_args: list[str], *, is_run: bool) -> None:
-    unsupported: set[str] = CODEX_UNSUPPORTED_ARGUMENTS | (
-        common.WORKTREE_ARGUMENTS if is_run else set()
-    )
+def reject_unsupported_codex_arguments(agent_args: list[str]) -> None:
     for argument in agent_args:
-        if argument in unsupported or any(argument.startswith(f"{name}=") for name in unsupported):
+        if argument in CODEX_UNSUPPORTED_ARGUMENTS or any(
+            argument.startswith(f"{name}=") for name in CODEX_UNSUPPORTED_ARGUMENTS
+        ):
             raise SystemExit(f"golem: Codex argument is not supported: {argument}")
     for value in codex_config_values(agent_args):
         if codex_config_key(value) in {"model_provider", "forced_login_method"}:
             raise SystemExit(f"golem: Codex argument is not supported: {value}")
+
+
+def reject_invalid_worktree_name(name: str) -> None:
+    if len(name) > MAX_WORKTREE_NAME_LENGTH:
+        raise SystemExit(
+            "golem: Invalid worktree name: must be "
+            f"{MAX_WORKTREE_NAME_LENGTH} characters or fewer (got {len(name)})"
+        )
+    for segment in name.split("/"):
+        if segment in {".", ".."}:
+            raise SystemExit(
+                f'golem: Invalid worktree name "{name}": must not contain "." or ".." path segments'
+            )
+        if segment.lower().rstrip(".") == ".git":
+            raise SystemExit(
+                f'golem: Invalid worktree name "{name}": "{segment}" is a reserved git directory name'
+            )
+        if not WORKTREE_NAME_SEGMENT_PATTERN.fullmatch(segment):
+            raise SystemExit(
+                f'golem: Invalid worktree name "{name}": each "/"-separated segment must be '
+                "non-empty and contain only letters, digits, dots, underscores, and dashes"
+            )
 
 
 def codex_event_message(event: dict[str, object]) -> str | None:
@@ -108,7 +132,7 @@ def codex_command(task: ledger.Task) -> tuple[list[str], str]:
         "exec",
         "--json",
         "--skip-git-repo-check",
-        *agent_args,
+        *common.parsed_worktree_arguments(agent_args).other_args,
         *default_args,
         *CODEX_PROVIDER_ARGUMENTS,
     ]
@@ -269,12 +293,15 @@ def run(
 
 
 def validate_run_arguments(agent_args: list[str]) -> None:
-    reject_unsupported_codex_arguments(agent_args, is_run=True)
+    reject_unsupported_codex_arguments(agent_args)
+    worktree_name = common.parsed_worktree_arguments(agent_args).name
+    if worktree_name is not None:
+        reject_invalid_worktree_name(worktree_name)
     require_codex_subscription(os.environ.copy())
 
 
 def validate_resume_arguments(agent_args: list[str]) -> None:
-    reject_unsupported_codex_arguments(agent_args, is_run=False)
+    reject_unsupported_codex_arguments(agent_args)
     require_codex_subscription(os.environ.copy())
 
 

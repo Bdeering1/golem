@@ -99,3 +99,19 @@ def test_session_field_is_not_recorded_on_a_newer_session(ledger_path):
     common.record_session_field(support.TASK_ID, "stale-session", "thread_id", "thread")
 
     assert "thread_id" not in support.read_task(ledger_path)
+
+
+@pytest.mark.parametrize(
+    ("agent_args", "name", "other_args"),
+    [
+        pytest.param(["-w", "-m", "x"], None, ["-m", "x"], id="short"),
+        pytest.param(["-w", "name", "-m", "x"], "name", ["-m", "x"], id="short-name"),
+        pytest.param(["-wname"], "name", [], id="attached-name"),
+        pytest.param(["--worktree=name"], "name", [], id="long-equals-name"),
+        pytest.param(["--worktree="], None, [], id="long-equals-empty"),
+    ],
+)
+def test_parsed_worktree_arguments_accepts_claude_code_forms(agent_args, name, other_args):
+    assert common.parsed_worktree_arguments(agent_args) == common.WorktreeArguments(
+        is_present=True, name=name, other_args=other_args
+    )

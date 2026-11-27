@@ -119,6 +119,9 @@ def wake_launch_agent_and_report(task_id: str, when: datetime) -> int:
 
 
 def is_known_directory_busy(tasks: ledger.Tasks, task: ledger.Task) -> bool:
+    if task_directories.is_recorded_worktree_overridden(task):
+        worktree, _ = task_directories.resolved_worktree(tasks, task)
+        return worktree is not None and locks.is_directory_busy(worktree)
     recorded = task_directories.recorded_worktree(tasks, task)
     if recorded is not None:
         directory = recorded[0]
