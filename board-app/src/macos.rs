@@ -14,18 +14,55 @@ const SCREEN_MARGIN: f64 = 10.0;
 /// How far past the item's center the panel's right edge may sit.
 const PANEL_RIGHT_OVERHANG: f64 = 220.0;
 
-/// Signed distance from a point to the golem logo: a rounded head, two eyes and an antenna.
-fn logo_distance(x: f64, y: f64) -> f64 {
-    let (center_x, center_y, half_width, half_height, radius) = (18.0, 20.5, 14.0, 11.5, 5.5);
-    let qx = (x - center_x).abs() - (half_width - radius);
-    let qy = (y - center_y).abs() - (half_height - radius);
-    let outside = qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - radius;
-    let head = outside.abs() - 1.6;
-    let left_eye = (x - 12.5).hypot(y - 20.5) - 2.6;
-    let right_eye = (x - 23.5).hypot(y - 20.5) - 2.6;
-    let antenna_y = y.clamp(2.5, 9.0);
-    let antenna = (x - 18.0).hypot(y - antenna_y) - 1.6;
-    head.min(left_eye).min(right_eye).min(antenna)
+/// The golem logo's outlines: a head and shoulders, then the gem, eyes and chest seam.
+/// A point inside an odd number of them is drawn, so the later ones cut holes in the first two.
+const LOGO_OUTLINES: [&[(f64, f64)]; 6] = [
+    &[
+        (14.0, 1.8),
+        (18.0, 0.8),
+        (22.0, 1.8),
+        (25.6, 6.4),
+        (25.6, 8.2),
+        (28.4, 9.2),
+        (28.4, 15.2),
+        (25.6, 16.2),
+        (24.4, 20.2),
+        (20.2, 22.0),
+        (15.8, 22.0),
+        (11.6, 20.2),
+        (10.4, 16.2),
+        (7.6, 15.2),
+        (7.6, 9.2),
+        (10.4, 8.2),
+        (10.4, 6.4),
+    ],
+    &[
+        (0.8, 35.0),
+        (2.2, 28.6),
+        (10.4, 24.4),
+        (18.0, 27.2),
+        (25.6, 24.4),
+        (33.8, 28.6),
+        (35.2, 35.0),
+    ],
+    &[(18.0, 3.0), (19.8, 5.5), (18.0, 8.0), (16.2, 5.5)],
+    &[(12.4, 10.2), (16.8, 10.2), (16.8, 13.0), (12.4, 13.0)],
+    &[(19.2, 10.2), (23.6, 10.2), (23.6, 13.0), (19.2, 13.0)],
+    &[(17.2, 29.4), (18.8, 29.4), (18.8, 35.0), (17.2, 35.0)],
+];
+
+fn is_in_logo(x: f64, y: f64) -> bool {
+    let mut is_inside = false;
+    for outline in LOGO_OUTLINES {
+        for (index, &(start_x, start_y)) in outline.iter().enumerate() {
+            let (end_x, end_y) = outline[(index + 1) % outline.len()];
+            let crosses_row = (start_y > y) != (end_y > y);
+            if crosses_row && x < start_x + (y - start_y) / (end_y - start_y) * (end_x - start_x) {
+                is_inside = !is_inside;
+            }
+        }
+    }
+    is_inside
 }
 
 fn logo_icon() -> Icon {
@@ -37,7 +74,7 @@ fn logo_icon() -> Icon {
             for sample in 0..ICON_SUPERSAMPLING * ICON_SUPERSAMPLING {
                 let x = f64::from(column) + (f64::from(sample % ICON_SUPERSAMPLING) + 0.5) * step;
                 let y = f64::from(row) + (f64::from(sample / ICON_SUPERSAMPLING) + 0.5) * step;
-                covered += u32::from(logo_distance(x, y) <= 0.0);
+                covered += u32::from(is_in_logo(x, y));
             }
             let alpha = covered * 255 / (ICON_SUPERSAMPLING * ICON_SUPERSAMPLING);
             rgba.extend_from_slice(&[0, 0, 0, alpha as u8]);
