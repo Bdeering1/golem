@@ -178,11 +178,14 @@ def test_codex_usage_limit_resumes_saved_conversation(
     )
 
 
+@pytest.mark.parametrize(
+    "agent_args", [pytest.param([], id="default"), pytest.param(["-w"], id="unnamed-worktree")]
+)
 def test_codex_creates_and_uses_golem_worktree(
-    installed_launch_agent, fake_commands, git_repository, ledger_path, monkeypatch
+    installed_launch_agent, fake_commands, git_repository, ledger_path, monkeypatch, agent_args
 ):
     monkeypatch.chdir(git_repository)
-    cli.main(["run", support.PROMPT, "--backend", "codex", "--now"])
+    cli.main(["run", support.PROMPT, "--backend", "codex", "--now", "--", *agent_args])
     task = support.read_task(ledger_path)
 
     assert cli.main(["_execute", support.TASK_ID, task["session_id"]]) == 0
@@ -210,6 +213,56 @@ def test_codex_creates_and_uses_golem_worktree(
     assert common_directory is not None
     exclude_path = Path(common_directory) / "info" / "exclude"
     assert ".claude/worktrees/" in exclude_path.read_text(encoding="utf-8").splitlines()
+
+
+@pytest.mark.parametrize("setup", ["new", "existing", "removed", "chained"])
+def test_codex_named_worktree_runs_in_claude_worktree_directory(
+    installed_launch_agent, fake_commands, git_repository, ledger_path, monkeypatch, setup
+):
+    worktree = git_repository / ".claude" / "worktrees" / "feature+login"
+    if setup == "existing":
+        support.git_output(
+            git_repository, "worktree", "add", "-qb", "worktree-feature+login", str(worktree)
+        )
+    if setup == "removed":
+        support.git_output(git_repository, "branch", "worktree-feature+login")
+    monkeypatch.chdir(git_repository)
+    task_id = support.TASK_ID
+    run_arguments = ["run", support.PROMPT, "--backend", "codex", "--now"]
+    if setup == "chained":
+        cli.main(run_arguments)
+        parent = support.read_task(ledger_path)
+        assert cli.main(["_execute", support.TASK_ID, parent["session_id"]]) == 0
+        task_id = support.CHILD_ID
+        run_arguments = ["run", support.CHILD_PROMPT, "--backend", "codex"]
+        run_arguments += ["--after", support.PARENT_ID]
+    cli.main([*run_arguments, "--", "-w", "feature/login"])
+    task = support.read_task(ledger_path, task_id)
+
+    assert cli.main(["_execute", task_id, task["session_id"]]) == 0
+
+    assert support.git_output(worktree, "branch", "--show-current") == "worktree-feature+login"
+    assert fake_commands["codex-cwd"].read_text(encoding="utf-8").splitlines()[-1] == str(worktree)
+    codex_args = logged_codex_args(fake_commands)
+    assert "-w" not in codex_args
+    assert "feature/login" not in codex_args
+    resource = ledger.load_worktrees()[str(worktree.resolve())]
+    assert resource["owner"] == task_directories.WORKTREE_OWNER_EXTERNAL
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        pytest.param("a" * 65, id="too-long"),
+        pytest.param("feature/..", id="parent-segment"),
+        pytest.param("x/.GIT.", id="git-directory"),
+        pytest.param("feature//login", id="empty-segment"),
+        pytest.param("feature login", id="space"),
+    ],
+)
+def test_codex_run_rejects_invalid_worktree_name(installed_launch_agent, name):
+    with pytest.raises(SystemExit, match="Invalid worktree name"):
+        cli.main(["run", support.PROMPT, "--backend", "codex", "--now", "--", f"--worktree={name}"])
 
 
 @pytest.mark.parametrize(
@@ -277,7 +330,6 @@ def test_codex_rejects_api_key_accounts_before_execution(
             "forced_login_method=api",
             id="login-config",
         ),
-        pytest.param(["--worktree"], "--worktree", id="worktree"),
     ],
 )
 def test_codex_run_rejects_billing_bypass_arguments(installed_launch_agent, agent_args, argument):

@@ -51,14 +51,17 @@ def record_worktree_resource(
     repository: str | None = None,
 ) -> None:
     if owner == WORKTREE_OWNER_EXTERNAL:
-        repository = git.git_common_directory(worktree)
+        repository = git.git_common_directory(worktree) or repository
     resource: ledger.WorktreeResource = {
         "owner": owner,
         "session_id": session_id,
     }
     if repository is not None:
         resource["repository"] = repository
-    worktrees.setdefault(git.resolved_path(worktree), resource)
+    path = git.resolved_path(worktree)
+    existing = worktrees.get(path)
+    if existing is None or existing.get("removed_at") is not None:
+        worktrees[path] = resource
 
 
 def worktree_owner_marker_path(worktree: str) -> Path | None:
@@ -106,22 +109,33 @@ def record_created_worktree_owner(task_id: str, task: ledger.Task) -> None:
             print(f"golem: could not record worktree ownership: {error}", file=sys.stderr)
 
 
+def named_codex_worktree_directory_name(task: ledger.Task) -> str | None:
+    if task["backend"] != ledger.BACKEND_CODEX:
+        return None
+    name = common.parsed_worktree_arguments(task["agent_args"]).name
+    return None if name is None else name.replace("/", "+")
+
+
 def is_worktree_left_to_agent(task: ledger.Task) -> bool:
-    return bool(task.get("no_worktree")) or common.has_agent_argument(
-        task["agent_args"], common.WORKTREE_ARGUMENTS
+    if task.get("no_worktree"):
+        return True
+    return task["backend"] != ledger.BACKEND_CODEX and (
+        common.parsed_worktree_arguments(task["agent_args"]).is_present
     )
 
 
 def resolved_worktree(tasks: ledger.Tasks, task: ledger.Task) -> tuple[str | None, bool]:
+    named_directory_name = named_codex_worktree_directory_name(task)
     recorded = recorded_worktree(tasks, task)
-    if recorded is not None:
+    if recorded is not None and (named_directory_name is None or "worktree" in task):
         return recorded
     if is_worktree_left_to_agent(task):
         return None, False
     common_directory = git.git_common_directory(task["cwd"])
     if common_directory is None or not git.git_has_head(task["cwd"]):
         return None, False
-    return str(Path(common_directory).parent / ".claude" / "worktrees" / task["session_id"]), True
+    directory_name = named_directory_name or task["session_id"]
+    return str(Path(common_directory).parent / ".claude" / "worktrees" / directory_name), True
 
 
 def worktree_missing_message(
@@ -185,16 +199,14 @@ def create_worktree(task_id: str, task: ledger.Task) -> str | None:
     base = git.ORIGIN_HEAD
     if git.run_git(cwd, "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}").returncode:
         base = "HEAD"
-    result = git.run_git(
-        cwd,
-        "worktree",
-        "add",
-        "--no-track",
-        "-b",
-        f"worktree-{Path(worktree).name}",
-        worktree,
-        base,
+    branch = f"worktree-{Path(worktree).name}"
+    has_branch = not git.run_git(
+        cwd, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"
+    ).returncode
+    add_arguments = (
+        (worktree, branch) if has_branch else ("--no-track", "-b", branch, worktree, base)
     )
+    result = git.run_git(cwd, "worktree", "add", *add_arguments)
     if result.returncode:
         error = result.stderr.strip() or result.stdout.strip()
         return f"golem: could not create worktree: {error}"

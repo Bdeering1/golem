@@ -153,19 +153,22 @@ def claim_task(
     task_directories.record_resolved_worktree(
         task, worktree, is_worktree_pending=is_worktree_pending
     )
-    if recorded is None and worktree is not None:
+    if worktree is not None and (recorded is None or recorded[0] != worktree):
         repository = git.git_common_directory(task["cwd"])
         if repository is not None:
-            if task.get("worktree_pending") is True:
-                task_directories.record_worktree_resource(
-                    worktrees,
-                    worktree,
-                    session_id,
-                    owner=task_directories.WORKTREE_OWNER_GOLEM,
-                    repository=repository,
-                )
-            else:
-                task_directories.record_worktree_resource(worktrees, worktree, session_id)
+            is_golem_owned = (
+                task.get("worktree_pending") is True
+                and task_directories.named_codex_worktree_directory_name(task) is None
+            )
+            task_directories.record_worktree_resource(
+                worktrees,
+                worktree,
+                session_id,
+                owner=task_directories.WORKTREE_OWNER_GOLEM
+                if is_golem_owned
+                else task_directories.WORKTREE_OWNER_EXTERNAL,
+                repository=repository,
+            )
     task_directories.clear_worktree_release(tasks, worktrees, task)
     progress_log.progress_path(session_id).parent.mkdir(parents=True, exist_ok=True)
     progress_log.progress_path(session_id).touch()

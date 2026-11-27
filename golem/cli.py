@@ -230,7 +230,7 @@ def run_task_from_arguments(arguments: ledger.Arguments) -> int:
         setup=arguments.setup,
         account=account,
     )
-    has_worktree_argument = common.has_agent_argument(list(task_args), common.WORKTREE_ARGUMENTS)
+    has_worktree_argument = common.parsed_worktree_arguments(list(task_args)).is_present
     parent = ledger.load_tasks().get(arguments.after) if isinstance(arguments.after, str) else None
     if parent is not None and parent.get("no_worktree"):
         placement = replace(placement, cwd=parent["cwd"], is_no_worktree=True)
