@@ -1517,7 +1517,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "golem-board-app"
+name = "golem-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
