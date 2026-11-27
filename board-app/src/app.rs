@@ -640,6 +640,9 @@ impl BoardView {
     /// Keeps the palette on the same command when a reload reorders the selected task's
     /// actions, so Return doesn't run whichever command slid under the highlight.
     fn keep_palette_highlight(&mut self, highlighted: Option<Command>) {
+        if self.palette.is_none() {
+            return;
+        }
         let items = self.palette_items();
         let Some(palette) = self.palette.as_mut() else {
             return;

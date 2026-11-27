@@ -26,6 +26,7 @@ pub const PULL_REQUEST_STATE_OPEN: &str = "open";
 const DONE_THREAD_STATES: [&str; 3] = ["settled", "archived", "deleted"];
 const THREAD_STATE_UNSETTLED: &str = "unsettled";
 const THREAD_OPEN_TEXT: &str = "thread open, no PR";
+const THREAD_DETAIL_PREFIX: &str = "thread ";
 pub const SHELL_PROMPT: &str = "$ ";
 
 static EXIT_PREFIX_PATTERN: LazyLock<Regex> =
@@ -607,7 +608,7 @@ fn finished_chain_column(
         } else {
             Column::Review
         };
-        return (column, format!("thread {thread_state}"));
+        return (column, format!("{THREAD_DETAIL_PREFIX}{thread_state}"));
     }
     let finished_at = chain_ids
         .iter()
@@ -1099,7 +1100,7 @@ pub fn row_reason(row: &Row, snapshot: &Snapshot) -> String {
                 .split(FINISHED_AGE_SEPARATOR)
                 .next()
                 .unwrap_or("");
-            if detail == format!("thread {THREAD_STATE_UNSETTLED}") {
+            if detail.strip_prefix(THREAD_DETAIL_PREFIX) == Some(THREAD_STATE_UNSETTLED) {
                 THREAD_OPEN_TEXT.to_string()
             } else {
                 detail.to_string()
