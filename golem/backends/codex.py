@@ -228,7 +228,8 @@ def run_codex(
             return 1, str(error), False
         if error := task_directories.prepare_worktree(task_id, task):
             return 1, error, False
-        if common.is_usage_limit_resume(task) and not isinstance(task.get("thread_id"), str):
+        is_resume = common.is_usage_limit_resume(task)
+        if is_resume and not isinstance(task.get("thread_id"), str):
             return 1, "golem: task has no Codex conversation", False
         command, prompt = codex_command(task)
         naming_workers: list[threading.Thread] = []
@@ -267,7 +268,7 @@ def run_codex(
                     task_id,
                     session_id,
                     record_progress,
-                    None if common.is_usage_limit_resume(task) else start_thread_naming,
+                    None if is_resume else start_thread_naming,
                 )
                 returncode = process.wait()
                 for naming_worker in naming_workers:
@@ -403,11 +404,13 @@ def codex_app_server_responses(
             daemon=True,
         )
         response_reader.start()
-        requests = codex_app_server_requests(requests)
-        standard_input.write("".join(json.dumps(request) + "\n" for request in requests))
+        session_requests = codex_app_server_requests(requests)
+        standard_input.write("".join(json.dumps(request) + "\n" for request in session_requests))
         standard_input.flush()
         responses: AppServerResponses = {}
-        required_ids = {request["id"] for request in requests if isinstance(request.get("id"), int)}
+        required_ids = {
+            request["id"] for request in session_requests if isinstance(request.get("id"), int)
+        }
         deadline = time.monotonic() + common.USAGE_TIMEOUT_SECONDS
         while required_ids - responses.keys():
             response = codex_app_server_response(response_lines, deadline)
