@@ -17,8 +17,12 @@ def logged_codex_calls(fake_commands):
     return support.logged_calls(fake_commands, "codex")
 
 
+def logged_codex_agent_calls(fake_commands):
+    return [call for call in logged_codex_calls(fake_commands) if call[0] != "app-server"]
+
+
 def logged_codex_args(fake_commands):
-    calls = [call for call in logged_codex_calls(fake_commands) if call[0] != "app-server"]
+    calls = logged_codex_agent_calls(fake_commands)
     return calls[-1] if calls else []
 
 
@@ -566,7 +570,7 @@ def test_mixed_backend_chain_shares_worktree_and_uses_fresh_conversations(
     codex_executions = [
         (call, cwd)
         for call, cwd in zip(
-            [call for call in logged_codex_calls(fake_commands) if call[0] != "app-server"],
+            logged_codex_agent_calls(fake_commands),
             codex_cwds,
             strict=True,
         )

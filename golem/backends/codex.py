@@ -158,15 +158,15 @@ def update_codex_event_state(
     session_id: str,
     state: CodexEventState,
     record_progress: Callable[[str], None],
-    name_thread: Callable[[str], None] | None,
+    start_thread_naming: Callable[[str], None] | None,
 ) -> None:
     event_type = event.get("type")
     if event_type == "thread.started":
         thread_id = event.get("thread_id")
         if isinstance(thread_id, str):
             common.record_session_field(task_id, session_id, "thread_id", thread_id)
-            if name_thread is not None:
-                name_thread(thread_id)
+            if start_thread_naming is not None:
+                start_thread_naming(thread_id)
         return
     if event_type == "item.completed":
         item = event.get("item")
@@ -193,7 +193,7 @@ def read_codex_events(
     task_id: str,
     session_id: str,
     record_progress: Callable[[str], None],
-    name_thread: Callable[[str], None] | None,
+    start_thread_naming: Callable[[str], None] | None,
 ) -> CodexEventState:
     state = CodexEventState()
     output = cast("io.TextIOWrapper", process.stdout)
@@ -210,7 +210,7 @@ def read_codex_events(
                     session_id,
                     state,
                     record_progress,
-                    name_thread,
+                    start_thread_naming,
                 )
     finally:
         output.close()
@@ -231,16 +231,16 @@ def run_codex(
         if common.is_usage_limit_resume(task) and not isinstance(task.get("thread_id"), str):
             return 1, "golem: task has no Codex conversation", False
         command, prompt = codex_command(task)
-        naming_threads: list[threading.Thread] = []
+        naming_workers: list[threading.Thread] = []
 
-        def name_thread(thread_id: str) -> None:
-            naming_thread = threading.Thread(
+        def start_thread_naming(thread_id: str) -> None:
+            naming_worker = threading.Thread(
                 target=name_codex_thread,
                 args=(thread_id, ledger.task_name(task_id, task), spawn.task_environment(task)),
                 daemon=True,
             )
-            naming_thread.start()
-            naming_threads.append(naming_thread)
+            naming_worker.start()
+            naming_workers.append(naming_worker)
 
         process = subprocess.Popen(
             command,
@@ -267,11 +267,11 @@ def run_codex(
                     task_id,
                     session_id,
                     record_progress,
-                    None if common.is_usage_limit_resume(task) else name_thread,
+                    None if common.is_usage_limit_resume(task) else start_thread_naming,
                 )
                 returncode = process.wait()
-                for naming_thread in naming_threads:
-                    naming_thread.join()
+                for naming_worker in naming_workers:
+                    naming_worker.join()
             except BaseException:
                 process.kill()
                 process.wait()
