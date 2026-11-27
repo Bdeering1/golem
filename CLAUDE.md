@@ -10,4 +10,4 @@
 
 ## Issue tracker
 
-Issues are tracked in GitHub Issues (Bdeering1/golem) via the `gh` CLI.
+Issues live in GitHub Issues (Bdeering1/golem).
