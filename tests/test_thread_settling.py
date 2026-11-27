@@ -17,7 +17,6 @@ SETTLE_COMMAND = {
 def write_chain(
     ledger_path,
     *,
-    parent_fields=None,
     child_status=ledger.STATUS_WAITING,
     waiting_task_parents=None,
     **child_fields: object,
@@ -28,7 +27,6 @@ def write_chain(
             task_id=support.PARENT_ID,
             t3_code_thread_id=t3_support.CLAUDE_THREAD_ID,
             finished_at=PARENT_FINISHED_AT,
-            **(parent_fields or {}),
         ),
         support.CHILD_ID: support.task_record(
             child_status, task_id=support.CHILD_ID, after=support.PARENT_ID, **child_fields

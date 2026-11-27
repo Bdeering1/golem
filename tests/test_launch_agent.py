@@ -33,7 +33,7 @@ PULL_REQUEST_URL = "https://github.com/owner/repository/pull/1"
 THREAD_PRESENT_MARKER = "thread-present"
 THREAD_SHOW_ERROR_MARKER = "thread-show-error"
 UNREACHABLE_THREAD = "unreachable"
-FINISHED_PARENT_ID = "finished-parent"
+OTHER_PARENT_ID = "other-parent"
 
 
 class FinishedProcess:
@@ -240,24 +240,18 @@ def test_launch_agent_pass_leaves_running_executor_alone(
         ),
         pytest.param(
             {
-                support.PARENT_ID: support.task_record(
-                    ledger.STATUS_FAILED, task_id=support.PARENT_ID
-                ),
-                support.TASK_ID: support.task_record(
-                    ledger.STATUS_WAITING, after=support.PARENT_ID
-                ),
+                OTHER_PARENT_ID: support.task_record(ledger.STATUS_FAILED, task_id=OTHER_PARENT_ID),
+                support.TASK_ID: support.task_record(ledger.STATUS_WAITING, after=OTHER_PARENT_ID),
             },
             0,
             id="waiting-on-failed-parent",
         ),
         pytest.param(
             {
-                FINISHED_PARENT_ID: support.task_record(
-                    ledger.STATUS_FINISHED, task_id=FINISHED_PARENT_ID
+                OTHER_PARENT_ID: support.task_record(
+                    ledger.STATUS_FINISHED, task_id=OTHER_PARENT_ID
                 ),
-                support.TASK_ID: support.task_record(
-                    ledger.STATUS_WAITING, after=FINISHED_PARENT_ID
-                ),
+                support.TASK_ID: support.task_record(ledger.STATUS_WAITING, after=OTHER_PARENT_ID),
             },
             1,
             id="waiting-on-succeeded-parent",
