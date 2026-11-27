@@ -95,10 +95,10 @@ const EXPANDABLE_SECTIONS: [&str; 4] = [
 ];
 const MESSAGE_ITEM_LIMIT: usize = 12;
 const STOPPED_MESSAGE_ITEM_LIMIT: usize = 3;
-/// The palette's top offset, search row and margin, subtracted from the panel height for its list.
 /// The palette sits at the panel's top inset, covering the header and tabs whole rather than
 /// cutting through them.
 const SHEET_TOP: f32 = 8.0;
+/// The palette's top offset, search row and margin, subtracted from the panel height for its list.
 const PALETTE_CHROME_HEIGHT: f32 = 58.0;
 const PALETTE_LIST_MAX_HEIGHT: f32 = 420.0;
 /// Added to the chrome's margin so a palette that grew the panel ends 12 pt from its edge.
@@ -146,7 +146,7 @@ enum Command {
     CopyResult,
     /// Lists the copy commands that an empty search folds into one row.
     ShowCopies,
-    /// Changes the zoom by this many percent, or resets it when zero.
+    /// Steps the zoom in this direction, or resets it when zero.
     Zoom(i32),
     Quit,
 }
@@ -260,7 +260,7 @@ pub struct BoardView {
     toast_count: u64,
     busy_actions: HashMap<String, Action>,
     action_errors: HashMap<String, ActionError>,
-    pull_request_presses: HashMap<String, usize>,
+    pull_request_press_counts: HashMap<String, usize>,
     changed_until: HashMap<String, Instant>,
     detail_activity: Option<(String, Vec<String>)>,
     hidden_at: Option<Instant>,
@@ -452,7 +452,7 @@ impl BoardView {
             toast_count: 0,
             busy_actions: HashMap::new(),
             action_errors: HashMap::new(),
-            pull_request_presses: HashMap::new(),
+            pull_request_press_counts: HashMap::new(),
             changed_until: HashMap::new(),
             detail_activity: None,
             hidden_at: None,
@@ -471,10 +471,15 @@ impl BoardView {
         match ledger::load_tasks() {
             Ok(tasks) => {
                 let selected_index = self.selected_index();
+                let highlighted = self.palette.as_ref().and_then(|palette| {
+                    let items = self.palette_items();
+                    items.get(palette.index).map(|item| item.command)
+                });
                 let snapshot = board::board_snapshot(tasks, Local::now());
                 let previous = std::mem::replace(&mut self.snapshot, snapshot);
                 self.note_changes(&previous, cx);
                 self.keep_selection_position(selected_index);
+                self.keep_palette_highlight(highlighted);
                 self.load_error = None;
                 self.loaded_at = Some(Local::now());
             }
@@ -559,6 +564,7 @@ impl BoardView {
         if let Some(row) = moved {
             self.tab = row.column;
             self.selected_roots.insert(row.column, row.root_id.clone());
+            self.reveal_selected();
             let name = board::task_display_name(&self.snapshot.tasks, &row.task_id);
             self.show_toast(
                 format!(
@@ -605,6 +611,10 @@ impl BoardView {
             .copied()
     }
 
+    fn row_for_task(&self, task_id: &str) -> Option<&Row> {
+        self.snapshot.rows.iter().find(|row| row.task_id == task_id)
+    }
+
     fn selected_index(&self) -> Option<usize> {
         let selected = self.selected_row()?.root_id.clone();
         self.column_rows(self.tab)
@@ -624,6 +634,25 @@ impl BoardView {
         };
         let root_id = rows[index.min(last)].root_id.clone();
         self.selected_roots.insert(self.tab, root_id);
+        self.reveal_selected();
+    }
+
+    /// Keeps the palette on the same command when a reload changes the selected task's actions,
+    /// so Return never runs a command that slid under the highlight.
+    fn keep_palette_highlight(&mut self, highlighted: Option<Command>) {
+        let items = self.palette_items();
+        let Some(palette) = self.palette.as_mut() else {
+            return;
+        };
+        let index = items
+            .iter()
+            .position(|item| Some(item.command) == highlighted);
+        if index == Some(palette.index) {
+            return;
+        }
+        palette.index = index.unwrap_or(0);
+        self.palette_scroll
+            .scroll_to_item(palette_child_index(&items, palette.index));
     }
 
     fn needs_you(&self, row: &Row) -> bool {
@@ -1136,16 +1165,21 @@ impl BoardView {
         self.paused_lines = self.selected_activity();
     }
 
-    fn scroll_by(&mut self, delta: f32) {
-        if delta < 0. {
-            self.pause_follow();
+    /// Page keys scroll the details, or in the list move the selection by a page, as in the
+    /// TUI, so action keys never act on a card scrolled off screen.
+    fn page(&mut self, direction: isize, cx: &mut Context<Self>) {
+        if self.is_expanded {
+            if direction < 0 {
+                self.pause_follow();
+            }
+            scroll_handle_by(&self.detail_scroll, direction as f32 * SCROLL_STEP);
+            return;
         }
-        let handle = if self.is_expanded {
-            &self.detail_scroll
-        } else {
-            &self.list_scroll
-        };
-        scroll_handle_by(handle, delta);
+        let list_height = self.panel_height() - PANEL_CHROME_HEIGHT - self.load_error_height();
+        let page_size = (list_height / CARD_PITCH).floor().max(1.) as isize;
+        let input = self.input;
+        self.move_selection(direction * page_size, cx);
+        self.input = input;
     }
 
     /// The time the board's durations count to, held at the last good read while the ledger
@@ -1163,10 +1197,10 @@ impl BoardView {
         };
         let seconds = (Local::now() - loaded_at).num_seconds();
         if seconds < 60 {
-            return "Can't read the ledger \u{b7} last read just now".to_string();
+            return format!("{LOAD_ERROR_TITLE} \u{b7} last read just now");
         }
         let age = board::duration_text(seconds as f64);
-        format!("Can't read the ledger \u{b7} last read {age} ago")
+        format!("{LOAD_ERROR_TITLE} \u{b7} last read {age} ago")
     }
 
     /// While the filter is edited, letter keys type, so bare-letter keycaps hide.
@@ -1205,11 +1239,7 @@ impl BoardView {
         // ⇧C on one finished task you've opened closes it at once, as C does.
         let closable_ids = board::closable_task_ids(&self.snapshot);
         let only_closable = match closable_ids.as_slice() {
-            [task_id] => self
-                .snapshot
-                .rows
-                .iter()
-                .find(|row| &row.task_id == task_id),
+            [task_id] => self.row_for_task(task_id),
             _ => None,
         };
         if action == Action::CloseAll
@@ -1295,13 +1325,9 @@ impl BoardView {
             self.close_finished(pending.closing_ids, cx);
             return;
         }
-        let row = pending.task_id.and_then(|task_id| {
-            self.snapshot
-                .rows
-                .iter()
-                .find(|row| row.task_id == task_id)
-                .cloned()
-        });
+        let row = pending
+            .task_id
+            .and_then(|task_id| self.row_for_task(&task_id).cloned());
         if let Some(row) = row {
             self.perform(pending.action, &row, cx);
         }
@@ -1335,11 +1361,7 @@ impl BoardView {
                             .selected_row()
                             .is_none_or(|row| row.task_id != *task_id) =>
                     {
-                        let row = this
-                            .snapshot
-                            .rows
-                            .iter()
-                            .find(|row| row.task_id == *task_id);
+                        let row = this.row_for_task(task_id);
                         let name = row.map_or(task_id.as_str(), board::row_title).to_string();
                         this.show_toast(format!("{name}: {}", outcome.message), cx)
                     }
@@ -1363,7 +1385,7 @@ impl BoardView {
         message: String,
         cx: &mut Context<Self>,
     ) {
-        let row = self.snapshot.rows.iter().find(|row| row.task_id == task_id);
+        let row = self.row_for_task(task_id);
         let name = row.map_or(task_id, board::row_title).to_string();
         if !(self.is_visible() && self.is_card_on_screen(task_id)) {
             self.show_message(
@@ -1380,7 +1402,7 @@ impl BoardView {
 
     /// Shows a task's details, switching to its group.
     fn open_task(&mut self, task_id: &str, cx: &mut Context<Self>) {
-        let Some(row) = self.snapshot.rows.iter().find(|row| row.task_id == task_id) else {
+        let Some(row) = self.row_for_task(task_id) else {
             return;
         };
         let (column, root_id) = (row.column, row.root_id.clone());
@@ -1416,9 +1438,9 @@ impl BoardView {
             Action::OpenPullRequest => {
                 let mut pull_requests = board::row_pull_requests(&self.snapshot, row);
                 pull_requests.sort_by_key(|pr| pr.state != board::PULL_REQUEST_STATE_OPEN);
-                let presses = self.pull_request_presses.entry(task_id).or_insert(0);
-                let press = *presses % pull_requests.len().max(1);
-                *presses += 1;
+                let press_count = self.pull_request_press_counts.entry(task_id).or_insert(0);
+                let press = *press_count % pull_requests.len().max(1);
+                *press_count += 1;
                 let Some(pull_request) = pull_requests.get(press).cloned() else {
                     return;
                 };
@@ -1457,16 +1479,23 @@ impl BoardView {
         }
     }
 
-    /// Closes the listed tasks that are still finished in Review.
-    fn close_finished(&mut self, mut task_ids: Vec<String>, cx: &mut Context<Self>) {
+    /// The listed tasks that are still finished in Review and not already busy.
+    fn still_closable_ids(&self, task_ids: &[String]) -> Vec<String> {
+        let closable_ids = board::closable_task_ids(&self.snapshot);
+        (task_ids.iter())
+            .filter(|task_id| {
+                closable_ids.contains(task_id) && !self.busy_actions.contains_key(*task_id)
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn close_finished(&mut self, task_ids: Vec<String>, cx: &mut Context<Self>) {
         let Some(golem) = self.golem.clone() else {
             self.show_toast(GOLEM_MISSING_TEXT, cx);
             return;
         };
-        let closable_ids = board::closable_task_ids(&self.snapshot);
-        task_ids.retain(|task_id| {
-            closable_ids.contains(task_id) && !self.busy_actions.contains_key(task_id)
-        });
+        let task_ids = self.still_closable_ids(&task_ids);
         if task_ids.is_empty() {
             return;
         }
@@ -1477,11 +1506,7 @@ impl BoardView {
         let names: Vec<(String, String)> = task_ids
             .iter()
             .map(|task_id| {
-                let row = self
-                    .snapshot
-                    .rows
-                    .iter()
-                    .find(|row| row.task_id == *task_id);
+                let row = self.row_for_task(task_id);
                 let name = row.map_or(task_id.as_str(), board::row_title);
                 (task_id.clone(), name.to_string())
             })
@@ -1827,8 +1852,8 @@ impl BoardView {
                     scroll_handle_by(&self.error_scroll, delta);
                 }
                 "d" | "u" if self.palette.is_some() || self.is_sheet_open() => return,
-                "d" => self.scroll_by(SCROLL_STEP),
-                "u" => self.scroll_by(-SCROLL_STEP),
+                "d" => self.page(1, cx),
+                "u" => self.page(-1, cx),
                 "n" | "j" => self.move_while_typing(1, window, cx),
                 "p" | "k" => self.move_while_typing(-1, window, cx),
                 _ => return,
@@ -1897,7 +1922,7 @@ impl BoardView {
         } else if key == "tab" && modifiers.shift {
             self.move_tab(-1, cx);
         } else if key == "space" && modifiers.shift {
-            self.scroll_by(-SCROLL_STEP);
+            self.page(-1, cx);
         } else if event.is_held && ACTIONS.iter().any(|action| action.key() == typed) {
             // A held action key would act again on each task the selection moves on to.
         } else {
@@ -2063,8 +2088,8 @@ impl BoardView {
             ("left", _) | (_, "h") => self.move_tab(-1, cx),
             ("home", _) | (_, "g") => self.move_selection(isize::MIN / 2, cx),
             ("end", _) | (_, "G") => self.move_selection(isize::MAX / 2, cx),
-            ("space" | "pagedown", _) => self.scroll_by(SCROLL_STEP),
-            ("pageup", _) => self.scroll_by(-SCROLL_STEP),
+            ("space" | "pagedown", _) => self.page(1, cx),
+            ("pageup", _) => self.page(-1, cx),
             (KEY_ENTER, _) => self.set_expanded(!self.is_expanded, cx),
             (_, "1" | "2" | "3" | "4") => {
                 let index = typed.parse::<usize>().unwrap_or(1) - 1;
@@ -3474,10 +3499,7 @@ impl BoardView {
             .into_iter()
             .filter(|(label, _)| !(*label == "Gate" && is_gate_in_callout));
         for (label, value) in fields {
-            let is_code = matches!(
-                label,
-                "Directory" | "Worktree" | "Branch" | "Session" | "Gate" | "Setup"
-            );
+            let is_code = COPYABLE_FIELDS.iter().any(|(field, _)| *field == label);
             grid = grid.child(
                 div()
                     .flex()
@@ -4207,22 +4229,15 @@ impl BoardView {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let row = pending.task_id.as_ref().and_then(|task_id| {
-            self.snapshot
-                .rows
-                .iter()
-                .find(|row| &row.task_id == task_id)
-        });
+        let row = pending
+            .task_id
+            .as_ref()
+            .and_then(|task_id| self.row_for_task(task_id));
         let (title, body, verb) = match (pending.action, row) {
             (Action::CloseAll, _) => {
-                let closable_ids = board::closable_task_ids(&self.snapshot);
-                let task_ids: Vec<&String> = (pending.closing_ids.iter())
-                    .filter(|task_id| {
-                        closable_ids.contains(task_id) && !self.busy_actions.contains_key(*task_id)
-                    })
-                    .collect();
+                let task_ids = self.still_closable_ids(&pending.closing_ids);
                 let rows: Vec<&Row> = (self.snapshot.rows.iter())
-                    .filter(|row| task_ids.contains(&&row.task_id))
+                    .filter(|row| task_ids.contains(&row.task_id))
                     .collect();
                 let names: Vec<&str> = rows.iter().map(|row| board::row_title(row)).collect();
                 let unopened_count = rows.iter().filter(|row| self.needs_you(row)).count();

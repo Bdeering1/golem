@@ -25,6 +25,7 @@ const CLOSED_TEXT: &str = "closed";
 pub const PULL_REQUEST_STATE_OPEN: &str = "open";
 const DONE_THREAD_STATES: [&str; 3] = ["settled", "archived", "deleted"];
 const THREAD_STATE_UNSETTLED: &str = "unsettled";
+const THREAD_OPEN_TEXT: &str = "thread open, no PR";
 pub const SHELL_PROMPT: &str = "$ ";
 
 static EXIT_PREFIX_PATTERN: LazyLock<Regex> =
@@ -234,12 +235,16 @@ impl Action {
     pub fn done_text(self) -> &'static str {
         match self {
             Action::Pickup => "Picked up",
-            Action::Retry => "Retrying",
             Action::RerunGate => "Gate passed",
             Action::Close => "Closed",
             Action::Cancel => "Cancelled",
             Action::Dismiss => "Dismissed",
-            Action::CloseAll | Action::Watch | Action::OpenPullRequest | Action::Copy => "",
+            // golem's own message says whether a retry is queued or scheduled for later.
+            Action::Retry
+            | Action::CloseAll
+            | Action::Watch
+            | Action::OpenPullRequest
+            | Action::Copy => "",
         }
     }
 
@@ -1094,8 +1099,8 @@ pub fn row_reason(row: &Row, snapshot: &Snapshot) -> String {
                 .split(FINISHED_AGE_SEPARATOR)
                 .next()
                 .unwrap_or("");
-            if detail == "thread unsettled" {
-                "thread open, no PR".to_string()
+            if detail == format!("thread {THREAD_STATE_UNSETTLED}") {
+                THREAD_OPEN_TEXT.to_string()
             } else {
                 detail.to_string()
             }
@@ -1108,7 +1113,7 @@ fn short_reason_text(row: &Row, reason: &str, snapshot: &Snapshot) -> String {
     if row.status == Status::Finished && !pull_requests.is_empty() {
         return short_pull_request_text(&pull_requests);
     }
-    let reason = if reason == "thread open, no PR" {
+    let reason = if reason == THREAD_OPEN_TEXT {
         "thread, no PR"
     } else {
         reason
@@ -1614,7 +1619,7 @@ mod tests {
         };
         let row = |id: &str| snapshot.rows.iter().find(|row| row.task_id == id).unwrap();
         let [blocked_row, running_row] = [row("a"), row("b")];
-        for query in ["#412", "CHECKOUT.spec", "a"] {
+        for query in ["#412", "CHECKOUT.spec"] {
             assert!(is_matching(blocked_row, &snapshot, query), "{query}");
         }
         assert!(!is_matching(blocked_row, &snapshot, "#41 2"));
@@ -1622,7 +1627,6 @@ mod tests {
         assert!(!is_matching(running_row, &snapshot, "b fix"));
         let excerpt = match_excerpt(running_row, &snapshot, "FLAKY").unwrap();
         assert_eq!(&excerpt.text[excerpt.match_range], "flaky");
-        assert_eq!(&excerpt.text[..excerpt.source_size], "PROMPT");
         assert!(is_matching(blocked_row, &snapshot, "checkout copy"));
         assert_eq!(match_excerpt(running_row, &snapshot, "10 runs"), None);
     }

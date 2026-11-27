@@ -151,34 +151,39 @@ pub const ICON_SEARCH: &str = "icons/search.svg";
 pub const ICON_CHEVRON: &str = "icons/chevron.svg";
 pub const ICON_FOLD: &str = "icons/fold.svg";
 pub const ICON_WARNING: &str = "icons/warning.svg";
+const ICON_SCHEDULED: &str = "icons/scheduled.svg";
+const ICON_WAITING: &str = "icons/waiting.svg";
+const ICON_RUNNING: &str = "icons/running.svg";
+const ICON_BLOCKED: &str = "icons/blocked.svg";
+const ICON_FAILED: &str = "icons/failed.svg";
+const ICON_FINISHED: &str = "icons/finished.svg";
+const ICON_CANCELLED: &str = "icons/cancelled.svg";
 
 pub fn status_icon(status: Status) -> &'static str {
     match status {
-        Status::Scheduled => "icons/scheduled.svg",
-        Status::Waiting => "icons/waiting.svg",
-        Status::Running => "icons/running.svg",
-        Status::Blocked => "icons/blocked.svg",
-        Status::Failed => "icons/failed.svg",
-        Status::Finished => "icons/finished.svg",
-        Status::Cancelled => "icons/cancelled.svg",
+        Status::Scheduled => ICON_SCHEDULED,
+        Status::Waiting => ICON_WAITING,
+        Status::Running => ICON_RUNNING,
+        Status::Blocked => ICON_BLOCKED,
+        Status::Failed => ICON_FAILED,
+        Status::Finished => ICON_FINISHED,
+        Status::Cancelled => ICON_CANCELLED,
     }
 }
 
 fn icon_body(path: &str) -> Option<&'static str> {
     Some(match path {
-        "icons/scheduled.svg" => r#"<circle cx="8" cy="8" r="6.1"/><path d="M8 4.6V8l2.4 1.6"/>"#,
-        "icons/waiting.svg" => {
-            r#"<circle cx="8" cy="8" r="6.1"/><path d="M6.6 5.9v4.2M9.4 5.9v4.2"/>"#
-        }
-        "icons/running.svg" => {
+        ICON_SCHEDULED => r#"<circle cx="8" cy="8" r="6.1"/><path d="M8 4.6V8l2.4 1.6"/>"#,
+        ICON_WAITING => r#"<circle cx="8" cy="8" r="6.1"/><path d="M6.6 5.9v4.2M9.4 5.9v4.2"/>"#,
+        ICON_RUNNING => {
             r#"<circle cx="8" cy="8" r="6.1"/><path d="M6.7 5.6v4.8L10.5 8z" fill="black"/>"#
         }
-        "icons/blocked.svg" => {
+        ICON_BLOCKED => {
             r#"<rect x="3.2" y="3.2" width="9.6" height="9.6" rx="2.2" fill="black" stroke="none"/>"#
         }
-        "icons/failed.svg" => r#"<path d="M4.2 4.2l7.6 7.6M11.8 4.2l-7.6 7.6"/>"#,
-        "icons/finished.svg" => r#"<path d="M3.2 8.6l3.1 3.1 6.5-7.4"/>"#,
-        "icons/cancelled.svg" => r#"<circle cx="8" cy="8" r="6.1"/><path d="M4 12L12 4"/>"#,
+        ICON_FAILED => r#"<path d="M4.2 4.2l7.6 7.6M11.8 4.2l-7.6 7.6"/>"#,
+        ICON_FINISHED => r#"<path d="M3.2 8.6l3.1 3.1 6.5-7.4"/>"#,
+        ICON_CANCELLED => r#"<circle cx="8" cy="8" r="6.1"/><path d="M4 12L12 4"/>"#,
         ICON_SEARCH => r#"<circle cx="7" cy="7" r="4.4"/><path d="M10.4 10.4L14 14"/>"#,
         ICON_CHEVRON => r#"<path d="M6 3.2L10.8 8 6 12.8"/>"#,
         ICON_FOLD => {
