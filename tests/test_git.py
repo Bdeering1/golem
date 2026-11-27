@@ -38,12 +38,7 @@ def test_codex_worktree_base_fetches_stale_default_branch(
     (remote_path / "README").write_text("updated\n", encoding="utf-8")
     support.git_output(
         remote_path,
-        "-c",
-        "user.email=test@example.com",
-        "-c",
-        "user.name=Test",
         "commit",
-        "--no-gpg-sign",
         "-qam",
         "u",
     )

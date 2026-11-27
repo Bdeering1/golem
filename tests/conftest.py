@@ -12,6 +12,19 @@ from golem import cli, ledger, t3_code
 from golem.clients import codex_app
 from tests import support, t3_support
 
+GIT_CONFIG = """[user]
+    name = Test
+    email = test@example.com
+[commit]
+    gpgsign = false
+[tag]
+    gpgsign = false
+[maintenance]
+    auto = false
+[gc]
+    auto = 0
+"""
+
 
 @pytest.fixture(scope="session")
 def fake_bin_path(tmp_path_factory):
@@ -295,31 +308,23 @@ def owned_worktree(git_repository, ledger_path):
     return create_worktree
 
 
+@pytest.fixture(scope="session", autouse=True)
+def isolated_git_config(tmp_path_factory):
+    config_path = tmp_path_factory.mktemp("git") / "config"
+    config_path.write_text(GIT_CONFIG, encoding="utf-8")
+    with pytest.MonkeyPatch.context() as session_monkeypatch:
+        session_monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config_path))
+        session_monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+        yield
+
+
 @pytest.fixture(scope="session")
 def git_repository_template(tmp_path_factory):
     repository_path = tmp_path_factory.mktemp("repository")
     subprocess.run(["/usr/bin/git", "init", "-q"], cwd=repository_path, check=True)
     (repository_path / "README").write_text("test\n", encoding="utf-8")
     subprocess.run(["/usr/bin/git", "add", "README"], cwd=repository_path, check=True)
-    subprocess.run(
-        [
-            "/usr/bin/git",
-            "-c",
-            "user.email=test@example.com",
-            "-c",
-            "user.name=Test",
-            "-c",
-            "maintenance.auto=false",
-            "-c",
-            "gc.auto=0",
-            "commit",
-            "--no-gpg-sign",
-            "-qm",
-            "test",
-        ],
-        cwd=repository_path,
-        check=True,
-    )
+    subprocess.run(["/usr/bin/git", "commit", "-qm", "test"], cwd=repository_path, check=True)
     return repository_path
 
 
