@@ -3,6 +3,7 @@ import os
 import queue
 import re
 import subprocess
+import sys
 import threading
 import time
 from contextlib import suppress
@@ -181,12 +182,15 @@ def update_codex_event_state(
     session_id: str,
     state: CodexEventState,
     record_progress: Callable[[str], None],
+    start_thread_naming: Callable[[str], None] | None,
 ) -> None:
     event_type = event.get("type")
     if event_type == "thread.started":
         thread_id = event.get("thread_id")
         if isinstance(thread_id, str):
             common.record_session_field(task_id, session_id, "thread_id", thread_id)
+            if start_thread_naming is not None:
+                start_thread_naming(thread_id)
         return
     if event_type == "item.completed":
         item = event.get("item")
@@ -213,6 +217,7 @@ def read_codex_events(
     task_id: str,
     session_id: str,
     record_progress: Callable[[str], None],
+    start_thread_naming: Callable[[str], None] | None,
 ) -> CodexEventState:
     state = CodexEventState()
     output = cast("io.TextIOWrapper", process.stdout)
@@ -224,7 +229,12 @@ def read_codex_events(
                 continue
             if isinstance(event, dict):
                 update_codex_event_state(
-                    cast("dict[str, object]", event), task_id, session_id, state, record_progress
+                    cast("dict[str, object]", event),
+                    task_id,
+                    session_id,
+                    state,
+                    record_progress,
+                    start_thread_naming,
                 )
     finally:
         output.close()
@@ -242,9 +252,21 @@ def run_codex(
             return 1, str(error), False
         if error := task_directories.prepare_worktree(task_id, task):
             return 1, error, False
-        if common.is_usage_limit_resume(task) and not isinstance(task.get("thread_id"), str):
+        is_resume = common.is_usage_limit_resume(task)
+        if is_resume and not isinstance(task.get("thread_id"), str):
             return 1, "golem: task has no Codex conversation", False
         command, prompt = codex_command(task)
+        naming_workers: list[threading.Thread] = []
+
+        def start_thread_naming(thread_id: str) -> None:
+            naming_worker = threading.Thread(
+                target=name_codex_thread,
+                args=(thread_id, ledger.task_name(task_id, task), spawn.task_environment(task)),
+                daemon=True,
+            )
+            naming_worker.start()
+            naming_workers.append(naming_worker)
+
         process = subprocess.Popen(
             command,
             cwd=ledger.task_directory(task),
@@ -265,8 +287,16 @@ def run_codex(
                 with suppress(BrokenPipeError):
                     standard_input.close()
             try:
-                event_state = read_codex_events(process, task_id, session_id, record_progress)
+                event_state = read_codex_events(
+                    process,
+                    task_id,
+                    session_id,
+                    record_progress,
+                    None if is_resume else start_thread_naming,
+                )
                 returncode = process.wait()
+                for naming_worker in naming_workers:
+                    naming_worker.join()
             except BaseException:
                 process.kill()
                 process.wait()
@@ -323,16 +353,20 @@ def transcript_paths(task: ledger.Task) -> list[Path]:
     return [] if thread_id is None else session_transcript_paths(task, thread_id)
 
 
-def codex_app_server_requests(*, has_rate_limits: bool) -> AppServerRequests:
-    requests: AppServerRequests = [
+def codex_app_server_requests(requests: AppServerRequests) -> AppServerRequests:
+    return [
         {
             "id": 1,
             "method": "initialize",
             "params": {"clientInfo": {"name": "golem", "version": "0.1.0"}},
         },
         {"method": "initialized"},
-        {"id": 2, "method": "account/read", "params": {}},
+        *requests,
     ]
+
+
+def codex_account_requests(*, has_rate_limits: bool) -> AppServerRequests:
+    requests: AppServerRequests = [{"id": 2, "method": "account/read", "params": {}}]
     if has_rate_limits:
         requests.append({"id": 3, "method": "account/rateLimits/read"})
     return requests
@@ -374,7 +408,7 @@ def validate_codex_app_server(
 
 
 def codex_app_server_responses(
-    environment: dict[str, str], *, has_rate_limits: bool
+    environment: dict[str, str], requests: AppServerRequests
 ) -> AppServerResponses:
     process: subprocess.Popen[str] | None = None
     response_reader: threading.Thread | None = None
@@ -397,11 +431,13 @@ def codex_app_server_responses(
             daemon=True,
         )
         response_reader.start()
-        requests = codex_app_server_requests(has_rate_limits=has_rate_limits)
-        standard_input.write("".join(json.dumps(request) + "\n" for request in requests))
+        session_requests = codex_app_server_requests(requests)
+        standard_input.write("".join(json.dumps(request) + "\n" for request in session_requests))
         standard_input.flush()
         responses: AppServerResponses = {}
-        required_ids = {request["id"] for request in requests if isinstance(request.get("id"), int)}
+        required_ids = {
+            request["id"] for request in session_requests if isinstance(request.get("id"), int)
+        }
         deadline = time.monotonic() + common.USAGE_TIMEOUT_SECONDS
         while required_ids - responses.keys():
             response = codex_app_server_response(response_lines, deadline)
@@ -434,6 +470,18 @@ def codex_app_server_responses(
             standard_output.close()
 
 
+def name_codex_thread(thread_id: str, name: str, environment: dict[str, str]) -> None:
+    request: ledger.JsonObject = {
+        "id": 2,
+        "method": "thread/name/set",
+        "params": {"threadId": thread_id, "name": name},
+    }
+    try:
+        codex_app_server_responses(environment, [request])
+    except SystemExit:
+        print(f"golem: warning: could not name Codex thread {thread_id}", file=sys.stderr)
+
+
 def validate_codex_subscription(responses: AppServerResponses) -> None:
     account_result = responses[2]["result"]
     if not isinstance(account_result, dict):
@@ -450,11 +498,15 @@ def validate_codex_subscription(responses: AppServerResponses) -> None:
 
 
 def require_codex_subscription(environment: dict[str, str]) -> None:
-    validate_codex_subscription(codex_app_server_responses(environment, has_rate_limits=False))
+    validate_codex_subscription(
+        codex_app_server_responses(environment, codex_account_requests(has_rate_limits=False))
+    )
 
 
 def codex_rate_limits(environment: dict[str, str]) -> ledger.JsonObject:
-    responses = codex_app_server_responses(environment, has_rate_limits=True)
+    responses = codex_app_server_responses(
+        environment, codex_account_requests(has_rate_limits=True)
+    )
     validate_codex_subscription(responses)
     rate_limits_result = responses[3]["result"]
     rate_limits_fields = (
