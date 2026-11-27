@@ -9,6 +9,8 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 const ICON_SIZE: u32 = 36;
 const ICON_SUPERSAMPLING: u32 = 4;
+/// The outlines fill the icon; shrunk about its center, the logo matches other menu bar icons.
+const LOGO_SCALE: f64 = 0.8;
 const PANEL_GAP: f64 = 4.0;
 const SCREEN_MARGIN: f64 = 10.0;
 /// How far past the item's center the panel's right edge may sit.
@@ -42,6 +44,11 @@ const LOGO_OUTLINES: [&[(f64, f64)]; 4] = [
 ];
 
 fn is_in_logo(x: f64, y: f64) -> bool {
+    let center = f64::from(ICON_SIZE) / 2.0;
+    let (x, y) = (
+        (x - center) / LOGO_SCALE + center,
+        (y - center) / LOGO_SCALE + center,
+    );
     let mut is_inside = false;
     for outline in LOGO_OUTLINES {
         for (index, &(start_x, start_y)) in outline.iter().enumerate() {
