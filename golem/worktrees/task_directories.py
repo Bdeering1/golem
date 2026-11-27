@@ -1,3 +1,4 @@
+import shutil
 import sys
 from pathlib import Path
 from typing import cast
@@ -9,6 +10,7 @@ from golem.worktrees import git
 WORKTREE_OWNER_GOLEM = "golem"
 WORKTREE_OWNER_EXTERNAL = "external"
 WORKTREE_OWNER_MARKER = "golem-owner"
+WORKTREE_INCLUDE_FILE = ".worktreeinclude"
 
 
 def recorded_worktree(tasks: ledger.Tasks, task: ledger.Task) -> tuple[str, bool] | None:
@@ -178,6 +180,24 @@ def worktree_task_ids(tasks: ledger.Tasks, worktree: str) -> list[str]:
     return [task_id for task_id, task in tasks.items() if task_uses_worktree(tasks, task, worktree)]
 
 
+def copy_worktree_include_files(cwd: str, worktree: str) -> None:
+    toplevel = git.run_git(cwd, "rev-parse", "--show-toplevel").stdout.strip()
+    if not Path(toplevel, WORKTREE_INCLUDE_FILE).is_file():
+        return
+    ignored = git.excluded_untracked_files(toplevel, "--exclude-standard")
+    included = git.excluded_untracked_files(toplevel, f"--exclude-from={WORKTREE_INCLUDE_FILE}")
+    for relative_path in sorted(ignored & included):
+        source = Path(toplevel, relative_path)
+        if source.is_symlink():
+            continue
+        destination = Path(worktree, relative_path)
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+        except OSError as error:
+            print(f"golem: could not copy {relative_path} to worktree: {error}", file=sys.stderr)
+
+
 def create_worktree(task_id: str, task: ledger.Task) -> str | None:
     worktree = cast("str", task.get("worktree"))
     cwd = task["cwd"]
@@ -207,6 +227,7 @@ def create_worktree(task_id: str, task: ledger.Task) -> str | None:
         with exclude_path.open("a", encoding="utf-8") as exclude_file:
             exclude_file.write(f"{separator}.claude/worktrees/\n")
     record_created_worktree_owner(task_id, task)
+    copy_worktree_include_files(cwd, worktree)
     return None
 
 

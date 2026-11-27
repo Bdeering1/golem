@@ -239,6 +239,47 @@ def test_retry_creates_pending_worktree(
     assert "worktree_pending" not in support.read_task(ledger_path)
 
 
+@pytest.mark.parametrize(
+    ("gitignore", "include_patterns", "is_copied"),
+    [
+        pytest.param("secret.txt\n", "secret.txt\n", True, id="ignored-and-matching"),
+        pytest.param("secret.txt\n", "other.txt\n", False, id="ignored-not-matching"),
+        pytest.param("", "secret.txt\n", False, id="untracked-not-ignored"),
+        pytest.param("secret.txt\n", None, False, id="no-include-file"),
+    ],
+)
+def test_created_worktree_copies_ignored_files_matching_worktreeinclude(
+    installed_launch_agent,
+    fake_commands,
+    git_repository,
+    ledger_path,
+    monkeypatch,
+    gitignore,
+    include_patterns,
+    is_copied,
+):
+    pending_worktree = git_repository / ".claude" / "worktrees" / "pending"
+    (git_repository / ".gitignore").write_text(gitignore, encoding="utf-8")
+    secret_path = git_repository / "config" / "secret.txt"
+    secret_path.parent.mkdir()
+    secret_path.write_text("SECRET=1\n", encoding="utf-8")
+    if include_patterns is not None:
+        (git_repository / ".worktreeinclude").write_text(include_patterns, encoding="utf-8")
+    monkeypatch.chdir(secret_path.parent)
+    support.write_task(
+        ledger_path,
+        ledger.STATUS_FAILED,
+        backend=ledger.BACKEND_CODEX,
+        worktree=str(pending_worktree),
+        worktree_pending=True,
+    )
+
+    cli.main(["retry", support.TASK_ID, "--now"])
+    cli.main(["_execute", support.TASK_ID, support.read_task(ledger_path)["session_id"]])
+
+    assert (pending_worktree / "config" / "secret.txt").exists() is is_copied
+
+
 def test_claim_records_golem_worktree_resource_and_dependent_reuses_it(
     installed_launch_agent, fake_commands, git_repository, ledger_path, monkeypatch
 ):
