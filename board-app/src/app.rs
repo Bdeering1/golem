@@ -637,22 +637,22 @@ impl BoardView {
         self.reveal_selected();
     }
 
-    /// Keeps the palette on the same command when a reload changes the selected task's actions,
-    /// so Return never runs a command that slid under the highlight.
+    /// Keeps the palette on the same command when a reload reorders the selected task's
+    /// actions, so Return doesn't run whichever command slid under the highlight.
     fn keep_palette_highlight(&mut self, highlighted: Option<Command>) {
         let items = self.palette_items();
         let Some(palette) = self.palette.as_mut() else {
             return;
         };
-        let index = items
-            .iter()
-            .position(|item| Some(item.command) == highlighted);
-        if index == Some(palette.index) {
-            return;
+        let index = (items.iter())
+            .position(|item| Some(item.command) == highlighted)
+            .unwrap_or(0);
+        let is_moved = index != palette.index;
+        palette.index = index;
+        if is_moved && !items.is_empty() {
+            self.palette_scroll
+                .scroll_to_item(palette_child_index(&items, index));
         }
-        palette.index = index.unwrap_or(0);
-        self.palette_scroll
-            .scroll_to_item(palette_child_index(&items, palette.index));
     }
 
     fn needs_you(&self, row: &Row) -> bool {
@@ -4479,8 +4479,8 @@ impl BoardView {
                 ("N", "Next needing you"),
                 ("\u{23ce}", "Details"),
                 ("esc", "Back"),
-                ("space", "Scroll (\u{21e7} up)"),
-                ("\u{2303}D \u{2303}U", "Scroll down, up"),
+                ("space", "Page (\u{21e7} up)"),
+                ("\u{2303}D \u{2303}U", "Page down, up"),
             ],
         );
         let board_keys = section(

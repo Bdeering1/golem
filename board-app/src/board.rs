@@ -517,7 +517,7 @@ fn pull_request_summary(pull_requests: &[PullRequest]) -> String {
     };
     let states: BTreeSet<&str> = pull_requests.iter().map(|pr| pr.state.as_str()).collect();
     if states.len() > 1 {
-        let counts: Vec<String> = ["open", "merged", "closed"]
+        let counts: Vec<String> = [PULL_REQUEST_STATE_OPEN, "merged", "closed"]
             .iter()
             .filter_map(|state| {
                 let count = pull_requests.iter().filter(|pr| pr.state == *state).count();
@@ -1083,7 +1083,7 @@ pub fn row_reason(row: &Row, snapshot: &Snapshot) -> String {
         }
         Status::Cancelled => {
             if row.detail.is_empty() {
-                "cancelled".to_string()
+                Status::Cancelled.name().to_string()
             } else {
                 row.detail.clone()
             }
@@ -1164,7 +1164,8 @@ pub fn card_snippet(row: &Row, snapshot: &Snapshot) -> String {
     }
     let short_reason = short_reason_text(row, &reason, snapshot);
     // These only restate the status icon, so the result or prompt says more.
-    let is_status_text = [NO_PR_TEXT, "cancelled", CLOSED_TEXT].contains(&short_reason.as_str());
+    let is_status_text =
+        [NO_PR_TEXT, Status::Cancelled.name(), CLOSED_TEXT].contains(&short_reason.as_str());
     if !short_reason.is_empty() && !is_status_text {
         return short_reason;
     }
