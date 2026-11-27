@@ -1,4 +1,5 @@
 import subprocess
+import sys
 
 from golem import cli, launch_agent, ledger, spawn
 from tests import support
@@ -50,3 +51,25 @@ def test_golem_command_ignores_golem_package_in_working_directory(tmp_path):
     )
 
     assert completed.stdout.startswith("usage: golem")
+
+
+def test_starting_an_executor_does_not_hold_the_callers_output(
+    installed_launch_agent, ledger_path, monkeypatch, tmp_path
+):
+    hold_path = tmp_path / "hold"
+    hold_path.touch()
+    monkeypatch.setenv("GOLEM_CLAUDE_HOLD", str(hold_path))
+    cli.main(["run", support.PROMPT, "--now"])
+    start_executor = (
+        "from golem import ledger, spawn; "
+        f"spawn.start_task_executor({support.TASK_ID!r}, ledger.load_tasks()[{support.TASK_ID!r}])"
+    )
+
+    try:
+        spawn.subprocess.run(
+            [sys.executable, "-c", start_executor], capture_output=True, check=True, timeout=10
+        )
+    finally:
+        hold_path.unlink()
+
+    support.wait_until(lambda: support.read_task(ledger_path)["status"] == ledger.STATUS_FINISHED)

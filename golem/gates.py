@@ -3,7 +3,7 @@ import sys
 from datetime import UTC, datetime
 from typing import cast
 
-from golem import chains, launch_agent, ledger, locks, notifications, spawn, thread_settling
+from golem import chains, ledger, locks, notifications, spawn, thread_settling
 from golem.backends import claude_hooks, registry
 
 GATE_TIMEOUT_SECONDS = 300
@@ -85,7 +85,7 @@ def continue_task(task_id: str, *, is_forced: bool) -> int:
     return 0
 
 
-def release_gate_stop(task_id: str, *, stderr: int | None = None) -> bool:
+def release_gate_stop(task_id: str) -> bool:
     with ledger.locked_tasks() as tasks:
         task = tasks.get(task_id)
         if task is None:
@@ -97,7 +97,7 @@ def release_gate_stop(task_id: str, *, stderr: int | None = None) -> bool:
         task["finished_at"] = datetime.now(UTC).isoformat()
         task["gate_released"] = True
         thread_settling.mark_parent_pending(tasks, task)
-    spawn.start_task_executor(task_id, task, stderr=stderr)
+    spawn.start_task_executor(task_id, task)
     return True
 
 
@@ -143,9 +143,8 @@ def hook_stop() -> int:
         locks.release_lock(directory_lock_file)
     if stop_reason is not None:
         return 0
-    with launch_agent.agent_log_path().open("a", encoding="utf-8") as log_file:
-        if not release_gate_stop(task_id, stderr=log_file.fileno()):
-            return 0
+    if not release_gate_stop(task_id):
+        return 0
     print(json.dumps({"systemMessage": f"golem: continuing chain with {next_ids[0]}"}))
     return 0
 

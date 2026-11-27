@@ -33,19 +33,15 @@ def launch_agent_plist_path() -> Path:
     return Path.home() / "Library" / "LaunchAgents" / f"{LAUNCH_AGENT_LABEL}.plist"
 
 
-def agent_log_path() -> Path:
-    return ledger.ledger_path().parent / "agent.log"
-
-
 def rotate_agent_log() -> None:
-    log_path = agent_log_path()
+    log_path = ledger.agent_log_path()
     if log_path.exists() and log_path.stat().st_size > progress_log.AGENT_LOG_MAX_BYTES:
         shutil.copyfile(log_path, log_path.with_name(f"{log_path.name}.1"))
         log_path.write_text("", encoding="utf-8")
 
 
 def launch_agent_plist_data() -> bytes:
-    log_path = str(agent_log_path())
+    log_path = str(ledger.agent_log_path())
     plist: dict[str, object] = {
         "Label": LAUNCH_AGENT_LABEL,
         "ProgramArguments": ["/usr/bin/caffeinate", "-is", *spawn.golem_command(), "_agent"],

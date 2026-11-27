@@ -92,6 +92,7 @@ GOLEM_COMMAND = (sys.executable, "-m", "golem")
 GOLEM_PREFIX = "golem: "
 OPEN_COMMAND = "open"
 COPY_COMMAND = "pbcopy"
+MORE_MARKER_HEIGHT = 1
 STYLE_PLAIN = "plain"
 STYLE_BOLD = "bold"
 STYLE_DIM = "dim"
@@ -324,13 +325,12 @@ def visible_count(row_count: int, style: CardStyle, body_height: int) -> int:
     gap_height = style.pitch - style.height
     if style.stack_height(row_count) <= body_height:
         return row_count
-    # One row stays free under the last card for the "more" marker.
-    return max(1, (body_height - 1 + gap_height) // style.pitch)
+    return max(1, (body_height - MORE_MARKER_HEIGHT + gap_height) // style.pitch)
 
 
 def column_used_height(row_count: int, style: CardStyle, body_height: int) -> int:
     shown_count = visible_count(row_count, style, body_height)
-    marker_height = 1 if shown_count < row_count else 0
+    marker_height = MORE_MARKER_HEIGHT if shown_count < row_count else 0
     return max(1, style.stack_height(shown_count) + marker_height)
 
 
@@ -3277,7 +3277,7 @@ def flash(state: BoardState, text: str) -> None:
 
 
 def start_gate_check(task_id: str) -> GateCheck:
-    # A file, not a pipe: the executor a passing gate starts inherits stderr and outlives it.
+    # A file, not a pipe: the board reads it only after the process exits.
     with tempfile.TemporaryFile() as error_file:
         process = subprocess.Popen(
             [*GOLEM_COMMAND, ACTION_RERUN_GATE, task_id],

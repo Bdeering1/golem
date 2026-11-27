@@ -181,6 +181,10 @@ def worktree_ledger_path() -> Path:
     return state_directory() / "worktrees.json"
 
 
+def agent_log_path() -> Path:
+    return ledger_path().parent / "agent.log"
+
+
 def settings_path() -> Path:
     return state_directory() / "settings.json"
 
