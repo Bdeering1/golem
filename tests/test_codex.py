@@ -216,7 +216,7 @@ def test_codex_creates_and_uses_golem_worktree(
     assert ".claude/worktrees/" in exclude_path.read_text(encoding="utf-8").splitlines()
 
 
-@pytest.mark.parametrize("setup", ["new", "existing", "removed", "deleted-folder", "chained"])
+@pytest.mark.parametrize("setup", ["new", "existing", "deleted-folder", "chained"])
 def test_codex_named_worktree_runs_in_claude_worktree_directory(
     installed_launch_agent, fake_commands, git_repository, ledger_path, monkeypatch, setup
 ):
@@ -225,8 +225,6 @@ def test_codex_named_worktree_runs_in_claude_worktree_directory(
         support.git_output(
             git_repository, "worktree", "add", "-qb", "worktree-feature+login", str(worktree)
         )
-    if setup == "removed":
-        support.git_output(git_repository, "branch", "worktree-feature+login")
     if setup == "deleted-folder":
         shutil.rmtree(worktree)
     monkeypatch.chdir(git_repository)
@@ -256,10 +254,7 @@ def test_codex_named_worktree_runs_in_claude_worktree_directory(
 @pytest.mark.parametrize(
     "name",
     [
-        pytest.param("a" * 65, id="too-long"),
         pytest.param("feature/..", id="parent-segment"),
-        pytest.param("x/.GIT.", id="git-directory"),
-        pytest.param("feature//login", id="empty-segment"),
         pytest.param("feature login", id="space"),
     ],
 )

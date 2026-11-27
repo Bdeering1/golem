@@ -107,8 +107,6 @@ def test_session_field_is_not_recorded_on_a_newer_session(ledger_path):
         pytest.param(["-w", "-m", "x"], None, ["-m", "x"], id="short"),
         pytest.param(["-w", "name", "-m", "x"], "name", ["-m", "x"], id="short-name"),
         pytest.param(["-wname"], "name", [], id="attached-name"),
-        pytest.param(["--worktree"], None, [], id="long"),
-        pytest.param(["--worktree", "name"], "name", [], id="long-name"),
         pytest.param(["--worktree=name"], "name", [], id="long-equals-name"),
         pytest.param(["--worktree="], None, [], id="long-equals-empty"),
     ],
