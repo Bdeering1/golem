@@ -16,59 +16,32 @@ const SCREEN_MARGIN: f64 = 10.0;
 /// How far past the item's center the panel's right edge may sit.
 const PANEL_RIGHT_OVERHANG: f64 = 220.0;
 
-type Outline = &'static [(f64, f64)];
-
-/// The golem logo's head, drawn as a line `HEAD_LINE_WIDTH` wide.
-const HEAD_OUTLINE: Outline = &[
-    (12.0, 4.5),
-    (18.0, 2.8),
-    (24.0, 4.5),
-    (28.5, 11.0),
-    (28.5, 13.5),
-    (32.5, 15.0),
-    (32.5, 23.0),
-    (28.5, 24.5),
-    (26.5, 30.5),
-    (21.0, 33.0),
-    (15.0, 33.0),
-    (9.5, 30.5),
-    (7.5, 24.5),
-    (3.5, 23.0),
-    (3.5, 15.0),
-    (7.5, 13.5),
-    (7.5, 11.0),
+/// The golem logo's outlines: a head, then its gem and eyes.
+/// A point inside an odd number of them is drawn, so the later ones cut holes in the head.
+const LOGO_OUTLINES: [&[(f64, f64)]; 4] = [
+    &[
+        (12.0, 3.5),
+        (18.0, 1.8),
+        (24.0, 3.5),
+        (29.5, 10.5),
+        (29.5, 13.0),
+        (33.5, 14.5),
+        (33.5, 23.5),
+        (29.5, 25.0),
+        (27.5, 31.5),
+        (21.0, 34.5),
+        (15.0, 34.5),
+        (8.5, 31.5),
+        (6.5, 25.0),
+        (2.5, 23.5),
+        (2.5, 14.5),
+        (6.5, 13.0),
+        (6.5, 10.5),
+    ],
+    &[(18.0, 5.4), (20.6, 9.0), (18.0, 12.6), (15.4, 9.0)],
+    &[(9.6, 16.4), (16.2, 16.4), (16.2, 20.6), (9.6, 20.6)],
+    &[(19.8, 16.4), (26.4, 16.4), (26.4, 20.6), (19.8, 20.6)],
 ];
-const HEAD_LINE_WIDTH: f64 = 2.8;
-/// The head's gem and eyes, drawn solid.
-const FEATURE_OUTLINES: [Outline; 3] = [
-    &[(18.0, 7.0), (20.4, 10.2), (18.0, 13.4), (15.6, 10.2)],
-    &[(10.2, 17.0), (16.2, 17.0), (16.2, 20.8), (10.2, 20.8)],
-    &[(19.8, 17.0), (25.8, 17.0), (25.8, 20.8), (19.8, 20.8)],
-];
-
-fn edges(outline: Outline) -> impl Iterator<Item = ((f64, f64), (f64, f64))> {
-    let ends = outline.iter().cycle().skip(1);
-    outline.iter().copied().zip(ends.copied())
-}
-
-fn is_inside(outline: Outline, x: f64, y: f64) -> bool {
-    let crossings = edges(outline).filter(|&((start_x, start_y), (end_x, end_y))| {
-        let crosses_row = (start_y > y) != (end_y > y);
-        crosses_row && x < start_x + (y - start_y) / (end_y - start_y) * (end_x - start_x)
-    });
-    crossings.count() % 2 == 1
-}
-
-fn distance_to_edge(outline: Outline, x: f64, y: f64) -> f64 {
-    let distances = edges(outline).map(|((start_x, start_y), (end_x, end_y))| {
-        let (edge_x, edge_y) = (end_x - start_x, end_y - start_y);
-        let along =
-            ((x - start_x) * edge_x + (y - start_y) * edge_y) / (edge_x * edge_x + edge_y * edge_y);
-        let along = along.clamp(0.0, 1.0);
-        (x - start_x - along * edge_x).hypot(y - start_y - along * edge_y)
-    });
-    distances.fold(f64::INFINITY, f64::min)
-}
 
 fn is_in_logo(x: f64, y: f64) -> bool {
     let center = f64::from(ICON_SIZE) / 2.0;
@@ -76,10 +49,17 @@ fn is_in_logo(x: f64, y: f64) -> bool {
         (x - center) / LOGO_SCALE + center,
         (y - center) / LOGO_SCALE + center,
     );
-    distance_to_edge(HEAD_OUTLINE, x, y) <= HEAD_LINE_WIDTH / 2.0
-        || FEATURE_OUTLINES
-            .iter()
-            .any(|outline| is_inside(outline, x, y))
+    let mut is_inside = false;
+    for outline in LOGO_OUTLINES {
+        for (index, &(start_x, start_y)) in outline.iter().enumerate() {
+            let (end_x, end_y) = outline[(index + 1) % outline.len()];
+            let crosses_row = (start_y > y) != (end_y > y);
+            if crosses_row && x < start_x + (y - start_y) / (end_y - start_y) * (end_x - start_x) {
+                is_inside = !is_inside;
+            }
+        }
+    }
+    is_inside
 }
 
 fn logo_icon() -> Icon {
