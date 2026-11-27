@@ -8,16 +8,6 @@
 - Never merge a PR with failing checks. GitHub Free cannot enforce required checks, so this rule is
   the gate.
 
-## Agent skills
+## Issue tracker
 
-### Issue tracker
-
-Issues are tracked in GitHub Issues (Bdeering1/golem) via the `gh` CLI. See `docs/agents/issue-tracker.md`.
-
-### Triage labels
-
-Default five-role vocabulary: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
-
-### Domain docs
-
-Single-context: `CONTEXT.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+Issues are tracked in GitHub Issues (Bdeering1/golem) via the `gh` CLI.
