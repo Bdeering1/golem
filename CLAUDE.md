@@ -1,7 +1,8 @@
 ## Tooling
 
 - Run every command through `uv run`.
-- Verify changes with: `pytest`, `ruff check .`, `ruff format --check .`, `basedpyright`.
+- Verify changes with: `pytest`, `ruff check .`, `ruff format --check .`, `basedpyright`,
+  `formal/check.sh` (needs Java 11+).
 - Enable the pre-commit hook once per clone: `git config core.hooksPath .githooks`. It runs ruff
   check, ruff format --check and basedpyright on the working-tree copies of staged Python files;
   CI runs every check on each pull request.
@@ -24,3 +25,4 @@ Each rule names what enforces it. When a rule has no check, it is a judgment cal
 | Don't add backward compatibility for old ledger or config records. | Judgment |
 | Start task executors only through `spawn.start_task_executor`, which sends their output to the agent log, so a caller can capture golem's output with pipes. | `test_starting_an_executor_does_not_hold_the_callers_output` in `tests/test_spawn.py` |
 | Write a comment only for a constraint the code can't express. Prefer a named constant, helper or test that enforces the constraint. | Judgment |
+| A task finishes only when all of its work has stopped, not when the first or last signal arrives. When changing how golem waits on or settles a T3 Code thread, re-check the model with the `verify-t3-thread-wait` skill. | `formal/check.sh` in CI, and `test_formal_model_matches_code` in `tests/test_formal_model.py` |

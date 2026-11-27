@@ -32,3 +32,6 @@ jobs:
       - name: Pytest
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: uv run --frozen pytest
+      - name: Formal model
+        if: ${{ !cancelled() }}
+        run: formal/check.sh
