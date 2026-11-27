@@ -10,9 +10,9 @@ use serde::Deserialize;
 use crate::ledger;
 
 const GOLEM_PREFIX: &str = "golem: ";
-const ENVIRONMENT_MARKER: &str = "__golem_board_app__";
+const ENVIRONMENT_MARKER: &str = "__golem_app__";
 const DEFAULT_TERMINAL: &str = "Terminal";
-const CONFIG_FILE_NAME: &str = "board.toml";
+const CONFIG_FILE_NAME: &str = "app.toml";
 const INTERRUPTED_EXIT_STATUS: i32 = 130;
 const SHELL_TIMEOUT: Duration = Duration::from_secs(10);
 const SHELL_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -32,7 +32,7 @@ pub struct Golem {
     pub executable: Option<PathBuf>,
     pub path_variable: String,
     pub terminal_app: String,
-    /// Why `board.toml` was ignored, if it couldn't be parsed.
+    /// Why `app.toml` was ignored, if it couldn't be parsed.
     pub config_error: Option<String>,
 }
 
@@ -79,10 +79,7 @@ fn configured_terminal() -> (String, Option<String>) {
 
 fn scratch_output_path() -> PathBuf {
     let run_id = RUN_COUNTER.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!(
-        "golem-board-app-{}-{run_id}.log",
-        std::process::id()
-    ))
+    std::env::temp_dir().join(format!("golem-app-{}-{run_id}.log", std::process::id()))
 }
 
 /// Asks the login shell for PATH and golem's location, since launchd gives apps neither.
@@ -304,7 +301,7 @@ mod tests {
     #[test]
     fn shell_environment_survives_hung_and_lingering_startup_files() {
         let directory =
-            std::env::temp_dir().join(format!("golem-board-app-shell-{}", std::process::id()));
+            std::env::temp_dir().join(format!("golem-app-shell-{}", std::process::id()));
         let hung = executable_script(&directory, "hung", "#!/bin/sh\nexec sleep 5\n");
         let lingering = executable_script(
             &directory,
@@ -323,8 +320,7 @@ mod tests {
 
     #[test]
     fn pickup_script_runs_golem_with_the_task_id() {
-        let directory =
-            std::env::temp_dir().join(format!("golem-board-app-test-{}", std::process::id()));
+        let directory = std::env::temp_dir().join(format!("golem-app-test-{}", std::process::id()));
         let fake_golem = executable_script(&directory, "golem's", "#!/bin/sh\necho \"$@\"\n");
         let script = pickup_script(&fake_golem.to_string_lossy(), "/usr/bin:/bin", "a1 b");
         let output = Command::new("/bin/sh")

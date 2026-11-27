@@ -1731,7 +1731,7 @@ impl BoardView {
             Some((Command::Zoom(-1), "Zoom out".to_string(), "\u{2318}-")),
             (zoom::percent() != zoom::DEFAULT_PERCENT)
                 .then(|| (Command::Zoom(0), "Reset zoom".to_string(), "\u{2318}0")),
-            Some((Command::Quit, "Quit golem board".to_string(), "\u{2318}Q")),
+            Some((Command::Quit, "Quit Golem".to_string(), "\u{2318}Q")),
         ];
         for (command, label, key) in board_items.into_iter().flatten() {
             items.push(PaletteItem {

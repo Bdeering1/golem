@@ -11,7 +11,7 @@ pub const DEFAULT_PERCENT: u32 = 100;
 pub const STEP_PERCENT: u32 = 10;
 const MIN_PERCENT: u32 = 80;
 const MAX_PERCENT: u32 = 150;
-const FILE_NAME: &str = "board-app-zoom";
+const FILE_NAME: &str = "app-zoom";
 
 static PERCENT: AtomicU32 = AtomicU32::new(DEFAULT_PERCENT);
 
