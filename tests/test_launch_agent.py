@@ -103,7 +103,7 @@ def test_launch_agent_pass_starts_due_tasks_and_fails_abandoned_ones(ledger_path
 
 def test_agent_log_copy_truncates_active_writer(monkeypatch):
     monkeypatch.setattr(progress_log, "AGENT_LOG_MAX_BYTES", 16)
-    log_path = launch_agent.agent_log_path()
+    log_path = ledger.agent_log_path()
     first_content = "first log content\n"
     second_content = "second log content\n"
 
@@ -128,7 +128,7 @@ def test_agent_log_copy_truncates_active_writer(monkeypatch):
 
 def test_agent_log_under_limit_is_untouched(monkeypatch):
     monkeypatch.setattr(progress_log, "AGENT_LOG_MAX_BYTES", 16)
-    log_path = launch_agent.agent_log_path()
+    log_path = ledger.agent_log_path()
     log_path.write_text("under limit", encoding="utf-8")
 
     launch_agent.run_launch_agent_pass()

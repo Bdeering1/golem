@@ -79,17 +79,16 @@ def shell_command_outcome(
         return reason, ""
 
 
-def start_task_executor(
-    task_id: str, task: ledger.Task, *, stderr: int | None = None
-) -> subprocess.Popen[bytes]:
-    return subprocess.Popen(
-        [*golem_command(), "_execute", task_id, task["session_id"]],
-        env=task_environment(task),
-        start_new_session=True,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=stderr,
-    )
+def start_task_executor(task_id: str, task: ledger.Task) -> subprocess.Popen[bytes]:
+    with ledger.agent_log_path().open("a", encoding="utf-8") as log_file:
+        return subprocess.Popen(
+            [*golem_command(), "_execute", task_id, task["session_id"]],
+            env=task_environment(task),
+            start_new_session=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=log_file,
+        )
 
 
 def reap_finished_executors(
