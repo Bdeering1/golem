@@ -241,9 +241,9 @@ def test_subagent_usage_limit_event_does_not_pause_task(fake_commands, ledger_pa
             {"type": "result", "api_error_status": None, "result": support.CLAUDE_RESULT},
         ],
     )
-    support.write_task(ledger_path, ledger.STATUS_RUNNING)
+    support.write_task(ledger_path, ledger.STATUS_SCHEDULED)
 
-    executor.execute_task(support.TASK_ID, support.read_task(ledger_path), ())
+    cli.main(["_execute", support.TASK_ID, support.read_task(ledger_path)["session_id"]])
 
     task = support.read_task(ledger_path)
     assert task["status"] == ledger.STATUS_FINISHED
@@ -320,9 +320,9 @@ def test_usage_limited_task_fails_when_it_cannot_be_rescheduled(
     support.write_claude_output(
         fake_commands, support.USAGE_LIMIT_RESULT, api_error_status=claude.USAGE_LIMIT_HTTP_STATUS
     )
-    support.write_task(ledger_path, ledger.STATUS_RUNNING)
+    support.write_task(ledger_path, ledger.STATUS_SCHEDULED)
 
-    executor.execute_task(support.TASK_ID, support.read_task(ledger_path), ())
+    cli.main(["_execute", support.TASK_ID, support.read_task(ledger_path)["session_id"]])
     task = support.read_task(ledger_path)
     assert task["status"] == ledger.STATUS_FAILED
     assert task["result"] == support.USAGE_LIMIT_RESULT
