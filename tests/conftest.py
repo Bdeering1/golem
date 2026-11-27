@@ -112,7 +112,6 @@ def record(name, value):
         output.write(value)
 
 record("args", "\\x1e\\n" + "\\n".join(sys.argv[1:]) + "\\n")
-record("cwd", os.getcwd() + "\\n")
 record("api-keys", f"{{int('OPENAI_API_KEY' in os.environ)}} {{int('CODEX_API_KEY' in os.environ)}}\\n")
 record("home", os.environ.get("CODEX_HOME", "") + "\\n")
 
@@ -127,11 +126,13 @@ if sys.argv[1:2] == ["app-server"]:
         rate_limits = json.load(open(limits_path, encoding="utf-8"))
     batch_responses = []
     for line in sys.stdin:
-        record("stdin", line)
+        record("app-server-stdin", line)
         request = json.loads(line)
         if "id" not in request:
             continue
-        if os.environ.get("GOLEM_CODEX_ERROR"):
+        if os.environ.get("GOLEM_CODEX_ERROR") or (
+            os.environ.get("GOLEM_CODEX_NAME_ERROR") and request["method"] == "thread/name/set"
+        ):
             response = {{"id": request["id"], "error": {{"message": "unavailable"}}}}
         elif request["method"] == "account/read":
             response = {{"id": request["id"], "result": account}}
@@ -148,6 +149,8 @@ if sys.argv[1:2] == ["app-server"]:
             continue
         print(json.dumps(response), flush=True)
     sys.exit(0)
+
+record("cwd", os.getcwd() + "\\n")
 
 if sys.argv[1:2] == ["resume"]:
     sys.exit(0)
@@ -224,6 +227,7 @@ def fake_commands(monkeypatch, tmp_path, fake_bin_path):
             "claude-lc-time",
             "claude-stdout",
             "claude-unrelated",
+            "codex-app-server-stdin",
             "codex-args",
             "codex-cwd",
             "codex-stdin",

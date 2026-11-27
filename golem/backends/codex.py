@@ -2,6 +2,7 @@ import json
 import os
 import queue
 import subprocess
+import sys
 import threading
 import time
 from contextlib import suppress
@@ -157,12 +158,15 @@ def update_codex_event_state(
     session_id: str,
     state: CodexEventState,
     record_progress: Callable[[str], None],
+    name_thread: Callable[[str], None] | None,
 ) -> None:
     event_type = event.get("type")
     if event_type == "thread.started":
         thread_id = event.get("thread_id")
         if isinstance(thread_id, str):
             common.record_session_field(task_id, session_id, "thread_id", thread_id)
+            if name_thread is not None:
+                name_thread(thread_id)
         return
     if event_type == "item.completed":
         item = event.get("item")
@@ -189,6 +193,7 @@ def read_codex_events(
     task_id: str,
     session_id: str,
     record_progress: Callable[[str], None],
+    name_thread: Callable[[str], None] | None,
 ) -> CodexEventState:
     state = CodexEventState()
     output = cast("io.TextIOWrapper", process.stdout)
@@ -200,7 +205,12 @@ def read_codex_events(
                 continue
             if isinstance(event, dict):
                 update_codex_event_state(
-                    cast("dict[str, object]", event), task_id, session_id, state, record_progress
+                    cast("dict[str, object]", event),
+                    task_id,
+                    session_id,
+                    state,
+                    record_progress,
+                    name_thread,
                 )
     finally:
         output.close()
@@ -221,6 +231,17 @@ def run_codex(
         if common.is_usage_limit_resume(task) and not isinstance(task.get("thread_id"), str):
             return 1, "golem: task has no Codex conversation", False
         command, prompt = codex_command(task)
+        naming_threads: list[threading.Thread] = []
+
+        def name_thread(thread_id: str) -> None:
+            naming_thread = threading.Thread(
+                target=name_codex_thread,
+                args=(thread_id, ledger.task_name(task_id, task), spawn.task_environment(task)),
+                daemon=True,
+            )
+            naming_thread.start()
+            naming_threads.append(naming_thread)
+
         process = subprocess.Popen(
             command,
             cwd=ledger.task_directory(task),
@@ -241,8 +262,16 @@ def run_codex(
                 with suppress(BrokenPipeError):
                     standard_input.close()
             try:
-                event_state = read_codex_events(process, task_id, session_id, record_progress)
+                event_state = read_codex_events(
+                    process,
+                    task_id,
+                    session_id,
+                    record_progress,
+                    None if common.is_usage_limit_resume(task) else name_thread,
+                )
                 returncode = process.wait()
+                for naming_thread in naming_threads:
+                    naming_thread.join()
             except BaseException:
                 process.kill()
                 process.wait()
@@ -296,16 +325,20 @@ def transcript_paths(task: ledger.Task) -> list[Path]:
     return [] if thread_id is None else session_transcript_paths(task, thread_id)
 
 
-def codex_app_server_requests(*, has_rate_limits: bool) -> AppServerRequests:
-    requests: AppServerRequests = [
+def codex_app_server_requests(requests: AppServerRequests) -> AppServerRequests:
+    return [
         {
             "id": 1,
             "method": "initialize",
             "params": {"clientInfo": {"name": "golem", "version": "0.1.0"}},
         },
         {"method": "initialized"},
-        {"id": 2, "method": "account/read", "params": {}},
+        *requests,
     ]
+
+
+def codex_account_requests(*, has_rate_limits: bool) -> AppServerRequests:
+    requests: AppServerRequests = [{"id": 2, "method": "account/read", "params": {}}]
     if has_rate_limits:
         requests.append({"id": 3, "method": "account/rateLimits/read"})
     return requests
@@ -347,7 +380,7 @@ def validate_codex_app_server(
 
 
 def codex_app_server_responses(
-    environment: dict[str, str], *, has_rate_limits: bool
+    environment: dict[str, str], requests: AppServerRequests
 ) -> AppServerResponses:
     process: subprocess.Popen[str] | None = None
     response_reader: threading.Thread | None = None
@@ -370,7 +403,7 @@ def codex_app_server_responses(
             daemon=True,
         )
         response_reader.start()
-        requests = codex_app_server_requests(has_rate_limits=has_rate_limits)
+        requests = codex_app_server_requests(requests)
         standard_input.write("".join(json.dumps(request) + "\n" for request in requests))
         standard_input.flush()
         responses: AppServerResponses = {}
@@ -407,6 +440,18 @@ def codex_app_server_responses(
             standard_output.close()
 
 
+def name_codex_thread(thread_id: str, name: str, environment: dict[str, str]) -> None:
+    request: ledger.JsonObject = {
+        "id": 2,
+        "method": "thread/name/set",
+        "params": {"threadId": thread_id, "name": name},
+    }
+    try:
+        codex_app_server_responses(environment, [request])
+    except SystemExit:
+        print(f"golem: warning: could not name Codex thread {thread_id}", file=sys.stderr)
+
+
 def validate_codex_subscription(responses: AppServerResponses) -> None:
     account_result = responses[2]["result"]
     if not isinstance(account_result, dict):
@@ -423,11 +468,15 @@ def validate_codex_subscription(responses: AppServerResponses) -> None:
 
 
 def require_codex_subscription(environment: dict[str, str]) -> None:
-    validate_codex_subscription(codex_app_server_responses(environment, has_rate_limits=False))
+    validate_codex_subscription(
+        codex_app_server_responses(environment, codex_account_requests(has_rate_limits=False))
+    )
 
 
 def codex_rate_limits(environment: dict[str, str]) -> ledger.JsonObject:
-    responses = codex_app_server_responses(environment, has_rate_limits=True)
+    responses = codex_app_server_responses(
+        environment, codex_account_requests(has_rate_limits=True)
+    )
     validate_codex_subscription(responses)
     rate_limits_result = responses[3]["result"]
     rate_limits_fields = (

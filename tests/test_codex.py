@@ -18,8 +18,14 @@ def logged_codex_calls(fake_commands):
 
 
 def logged_codex_args(fake_commands):
-    calls = logged_codex_calls(fake_commands)
+    calls = [call for call in logged_codex_calls(fake_commands) if call[0] != "app-server"]
     return calls[-1] if calls else []
+
+
+def logged_thread_name_params(fake_commands):
+    lines = fake_commands["codex-app-server-stdin"].read_text(encoding="utf-8").splitlines()
+    requests = [json.loads(line) for line in lines if "thread/name/set" in line]
+    return [request["params"] for request in requests]
 
 
 def write_codex_rate_limits(monkeypatch, tmp_path, primary, secondary):
@@ -159,6 +165,10 @@ def test_codex_usage_limit_resumes_saved_conversation(
     task = support.read_task(ledger_path)
     assert task["status"] == ledger.STATUS_SCHEDULED
     assert datetime.fromisoformat(task["due_at"]) == reset_time
+    thread_name_params = [
+        {"threadId": "codex-thread", "name": ledger.task_name(support.TASK_ID, task)}
+    ]
+    assert logged_thread_name_params(fake_commands) == thread_name_params
 
     support.write_codex_events(
         monkeypatch,
@@ -171,6 +181,7 @@ def test_codex_usage_limit_resumes_saved_conversation(
     support.set_task_due_now(ledger_path)
     assert cli.main(["_execute", support.TASK_ID, task["session_id"]]) == 0
     assert logged_codex_args(fake_commands)[-3:] == ["resume", "codex-thread", "-"]
+    assert logged_thread_name_params(fake_commands) == thread_name_params
     assert (
         fake_commands["codex-stdin"]
         .read_text(encoding="utf-8")
@@ -332,6 +343,21 @@ def test_next_codex_reset_time_rejects_unavailable_or_past_limits(
 
     with pytest.raises(SystemExit, match=re.escape(common.USAGE_ERROR)):
         codex.next_reset_time(os.environ.copy())
+
+
+def test_codex_thread_naming_failure_warns_and_keeps_outcome(
+    installed_launch_agent, ledger_path, monkeypatch, capsys
+):
+    monkeypatch.setenv("GOLEM_CODEX_NAME_ERROR", "1")
+
+    cli.main(["run", support.PROMPT, "--backend", "codex", "--now"])
+    task = support.read_task(ledger_path)
+    assert cli.main(["_execute", support.TASK_ID, task["session_id"]]) == 0
+
+    task = support.read_task(ledger_path)
+    assert task["status"] == ledger.STATUS_FINISHED
+    assert task["result"] == "done"
+    assert "golem: warning: could not name Codex thread thread" in capsys.readouterr().err
 
 
 def test_codex_app_server_reads_batched_responses(fake_commands, monkeypatch, tmp_path):
@@ -539,7 +565,11 @@ def test_mixed_backend_chain_shares_worktree_and_uses_fresh_conversations(
     codex_cwds = fake_commands["codex-cwd"].read_text(encoding="utf-8").splitlines()
     codex_executions = [
         (call, cwd)
-        for call, cwd in zip(logged_codex_calls(fake_commands), codex_cwds, strict=True)
+        for call, cwd in zip(
+            [call for call in logged_codex_calls(fake_commands) if call[0] != "app-server"],
+            codex_cwds,
+            strict=True,
+        )
         if call[0] == "exec"
     ]
     assert len(codex_executions) == backends.count(ledger.BACKEND_CODEX)
