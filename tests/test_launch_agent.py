@@ -33,6 +33,12 @@ PULL_REQUEST_URL = "https://github.com/owner/repository/pull/1"
 THREAD_PRESENT_MARKER = "thread-present"
 THREAD_SHOW_ERROR_MARKER = "thread-show-error"
 UNREACHABLE_THREAD = "unreachable"
+OTHER_PARENT_ID = "other-parent"
+
+
+class FinishedProcess:
+    def poll(self):
+        return 0
 
 
 @pytest.mark.parametrize(
@@ -234,15 +240,21 @@ def test_launch_agent_pass_leaves_running_executor_alone(
         ),
         pytest.param(
             {
-                support.PARENT_ID: support.task_record(
-                    ledger.STATUS_FAILED, task_id=support.PARENT_ID
-                ),
-                support.TASK_ID: support.task_record(
-                    ledger.STATUS_WAITING, after=support.PARENT_ID
-                ),
+                OTHER_PARENT_ID: support.task_record(ledger.STATUS_FAILED, task_id=OTHER_PARENT_ID),
+                support.TASK_ID: support.task_record(ledger.STATUS_WAITING, after=OTHER_PARENT_ID),
             },
             0,
             id="waiting-on-failed-parent",
+        ),
+        pytest.param(
+            {
+                OTHER_PARENT_ID: support.task_record(
+                    ledger.STATUS_FINISHED, task_id=OTHER_PARENT_ID
+                ),
+                support.TASK_ID: support.task_record(ledger.STATUS_WAITING, after=OTHER_PARENT_ID),
+            },
+            1,
+            id="waiting-on-succeeded-parent",
         ),
     ],
 )
@@ -257,6 +269,7 @@ def test_launch_agent_runs_until_nothing_is_scheduled_or_running(
         scheduling.cancel_task(support.TASK_ID)
 
     monkeypatch.setattr(time, "sleep", cancel_while_sleeping)
+    monkeypatch.setattr(spawn, "start_task_executor", lambda *_: FinishedProcess())
 
     assert launch_agent.run_launch_agent() == 0
     assert len(sleep_lengths) == expected_sleep_count
@@ -518,15 +531,6 @@ def test_launch_agent_starts_due_tasks_while_pull_requests_refresh(ledger_path, 
     assert launch_agent.run_launch_agent() == 0
     processes[0].wait()
     assert was_started_during_refresh == [True]
-
-
-def test_waiting_dependent_of_succeeded_parent_keeps_launch_agent_running():
-    tasks: ledger.Tasks = {
-        support.PARENT_ID: support.task_record(ledger.STATUS_FINISHED, task_id=support.PARENT_ID),
-        support.CHILD_ID: support.task_record(ledger.STATUS_WAITING, after=support.PARENT_ID),
-    }
-
-    assert launch_agent.has_pending_tasks(tasks)
 
 
 def test_launch_agent_stores_pull_requests_of_finished_tasks(write_pull_requests, ledger_path):

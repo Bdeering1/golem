@@ -1,6 +1,6 @@
 import pytest
 
-from golem import cli, launch_agent, ledger, spawn, t3_code, thread_settling
+from golem import cli, launch_agent, ledger, spawn, t3_code
 from tests import support, t3_support
 
 PARENT_FINISHED_AT = "2030-01-01T10:00:00+00:00"
@@ -12,13 +12,11 @@ SETTLE_COMMAND = {
     "threadId": t3_support.CLAUDE_THREAD_ID,
     "expectedLatestRunId": RUN_BEFORE_FINISH["id"],
 }
-PENDING = {"t3_code_thread_settle": ledger.THREAD_SETTLE_PENDING}
 
 
 def write_chain(
     ledger_path,
     *,
-    parent_fields=None,
     child_status=ledger.STATUS_WAITING,
     waiting_task_parents=None,
     **child_fields: object,
@@ -29,7 +27,6 @@ def write_chain(
             task_id=support.PARENT_ID,
             t3_code_thread_id=t3_support.CLAUDE_THREAD_ID,
             finished_at=PARENT_FINISHED_AT,
-            **(parent_fields or {}),
         ),
         support.CHILD_ID: support.task_record(
             child_status, task_id=support.CHILD_ID, after=support.PARENT_ID, **child_fields
@@ -116,11 +113,11 @@ def test_finished_dependent_settles_parents_thread_once(server, ledger_path):
         ),
     ],
 )
-def test_picked_up_idle_thread_is_settled(server, ledger_path, runs, expected_command):
-    write_chain(ledger_path, parent_fields=PENDING)
+def test_idle_thread_is_settled(server, ledger_path, runs, expected_command):
+    write_chain(ledger_path)
     server.projections[0] = {"thread": {}, "runs": runs}
 
-    thread_settling.settle_pending_threads()
+    run_parent_executor()
 
     assert t3_support.sent_commands(server) == [expected_command]
 
@@ -140,13 +137,13 @@ def raise_missing_thread(*_: object):
 def test_unsettleable_thread_is_skipped_silently(
     server, ledger_path, monkeypatch, capsys, thread, runs
 ):
-    write_chain(ledger_path, parent_fields=PENDING)
+    write_chain(ledger_path)
     if thread is None:
         monkeypatch.setattr(t3_code, "thread_projection", raise_missing_thread)
     else:
         server.projections[0] = {"thread": thread, "runs": runs}
 
-    thread_settling.settle_pending_threads()
+    run_parent_executor()
 
     assert server.commands == []
     assert parent_settle_state(ledger_path) == ledger.THREAD_SETTLE_DONE
@@ -165,10 +162,10 @@ def test_unsettleable_thread_is_skipped_silently(
     ],
 )
 def test_rejected_settle_is_not_retried(server, ledger_path, capsys, message, expected_error):
-    write_chain(ledger_path, parent_fields=PENDING)
+    write_chain(ledger_path)
     server.command_exit = {"_tag": "Failure", "cause": {"error": {"message": message}}}
 
-    thread_settling.settle_pending_threads()
+    run_parent_executor()
 
     assert capsys.readouterr().err == expected_error
     assert parent_settle_state(ledger_path) == ledger.THREAD_SETTLE_DONE
@@ -205,10 +202,10 @@ def refuse_projection(_server, monkeypatch):
 def test_unreachable_t3_code_is_retried_by_launch_agent(
     server, ledger_path, monkeypatch, capsys, make_unreachable
 ):
-    write_chain(ledger_path, parent_fields=PENDING)
+    write_chain(ledger_path)
     with monkeypatch.context() as unreachable_patch:
         make_unreachable(server, unreachable_patch)
-        thread_settling.settle_pending_threads()
+        run_parent_executor()
 
     assert server.commands == []
     assert parent_settle_state(ledger_path) == ledger.THREAD_SETTLE_PENDING

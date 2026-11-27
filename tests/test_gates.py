@@ -90,7 +90,7 @@ def test_gate_of_task_resumed_after_usage_limit_sees_first_run_start(
 
 
 def test_failing_gate_stops_chain_with_its_stderr_as_reason(
-    installed_launch_agent, fake_commands, ledger_path, tmp_path
+    installed_launch_agent, fake_commands, ledger_path, monkeypatch, tmp_path
 ):
     support.write_claude_output(fake_commands, support.CLAUDE_RESULT)
     support.run_gated_chain(
@@ -106,8 +106,8 @@ def test_failing_gate_stops_chain_with_its_stderr_as_reason(
     assert [call[-2:] for call in support.logged_osascript_calls(fake_commands)] == [
         [f"golem: {support.PARENT_ID} blocked", support.GATE_STOP_REASON]
     ]
-    assert launch_agent.run_launch_agent_pass() == []
-    assert not launch_agent.has_pending_tasks(tasks)
+    monkeypatch.setattr(time, "sleep", lambda _seconds: pytest.fail("agent kept polling"))
+    assert launch_agent.run_launch_agent() == 0
 
 
 def test_executor_resuming_gated_task_runs_gate_before_follow_up(
@@ -133,26 +133,31 @@ def test_gate_that_cannot_run_stops_chain_with_error_as_reason(
     assert tasks[support.CHILD_ID]["status"] == ledger.STATUS_WAITING
 
 
-def test_passing_gate_does_not_wait_for_its_background_processes(ledger_path, monkeypatch):
+def test_passing_gate_does_not_wait_for_its_background_processes(
+    installed_launch_agent, ledger_path, monkeypatch
+):
     monkeypatch.setattr(gates, "GATE_TIMEOUT_SECONDS", 0.5)
-    support.write_task(ledger_path, ledger.STATUS_FINISHED, gate="sleep 2 & exit 0")
+    support.write_parent_with_waiting_child(ledger_path, gate="sleep 2 & exit 0")
 
-    assert gates.gate_stop_reason(support.TASK_ID, support.read_task(ledger_path)) is None
+    assert cli.main(["_execute", support.PARENT_ID, f"{support.PARENT_ID}-session"]) == 0
+
+    assert support.read_task(ledger_path, support.CHILD_ID)["status"] == ledger.STATUS_FINISHED
 
 
 def test_timed_out_gate_stops_chain_and_kills_processes_it_started(
-    ledger_path, monkeypatch, tmp_path
+    installed_launch_agent, ledger_path, monkeypatch, tmp_path
 ):
     monkeypatch.setattr(gates, "GATE_TIMEOUT_SECONDS", 0.2)
     pid_path = tmp_path / "gate-child-pid"
-    support.write_task(
-        ledger_path, ledger.STATUS_FINISHED, gate=f"sleep 30 & echo $! > {pid_path}; wait"
+    support.write_parent_with_waiting_child(
+        ledger_path, gate=f"sleep 30 & echo $! > {pid_path}; wait"
     )
 
-    assert (
-        gates.gate_stop_reason(support.TASK_ID, support.read_task(ledger_path))
-        == "gate timed out after 0.2s"
-    )
+    assert cli.main(["_execute", support.PARENT_ID, f"{support.PARENT_ID}-session"]) == 0
+
+    tasks = support.read_tasks(ledger_path)
+    assert tasks[support.PARENT_ID]["gate_stop_reason"] == "gate timed out after 0.2s"
+    assert tasks[support.CHILD_ID]["status"] == ledger.STATUS_WAITING
 
     child_pid = int(pid_path.read_text(encoding="utf-8"))
     deadline = time.monotonic() + 5
