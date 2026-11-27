@@ -32,6 +32,8 @@ pub struct Golem {
     pub executable: Option<PathBuf>,
     pub path_variable: String,
     pub terminal_app: String,
+    /// Why `board.toml` was ignored, if it couldn't be parsed.
+    pub config_error: Option<String>,
 }
 
 pub struct CommandOutcome {
@@ -55,14 +57,24 @@ fn config_path() -> PathBuf {
     base.join("golem").join(CONFIG_FILE_NAME)
 }
 
-fn configured_terminal() -> String {
-    let config: Config = std::fs::read_to_string(config_path())
-        .ok()
-        .and_then(|text| toml::from_str(&text).ok())
-        .unwrap_or_default();
-    config
-        .terminal
-        .unwrap_or_else(|| DEFAULT_TERMINAL.to_string())
+/// The terminal app for pickups, and why the config was ignored if it couldn't be parsed.
+fn configured_terminal() -> (String, Option<String>) {
+    let text = std::fs::read_to_string(config_path()).unwrap_or_default();
+    match toml::from_str::<Config>(&text) {
+        Ok(config) => (
+            config
+                .terminal
+                .unwrap_or_else(|| DEFAULT_TERMINAL.to_string()),
+            None,
+        ),
+        Err(error) => (
+            DEFAULT_TERMINAL.to_string(),
+            Some(format!(
+                "Can't read {CONFIG_FILE_NAME}, using {DEFAULT_TERMINAL}: {}",
+                error.message()
+            )),
+        ),
+    }
 }
 
 fn scratch_output_path() -> PathBuf {
@@ -169,10 +181,12 @@ impl Golem {
         let executable = Some(PathBuf::from(&reported))
             .filter(|path| path.is_absolute() && path.is_file())
             .or_else(|| fallback_executable(&path_variable));
+        let (terminal_app, config_error) = configured_terminal();
         Golem {
             executable,
             path_variable,
-            terminal_app: configured_terminal(),
+            terminal_app,
+            config_error,
         }
     }
 

@@ -406,7 +406,12 @@ impl BoardView {
                     .background_executor()
                     .spawn(async { Golem::discover() })
                     .await;
-                let _ = this.update(cx, |this, _| this.golem = Some(Arc::new(golem)));
+                let _ = this.update(cx, |this, cx| {
+                    if let Some(error) = golem.config_error.clone() {
+                        this.show_message(error, true, None, None, cx);
+                    }
+                    this.golem = Some(Arc::new(golem));
+                });
             }),
         ];
         let mut view = BoardView {
@@ -1358,11 +1363,13 @@ impl BoardView {
                     (true, [(task_id, action)]) => {
                         this.note_failure(task_id, *action, outcome.message, cx)
                     }
-                    // The short outcome names its task once the selection has moved on.
+                    // The short outcome names its task once the selection has moved on, unless
+                    // golem's own message already names it.
                     (false, [(task_id, _)])
-                        if this
-                            .selected_row()
-                            .is_none_or(|row| row.task_id != *task_id) =>
+                        if !outcome.message.contains(task_id.as_str())
+                            && this
+                                .selected_row()
+                                .is_none_or(|row| row.task_id != *task_id) =>
                     {
                         let row = this.row_for_task(task_id);
                         let name = row.map_or(task_id.as_str(), board::row_title).to_string();
