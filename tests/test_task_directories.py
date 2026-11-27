@@ -260,10 +260,12 @@ def test_created_worktree_copies_ignored_files_matching_worktreeinclude(
 ):
     pending_worktree = git_repository / ".claude" / "worktrees" / "pending"
     (git_repository / ".gitignore").write_text(gitignore, encoding="utf-8")
-    (git_repository / "secret.txt").write_text("SECRET=1\n", encoding="utf-8")
+    secret_path = git_repository / "config" / "secret.txt"
+    secret_path.parent.mkdir()
+    secret_path.write_text("SECRET=1\n", encoding="utf-8")
     if include_patterns is not None:
         (git_repository / ".worktreeinclude").write_text(include_patterns, encoding="utf-8")
-    monkeypatch.chdir(git_repository)
+    monkeypatch.chdir(secret_path.parent)
     support.write_task(
         ledger_path,
         ledger.STATUS_FAILED,
@@ -275,7 +277,7 @@ def test_created_worktree_copies_ignored_files_matching_worktreeinclude(
     cli.main(["retry", support.TASK_ID, "--now"])
     cli.main(["_execute", support.TASK_ID, support.read_task(ledger_path)["session_id"]])
 
-    assert (pending_worktree / "secret.txt").exists() is is_copied
+    assert (pending_worktree / "config" / "secret.txt").exists() is is_copied
 
 
 def test_claim_records_golem_worktree_resource_and_dependent_reuses_it(

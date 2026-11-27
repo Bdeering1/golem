@@ -180,17 +180,12 @@ def worktree_task_ids(tasks: ledger.Tasks, worktree: str) -> list[str]:
     return [task_id for task_id, task in tasks.items() if task_uses_worktree(tasks, task, worktree)]
 
 
-def ignored_untracked_files(directory: str, *exclude_options: str) -> set[str]:
-    result = git.run_git(directory, "ls-files", "--others", "--ignored", *exclude_options, "-z")
-    return set(result.stdout.split("\0")) - {""}
-
-
 def copy_worktree_include_files(cwd: str, worktree: str) -> None:
     toplevel = git.run_git(cwd, "rev-parse", "--show-toplevel").stdout.strip()
     if not Path(toplevel, WORKTREE_INCLUDE_FILE).is_file():
         return
-    ignored = ignored_untracked_files(toplevel, "--exclude-standard")
-    included = ignored_untracked_files(toplevel, f"--exclude-from={WORKTREE_INCLUDE_FILE}")
+    ignored = git.excluded_untracked_files(toplevel, "--exclude-standard")
+    included = git.excluded_untracked_files(toplevel, f"--exclude-from={WORKTREE_INCLUDE_FILE}")
     for relative_path in sorted(ignored & included):
         source = Path(toplevel, relative_path)
         if source.is_symlink():
@@ -231,8 +226,8 @@ def create_worktree(task_id: str, task: ledger.Task) -> str | None:
         separator = "\n" if exclude_text and not exclude_text.endswith("\n") else ""
         with exclude_path.open("a", encoding="utf-8") as exclude_file:
             exclude_file.write(f"{separator}.claude/worktrees/\n")
-    copy_worktree_include_files(cwd, worktree)
     record_created_worktree_owner(task_id, task)
+    copy_worktree_include_files(cwd, worktree)
     return None
 
 

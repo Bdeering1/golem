@@ -36,6 +36,11 @@ def git_has_head(directory: str) -> bool:
     return run_git(directory, "rev-parse", "--verify", "HEAD").returncode == 0
 
 
+def excluded_untracked_files(directory: str, *exclude_options: str) -> set[str]:
+    result = run_git(directory, "ls-files", "--others", "--ignored", *exclude_options, "-z")
+    return set(result.stdout.split("\0")) - {""}
+
+
 def fetch_stale_default_branch(cwd: str) -> None:
     default_branch = run_git(cwd, "symbolic-ref", "--quiet", "--short", ORIGIN_HEAD)
     fetch_head = run_git(cwd, "rev-parse", "--path-format=absolute", "--git-path", "FETCH_HEAD")
