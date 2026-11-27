@@ -517,12 +517,9 @@ impl BoardView {
                 .filter(|row| row.column == column)
                 .count()
         };
-        // The menu bar shows what Next counts, so it drops to zero once nothing needs you.
-        let needing_count = self.needing_count();
-        let title = (needing_count > 0).then(|| format!(" {needing_count}"));
-        self.tray_icon.set_title(title);
         let tooltip = format!(
-            "golem: {needing_count} need you; {} queued, {} running, {} to review",
+            "golem: {} need you; {} queued, {} running, {} to review",
+            self.needing_count(),
             count(Column::Queued),
             count(Column::Running),
             count(Column::Review)
