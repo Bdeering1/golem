@@ -394,12 +394,7 @@ def test_delete_preserves_detached_commit(owned_worktree, reference, is_removed)
     support.git_output(worktree, "add", "commit")
     support.git_output(
         worktree,
-        "-c",
-        "user.email=test@example.com",
-        "-c",
-        "user.name=Test",
         "commit",
-        "--no-gpg-sign",
         "-qm",
         "unpublished",
     )
