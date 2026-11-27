@@ -14,7 +14,7 @@ Then build and install the app:
 
 ```sh
 ./build-app.sh
-cp -R "target/release/Golem Board.app" /Applications
+cp -R "target/release/Golem.app" /Applications
 ```
 
 Click the menu bar icon or press ctrl-option-G to open the board, and press `?` to list the
